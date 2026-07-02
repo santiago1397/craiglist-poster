@@ -17,6 +17,7 @@ from .config import ACCOUNTS_BY_NAME, EXCEL_PATH, LOGS_DIR
 from .content import generate_ad
 from .ghost_check import check_all_recent
 from .poster import launch_account, post_ad
+from . import stats as stats_mod
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -122,6 +123,22 @@ def status():
         reasons = "; ".join(r["reasons"]) if r["reasons"] else "ready"
         typer.echo(f"  {mark} {r['account']:10s}  {reasons}")
 
+    health = stats_mod.health_report()
+    if health:
+        typer.echo("")
+        typer.echo("Stats sync health:")
+        for name, h in health.items():
+            mark = "[OK]" if h.get("ok") else "[!!]"
+            when = h.get("last_run_ts_utc", "?")
+            if h.get("ok"):
+                typer.echo(f"  {mark} {name:10s}  last run {when}")
+            else:
+                err = h.get("error_type") or "unknown"
+                msg = h.get("message") or ""
+                typer.echo(f"  {mark} {name:10s}  {err}: {msg[:60]}  (last {when})")
+                if err == "login_expired":
+                    typer.echo(f"       → run:  uv run cl init-account {name}")
+
 
 @app.command("post")
 def post(
@@ -150,7 +167,7 @@ def post(
             typer.echo("No eligible account right now. Run `cl status` to see why.")
             raise typer.Exit(0)
 
-    ad = generate_ad(acct.photo_dir)
+    ad = generate_ad(acct)
     logger.info(f"Generated ad: {ad.title}  ({len(ad.photos)} photos)")
     url = post_ad(acct, ad, headless=headless, dry_run=dry_run)
     if url and not dry_run:
@@ -224,6 +241,90 @@ def posts(
         typer.echo(f"           {url}")
     typer.echo("")
     typer.echo("Tip: run `cl check-ghosts --proxy ...` to refresh ghost status from a different network.")
+
+
+@app.command("stats-sync")
+def stats_sync(
+    account: str = typer.Option(None, help="Sync only this account (default: all)"),
+    headless: bool = typer.Option(False, help="Run browser headless"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Scrape today's stats snapshot for every account's active postings."""
+    _setup_logging(verbose=verbose)
+    summary = stats_mod.sync_all(headless=headless, only_account=account)
+    typer.echo(f"Snapshot date: {summary['snapshot_date']}")
+    for name, info in summary["accounts"].items():
+        if info.get("ok"):
+            typer.echo(f"  [OK] {name:10s}  rows={info['rows']}  frozen={info['frozen']}")
+        else:
+            typer.echo(f"  [--] {name:10s}  ERROR: {info.get('error')}")
+
+
+@app.command("stats-seed")
+def stats_seed():
+    """One-time: import historical posts from logs/state.json into the stats DB."""
+    _setup_logging()
+    result = stats_mod.seed_from_state_json()
+    typer.echo(f"Imported: {result['imported']}   Skipped: {result['skipped']}")
+    if result.get("reason"):
+        typer.echo(f"  ({result['reason']})")
+    for ex in result.get("skipped_examples") or []:
+        typer.echo(f"  skipped url: {ex}")
+
+
+@app.command("stats")
+def stats(
+    day: bool = typer.Option(False, "--day", help="Show day-over-day deltas (default)"),
+    week: bool = typer.Option(False, "--week", help="Show week-over-week deltas"),
+    month: bool = typer.Option(False, "--month", help="Show month-over-month deltas"),
+    account: str = typer.Option(None, help="Filter to one account"),
+    post: str = typer.Option(None, "--post", help="Show full history for one post_id"),
+    since: str = typer.Option(None, help="Only include snapshots on/after YYYY-MM-DD"),
+    export: Path = typer.Option(None, help="Write full snapshots to this .xlsx path"),
+):
+    """View per-post stats with deltas, or export the raw data to xlsx."""
+    _setup_logging()
+
+    if export:
+        n = stats_mod.export_xlsx(export, since=since)
+        typer.echo(f"Wrote {n} snapshot rows → {export}")
+        return
+
+    if post:
+        rows = stats_mod.history_for_post(post)
+        if not rows:
+            typer.echo(f"No snapshots for post_id={post}")
+            return
+        typer.echo(f"History for post {post}:")
+        typer.echo(f"  {'date':12s}  {'status':18s}  {'impr':>7s}  {'views':>6s}  {'shr':>4s}  {'favs':>5s}")
+        for r in rows:
+            typer.echo(
+                f"  {r['snapshot_date']:12s}  {str(r['status'])[:18]:18s}  "
+                f"{str(r['impressions'] if r['impressions'] is not None else '-'):>7s}  "
+                f"{str(r['views'] if r['views'] is not None else '-'):>6s}  "
+                f"{str(r['shares'] if r['shares'] is not None else '-'):>4s}  "
+                f"{str(r['favorites'] if r['favorites'] is not None else '-'):>5s}"
+            )
+        return
+
+    period = "week" if week else "month" if month else "day"
+    rows = stats_mod.rollup(period, account=account, since=since)
+    if not rows:
+        typer.echo("No data. Run `cl stats-sync` first, or wait for the daily task to fire.")
+        return
+    label = {"day": "vs yesterday", "week": "vs 7d ago", "month": "vs 30d ago"}[period]
+    typer.echo(f"Rollup ({period} — deltas {label}):")
+    typer.echo(f"  {'account':8s}  {'post_id':11s}  {'impr':>6s}  {'Δi':>5s}  {'views':>5s}  {'Δv':>4s}  title")
+    for r in rows:
+        title = (r.get("title") or "")[:50]
+        typer.echo(
+            f"  {r['account']:8s}  {r['post_id']:11s}  "
+            f"{str(r['impressions'] if r['impressions'] is not None else '-'):>6s}  "
+            f"{r['d_impressions']:>+5d}  "
+            f"{str(r['views'] if r['views'] is not None else '-'):>5s}  "
+            f"{r['d_views']:>+4d}  {title}"
+        )
+        typer.echo(f"           {r['url']}")
 
 
 @app.command("tail")

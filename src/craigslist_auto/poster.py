@@ -10,6 +10,7 @@ from patchright.sync_api import BrowserContext, Page, sync_playwright
 
 from .config import CL_SITE, LOGS_DIR, Account
 from .content import Ad, mark_content_used, mark_photos_used
+from .covers import is_cover_path, mark_cover_used
 from .human import human_click, human_type, read_pause, scroll_a_bit, sleep_jitter
 
 FAILURES_DIR = LOGS_DIR / "failures"
@@ -203,13 +204,18 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
 
             step = "photo_upload"
             logger.debug(f"step: {step} ({len(ad.photos)} photos)")
-            page.wait_for_selector("input[type='file']", timeout=30_000)
-            file_input = page.locator("input[type='file']")
-            for i, photo in enumerate(ad.photos, 1):
-                logger.debug(f"  uploading {i}/{len(ad.photos)}: {photo.name}")
-                file_input.set_input_files(str(photo))
-                sleep_jitter(2.5, 0.6)
-            sleep_jitter(3.0)
+            if ad.photos:
+                page.wait_for_selector("input[type='file']", timeout=30_000)
+                file_input = page.locator("input[type='file']")
+                for i, photo in enumerate(ad.photos, 1):
+                    logger.debug(f"  uploading {i}/{len(ad.photos)}: {photo.name}")
+                    file_input.set_input_files(str(photo))
+                    if is_cover_path(photo):
+                        # CL fingerprints on upload, so burn the cover as soon
+                        # as it hits their servers — even if the post fails.
+                        mark_cover_used(photo)
+                    sleep_jitter(2.5, 0.6)
+                sleep_jitter(3.0)
             _click_text(page, "done with images")
 
             step = "preview"

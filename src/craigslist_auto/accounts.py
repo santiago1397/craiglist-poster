@@ -10,6 +10,7 @@ from .config import (
     MAX_POSTS_PER_ACCOUNT_PER_WEEK,
     MAX_POSTS_PER_DAY_TOTAL,
     MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT,
+    POST_WEEKDAYS_ONLY,
     POST_WINDOW_END_HOUR,
     POST_WINDOW_START_HOUR,
     STATE_FILE,
@@ -83,11 +84,21 @@ def _in_posting_window() -> bool:
     return POST_WINDOW_START_HOUR <= h < POST_WINDOW_END_HOUR
 
 
+def _is_allowed_weekday() -> bool:
+    # Monday=0 .. Sunday=6
+    if not POST_WEEKDAYS_ONLY:
+        return True
+    return datetime.now().weekday() < 5
+
+
 def eligibility_report() -> list[dict]:
     """Diagnostic — who can post right now and why not."""
     out = []
+    weekend_block = not _is_allowed_weekday()
     for a in ACCOUNTS:
         reasons = []
+        if weekend_block:
+            reasons.append("weekend: posting restricted to Mon-Fri")
         last = _last_post_for(a.name)
         if last is not None:
             hrs = (_now() - last).total_seconds() / 3600
@@ -105,6 +116,8 @@ def eligibility_report() -> list[dict]:
 def pick_next_account(machine_name: str) -> Account | None:
     """Return the account that should post next from this machine, or None."""
     if not _in_posting_window():
+        return None
+    if not _is_allowed_weekday():
         return None
     if _posts_in_last_24h_total() >= MAX_POSTS_PER_DAY_TOTAL:
         return None

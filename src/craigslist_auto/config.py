@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
 PHOTOS_DIR = DATA_DIR / "photos"
+COVERS_DIR = DATA_DIR / "covers"
 EXCEL_PATH = DATA_DIR / "ads.xlsx"
 PROFILES_DIR = ROOT / "profiles"
 LOGS_DIR = ROOT / "logs"
@@ -31,6 +32,11 @@ MAX_POSTS_PER_ACCOUNT_PER_WEEK = 7
 # Posting window (local time, 24h). Roofing buyers browse during business hours.
 POST_WINDOW_START_HOUR = 8
 POST_WINDOW_END_HOUR = 19
+
+# Restrict posting to Mon-Fri (local time). Roofing buyers are B2C but lead
+# follow-up happens during the business week; weekend posts also stand out as
+# automation when the account otherwise only posts on weekdays.
+POST_WEEKDAYS_ONLY = True
 
 
 @dataclass(frozen=True)

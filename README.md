@@ -27,6 +27,9 @@ Then:
 2. **Drop unique photos** in `data/photos/craigs1/`, `craigs2/`, `craigs3/`.
    No overlap — Craigslist detects reused images.
 
+   **Cover images** (optional but recommended): drop edited "thumbnail" images
+   in `data/covers/unclaimed/`. See [Cover images](#cover-images) below.
+
 3. **Bind accounts to machines.** Edit `src/craigslist_auto/config.py` and set
    each account's `allowed_machine` to the hostname of the PC it should run on.
    Find your hostname with `hostname` in cmd. Override with `CL_MACHINE` env var
@@ -41,8 +44,9 @@ Then:
    The login persists in `profiles/<account>/`. Don't delete that folder.
 
 > **Note on OneDrive:** if the project lives in OneDrive, exclude `profiles/`
-> from sync or move the project out. OneDrive will corrupt Chrome's profile
-> lock files.
+> and `data/covers/` from sync or move the project out. OneDrive will corrupt
+> Chrome's profile lock files, and the cover-claim `shutil.move` calls will
+> race OneDrive's sync process.
 
 ---
 
@@ -67,9 +71,10 @@ All commands run via `uv run cl <command>`.
 An account is eligible only if **all** of these pass:
 
 - Current local time is between **8 AM and 7 PM**.
-- Fewer than **2 posts in the last 24h across all accounts**.
-- This account has fewer than **3 posts in the last 7 days**.
-- At least **48 hours** since this account's last post.
+- Current day is **Monday through Friday** (weekend posting is disabled; toggle `POST_WEEKDAYS_ONLY` in `config.py`).
+- Fewer than **3 posts in the last 24h across all accounts**.
+- This account has fewer than **7 posts in the last 7 days**.
+- At least **20 hours** since this account's last post.
 - The account's `allowed_machine` matches the current machine.
 
 Tune these in `src/craigslist_auto/config.py`.
@@ -78,8 +83,9 @@ Tune these in `src/craigslist_auto/config.py`.
 
 ## Run it automatically every day
 
-A Scheduled Task fires `cl post` at **8am, 11am, 2pm, 5pm**. Most fires no-op
-because of the cooldowns — that's intentional. The script self-throttles.
+A Scheduled Task fires `cl post` at **9am, 1pm, 5pm** on **weekdays (Mon-Fri)**.
+Most fires no-op because of the cooldowns — that's intentional. The script
+self-throttles.
 
 ### Start the background task
 
@@ -175,12 +181,48 @@ the direct URL loads but the ad doesn't show up in search → it's ghosted.
 
 ---
 
+## Cover images
+
+Each post's first image is what shows up as the Craigslist thumbnail — the
+highest-leverage visual on the ad. This project treats covers as a separate,
+one-shot pool of edited images kept isolated from the regular photo rotation.
+
+### How the pool works
+
+- Drop edited cover images (typically with a call-to-action overlay) into
+  `data/covers/unclaimed/`.
+- The first time an account posts and needs a cover, one is randomly picked
+  and physically **moved** to `data/covers/<account>/` (first-use claim — that
+  cover now belongs to that account forever).
+- On upload to Craigslist, the cover moves to `data/covers/<account>/used/`
+  and is never used again.
+
+### Per-post logic
+
+- Each post gets **0 to 5 images** — count is uniformly random, unless the
+  Excel row's `photos_count` cell has a value (which is used as-is, clamped
+  to 0-5).
+- If the count is ≥ 1 and a cover is available, the cover fills slot 1 and
+  the rest come from `data/photos/<account>/` (30-day cooldown, unchanged).
+- If no cover is available for the account, `run.log` gets a WARN and all
+  slots come from the regular pool.
+- If the count is 0, no photos are uploaded.
+
+### Dry-run behavior
+
+`cl post --dry-run` **does** upload photos to CL (that's what dry-run tests)
+before bailing at the publish step — so **dry-run consumes covers**. If you
+dry-run often, keep the unclaimed pool deep.
+
 ## Where things live
 
 | Path | What |
 |---|---|
 | `data/ads.xlsx` | Your ad rows. |
-| `data/photos/<account>/` | Unique photos per account. |
+| `data/photos/<account>/` | Unique photos per account (regular pool, 30-day cooldown). |
+| `data/covers/unclaimed/` | Edited cover images awaiting first-use claim. |
+| `data/covers/<account>/` | Covers claimed to that account (not yet uploaded). |
+| `data/covers/<account>/used/` | Covers already uploaded — kept forever for audit. |
 | `profiles/<account>/` | Persistent Chrome profile per account. Don't delete. |
 | `data/state.json` | Post history (used for cooldowns + ghost checks). |
 | `logs/run.log` | Rotating log of every run. |

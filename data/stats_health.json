@@ -1,0 +1,14 @@
+{
+  "craigs1": {
+    "ok": false,
+    "last_run_ts_utc": "2026-07-01T21:29:41.651167+00:00",
+    "error_type": "login_expired",
+    "message": "account craigs1 is not logged in (url=https://accounts.craigslist.org/login?rp=%2Flogin%2Fhome&rt=L)"
+  },
+  "craigs2": {
+    "ok": false,
+    "last_run_ts_utc": "2026-07-01T21:29:48.255112+00:00",
+    "error_type": "login_expired",
+    "message": "account craigs2 is not logged in (url=https://accounts.craigslist.org/login?rp=%2Flogin%2Fhome&rt=L)"
+  }
+}

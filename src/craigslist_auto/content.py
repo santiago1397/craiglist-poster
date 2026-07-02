@@ -8,9 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from loguru import logger
 from openpyxl import load_workbook
 
-from .config import EXCEL_PATH, LOGS_DIR, PHOTOS_DIR
+from .config import EXCEL_PATH, LOGS_DIR, PHOTOS_DIR, Account
+from .covers import pick_cover
 
 PHOTO_REUSE_LOG = LOGS_DIR / "photo_usage.json"
 CONTENT_HASH_LOG = LOGS_DIR / "content_hashes.json"
@@ -134,6 +136,8 @@ def _normalize_header(h) -> str:
 
 
 def _select_photos(account_photo_dir: Path, count: int, rng: random.Random) -> list[Path]:
+    if count <= 0:
+        return []
     usage = _load_json(PHOTO_REUSE_LOG, {})
     now = datetime.now(timezone.utc)
     candidates = sorted(
@@ -190,7 +194,18 @@ def _recent_hashes(days: int = 60) -> set[str]:
     return out
 
 
-def generate_ad(account_photo_dir: Path, seed: int | None = None) -> Ad:
+def _roll_photo_count(row: dict, rng: random.Random) -> int:
+    """Excel value if present (clamped 0-5), else uniform random 0-5."""
+    raw = row.get("photos_count")
+    if raw in (None, ""):
+        return rng.randint(0, 5)
+    try:
+        return max(0, min(5, int(raw)))
+    except (TypeError, ValueError):
+        return rng.randint(0, 5)
+
+
+def generate_ad(account: Account, seed: int | None = None) -> Ad:
     """Pick a random row, expand spintax + tokens, pick photos. Avoid recent duplicates."""
     rng = random.Random(seed)
     rows = _load_excel_rows()
@@ -231,6 +246,17 @@ def generate_ad(account_photo_dir: Path, seed: int | None = None) -> Ad:
         # Couldn't find unique content; just use the last attempt
         pass
 
-    photo_count = row.get("photos_count") or 1
-    ad.photos = _select_photos(account_photo_dir, int(photo_count), rng)
+    photo_count = _roll_photo_count(row, rng)
+    if photo_count == 0:
+        ad.photos = []
+    else:
+        cover = pick_cover(account, rng)
+        if cover is None:
+            logger.warning(
+                f"[{account.name}] no cover available — falling back to "
+                f"{photo_count} regular photo(s) with no dedicated cover"
+            )
+            ad.photos = _select_photos(account.photo_dir, photo_count, rng)
+        else:
+            ad.photos = [cover] + _select_photos(account.photo_dir, photo_count - 1, rng)
     return ad

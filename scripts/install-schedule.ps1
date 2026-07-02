@@ -1,6 +1,6 @@
 # Installs a Windows Scheduled Task that runs `cl post` every 4 hours
-# between 9:00 AM and 5:00 PM, every day. The Python script's own cooldowns
-# and posting window handle skipping — fire-and-forget.
+# between 9:00 AM and 5:00 PM, Monday through Friday. The Python script's own
+# cooldowns, weekday gate, and posting window handle skipping — fire-and-forget.
 #
 # Usage:  Right-click → Run with PowerShell
 #         (or: powershell -ExecutionPolicy Bypass -File install-schedule.ps1)
@@ -32,11 +32,13 @@ $action = New-ScheduledTaskAction `
     -Argument "run cl post" `
     -WorkingDirectory $projectRoot
 
-# Daily trigger starting at 9:00 AM, repeating every 4 hours for 8 hours
-# → fires at 9:00 AM, 1:00 PM, 5:00 PM (3 fires).
+# Weekly trigger Mon-Fri at 9:00 AM, repeating every 4 hours for 8 hours
+# → fires at 9:00 AM, 1:00 PM, 5:00 PM on weekdays only (3 fires/day).
 # One post per fire, one per account per day.
 $startTime = (Get-Date).Date.AddHours(9)
-$trigger = New-ScheduledTaskTrigger -Daily -At $startTime
+$trigger = New-ScheduledTaskTrigger -Weekly `
+    -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday `
+    -At $startTime
 $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $startTime `
     -RepetitionInterval (New-TimeSpan -Hours 4) `
     -RepetitionDuration (New-TimeSpan -Hours 8)).Repetition
@@ -60,7 +62,7 @@ Register-ScheduledTask `
 
 Write-Host ""
 Write-Host "Task '$TaskName' installed." -ForegroundColor Green
-Write-Host "  Fires daily at: 9:00 AM, 1:00 PM, 5:00 PM"
+Write-Host "  Fires Mon-Fri at: 9:00 AM, 1:00 PM, 5:00 PM"
 Write-Host "  Working dir:    $projectRoot"
 Write-Host ""
 Write-Host "To stop:    scripts\uninstall-schedule.ps1"
