@@ -203,19 +203,68 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             _continue(page, optional=True)
 
             step = "photo_upload"
-            logger.debug(f"step: {step} ({len(ad.photos)} photos)")
+            logger.info(f"[{account.name}] photo_upload: {len(ad.photos)} file(s) queued")
+            for idx, photo in enumerate(ad.photos):
+                tag = "COVER" if is_cover_path(photo) else "photo"
+                size_kb = photo.stat().st_size / 1024 if photo.exists() else -1
+                logger.info(
+                    f"  slot {idx + 1}: [{tag}] {photo.name}  ({size_kb:.0f} KB)  path={photo}"
+                )
             if ad.photos:
                 page.wait_for_selector("input[type='file']", timeout=30_000)
                 file_input = page.locator("input[type='file']")
                 for i, photo in enumerate(ad.photos, 1):
-                    logger.debug(f"  uploading {i}/{len(ad.photos)}: {photo.name}")
+                    is_cover = is_cover_path(photo)
+                    tag = "COVER" if is_cover else "photo"
+                    before = _count_uploaded_thumbs(page)
+                    t0 = datetime.now(timezone.utc)
+                    logger.info(
+                        f"  [{i}/{len(ad.photos)}] uploading [{tag}] {photo.name}  "
+                        f"(thumbs before: {before})"
+                    )
                     file_input.set_input_files(str(photo))
-                    if is_cover_path(photo):
-                        # CL fingerprints on upload, so burn the cover as soon
-                        # as it hits their servers — even if the post fails.
-                        mark_cover_used(photo)
-                    sleep_jitter(2.5, 0.6)
-                sleep_jitter(3.0)
+                    landed = _wait_for_thumb_increment(page, expected=before + 1, timeout_s=45)
+                    elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
+                    after = _count_uploaded_thumbs(page)
+                    if landed:
+                        logger.info(
+                            f"    ✓ landed in {elapsed:.1f}s  (thumbs now: {after})"
+                        )
+                    else:
+                        logger.warning(
+                            f"    ✗ did NOT observe a new thumbnail after {elapsed:.1f}s  "
+                            f"(thumbs: {before} → {after}).  Either the upload failed OR "
+                            f"the thumbnail selector doesn't match CL's current DOM."
+                        )
+                        # Dump the page so we can pick the right selector.
+                        _dump_photo_page(page, account.name, f"slot{i}_no_thumb")
+                    if is_cover:
+                        # Only burn the cover once we've actually seen it land on
+                        # CL's servers. Prior behavior burned it after set_input_files
+                        # returned (which only queues the upload) — that's why covers
+                        # were being consumed even when they raced later uploads and
+                        # lost the thumbnail slot.
+                        if landed:
+                            mark_cover_used(photo)
+                            logger.info(f"    cover consumed → moved to used/")
+                        else:
+                            logger.error(
+                                f"    KEEPING cover claimed (not marking used): "
+                                f"upload did not confirm. File: {photo.name}"
+                            )
+                    sleep_jitter(0.8, 0.3)
+                final_thumbs = _count_uploaded_thumbs(page)
+                logger.info(
+                    f"[{account.name}] photo_upload done: expected {len(ad.photos)} "
+                    f"thumbnail(s), CL shows {final_thumbs}"
+                )
+                if final_thumbs != len(ad.photos):
+                    logger.warning(
+                        f"  thumbnail count mismatch — CL may have rejected an upload "
+                        f"or the count selector missed some. Inspect the page."
+                    )
+                _log_thumbnail_order(page)
+                sleep_jitter(1.5)
             _click_text(page, "done with images")
 
             step = "preview"
@@ -252,6 +301,105 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
         except Exception as e:
             _dump_failure(page, account.name, step, e)
             raise
+
+
+# ─── Photo upload helpers ─────────────────────────────────────────────────────
+
+# CL's photo widget varies over time. We try several signals and take the max:
+#   - <img> served from CL's image hosts
+#   - <img> with a data: URL (client-side preview before upload completes)
+#   - <img> or <li> inside common photo-list containers
+# Taking the max means we err on the side of "new thumbnail appeared" even if
+# one selector misses.
+_UPLOADED_THUMB_SELECTORS = [
+    "img[src*='images.craigslist.org']",
+    "img[src*='craigslist-images']",
+    "img[src*='post.craigslist']",
+    "img[src^='data:image']",
+    "img[src^='blob:']",
+    "#images img",
+    ".images img",
+    "ul.image_list img",
+    "ul.image_list li",
+    ".uploaded img",
+    ".upload_item",
+    "[class*='thumb'] img",
+]
+
+
+def _count_uploaded_thumbs(page: Page) -> int:
+    best = 0
+    for sel in _UPLOADED_THUMB_SELECTORS:
+        try:
+            n = page.locator(sel).count()
+            if n > best:
+                best = n
+        except Exception:
+            continue
+    return best
+
+
+def _dump_photo_page(page: Page, account_name: str, label: str) -> None:
+    """Save HTML + screenshot of the current photo-upload page for inspection."""
+    from pathlib import Path
+    FAILURES_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stem = FAILURES_DIR / f"{ts}_{account_name}_photo_{label}"
+    try:
+        page.screenshot(path=str(stem) + ".png", full_page=True)
+    except Exception as e:
+        logger.warning(f"    screenshot dump failed: {e}")
+    try:
+        Path(str(stem) + ".html").write_text(page.content(), encoding="utf-8")
+        logger.info(f"    dumped photo page → {stem}.png / .html")
+    except Exception as e:
+        logger.warning(f"    html dump failed: {e}")
+
+
+def _wait_for_thumb_increment(page: Page, *, expected: int, timeout_s: float = 45) -> bool:
+    """
+    Poll until CL renders a new uploaded thumbnail (or timeout).
+    Returns True if the count reached `expected`, False on timeout.
+    Blocking here is intentional — starting the next set_input_files before
+    the current upload finishes lets CL reorder thumbnails by completion time,
+    which is how the cover ends up demoted out of slot 1.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    last_seen = -1
+    while time.monotonic() < deadline:
+        n = _count_uploaded_thumbs(page)
+        if n != last_seen:
+            logger.debug(f"    waiting for thumb: have {n}, need {expected}")
+            last_seen = n
+        if n >= expected:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _log_thumbnail_order(page: Page) -> None:
+    """Dump the order + src of each thumbnail CL is currently showing."""
+    # Try each selector; use the one that returns the most matches (same rule
+    # as _count_uploaded_thumbs so the "order" view lines up with the count).
+    srcs: list[str] = []
+    for sel in _UPLOADED_THUMB_SELECTORS:
+        try:
+            found = page.locator(sel).evaluate_all(
+                "els => els.map(e => e.getAttribute('src') || e.getAttribute('data-src') || '(no src)')"
+            )
+        except Exception:
+            continue
+        if len(found) > len(srcs):
+            srcs = found
+    if not srcs:
+        logger.info("  thumbnail order: (none visible)")
+        return
+    logger.info(f"  thumbnail order on page ({len(srcs)}):")
+    for i, s in enumerate(srcs, 1):
+        marker = "  <-- slot 1 (will be the ad thumbnail)" if i == 1 else ""
+        logger.info(f"    {i}. {s}{marker}")
 
 
 # ─── Selector helpers ─────────────────────────────────────────────────────────
