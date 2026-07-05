@@ -520,6 +520,7 @@ def sync_all(headless: bool = False, only_account: str | None = None) -> dict:
                 "ok": True, "rows": len(rows), "frozen": frozen,
             }
             logger.info(f"[{account.name}] committed {len(rows)} rows, froze {frozen}")
+            _emit_snapshot_events(account, rows, snapshot_date)
         except Exception as e:
             logger.exception(f"[{account.name}] DB write failed: {e}")
             _record_health(account.name, ok=False, error_type="db_error", message=repr(e))
@@ -528,6 +529,48 @@ def sync_all(headless: bool = False, only_account: str | None = None) -> dict:
             conn.close()
 
     return summary
+
+
+def _emit_snapshot_events(account: Account, rows: list[dict], snapshot_date: str) -> None:
+    """Push one SnapshotTaken event per row to the reporter outbox. Best-effort."""
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+
+        from . import reporter
+        from .events import SnapshotTaken
+    except Exception:
+        return
+
+    now_utc = _dt.now(_tz.utc)
+    for r in rows:
+        try:
+            posted_ts_val = None
+            if r.get("posted_ts"):
+                try:
+                    posted_ts_val = _dt.fromisoformat(r["posted_ts"])
+                except Exception:
+                    posted_ts_val = None
+            reporter.emit(SnapshotTaken(
+                ts=now_utc,
+                snapshot_date=snapshot_date,
+                post_id=r["post_id"],
+                account=account.name,
+                title=r.get("title"),
+                url=r.get("url"),
+                posted_ts=posted_ts_val,
+                status=r.get("status"),
+                impressions=r.get("impressions"),
+                views=r.get("views"),
+                shares=r.get("shares"),
+                favorites=r.get("favorites"),
+                area=r.get("area"),
+                category=r.get("category"),
+                expires_in_days=r.get("expires_in_days"),
+                autorepost=r.get("autorepost"),
+                freshness_note=r.get("freshness_note"),
+            ))
+        except Exception as e:  # never let telemetry crash the sync
+            logger.warning(f"snapshot emit failed for post {r.get('post_id')}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +590,13 @@ def _extract_post_id(url: str) -> str | None:
         if m:
             return m.group(1)
     return None
+
+
+# Public alias — used by the reporter to attach post_id to events.
+def extract_post_id(url: str | None) -> str | None:
+    if not url:
+        return None
+    return _extract_post_id(url)
 
 
 def seed_from_state_json() -> dict:

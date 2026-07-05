@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .config import (
     ACCOUNTS,
@@ -15,6 +16,10 @@ from .config import (
     POST_WINDOW_START_HOUR,
     STATE_FILE,
 )
+
+# All eligibility math (window + weekday) is *local* to the posting machine.
+# The dashboard renders in ET (America/New_York) per the product decision.
+LOCAL_TZ = ZoneInfo("America/New_York")
 
 
 def _now() -> datetime:
@@ -111,6 +116,99 @@ def eligibility_report() -> list[dict]:
             reasons.append(f"weekly cap: {wk}/{MAX_POSTS_PER_ACCOUNT_PER_WEEK}")
         out.append({"account": a.name, "eligible": not reasons, "reasons": reasons})
     return out
+
+
+def _next_window_open(after: datetime) -> datetime:
+    """Return the next datetime >= `after` (in LOCAL_TZ) that sits inside the
+    posting window (weekday + hour range)."""
+    local = after.astimezone(LOCAL_TZ)
+    cursor = local
+    for _ in range(14):  # bounded search — worst case a weekend + 1
+        # Advance to a weekday if needed
+        if POST_WEEKDAYS_ONLY and cursor.weekday() >= 5:
+            cursor = cursor.replace(hour=POST_WINDOW_START_HOUR, minute=0, second=0, microsecond=0)
+            cursor = cursor + timedelta(days=(7 - cursor.weekday()))
+            continue
+        # Within-day: bump forward if we're before/after the hour range
+        if cursor.hour < POST_WINDOW_START_HOUR:
+            cursor = cursor.replace(hour=POST_WINDOW_START_HOUR, minute=0, second=0, microsecond=0)
+            return cursor.astimezone(timezone.utc)
+        if cursor.hour >= POST_WINDOW_END_HOUR:
+            # tomorrow's opening
+            cursor = (cursor + timedelta(days=1)).replace(
+                hour=POST_WINDOW_START_HOUR, minute=0, second=0, microsecond=0
+            )
+            continue
+        # Already inside the window
+        return cursor.astimezone(timezone.utc)
+    # Give up gracefully — return the raw cursor
+    return cursor.astimezone(timezone.utc)
+
+
+def next_eligible_at(account_name: str) -> datetime | None:
+    """Earliest future UTC timestamp when this account can post again, or None
+    if it will be blocked for >1 week (weekly cap not clearing soon)."""
+    now = _now()
+
+    # Cooldown-based earliest
+    last = _last_post_for(account_name)
+    cooldown_open = last + timedelta(hours=MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT) if last else now
+
+    # Weekly-cap check — if we're already at cap, next slot opens when the
+    # oldest post in the trailing 7d falls off.
+    state = _load_state()
+    my_posts = sorted(
+        (datetime.fromisoformat(p["at"]) for p in state.get("posts", []) if p["account"] == account_name),
+        reverse=True,
+    )
+    weekly_open = now
+    if len(my_posts) >= MAX_POSTS_PER_ACCOUNT_PER_WEEK:
+        oldest_in_window = my_posts[MAX_POSTS_PER_ACCOUNT_PER_WEEK - 1]
+        weekly_open = oldest_in_window + timedelta(days=7)
+
+    earliest = max(now, cooldown_open, weekly_open)
+    return _next_window_open(earliest)
+
+
+def describe_block_reasons(account_name: str) -> list[str]:
+    """Human-readable reasons this account can't post *right now*.
+    Empty list == eligible."""
+    reasons: list[str] = []
+    if not _is_allowed_weekday():
+        reasons.append("weekend: posting restricted to Mon-Fri")
+    if not _in_posting_window():
+        reasons.append(f"outside posting window ({POST_WINDOW_START_HOUR:02d}-{POST_WINDOW_END_HOUR:02d})")
+    last = _last_post_for(account_name)
+    if last is not None:
+        hrs = (_now() - last).total_seconds() / 3600
+        if hrs < MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT:
+            reasons.append(f"cooldown: {hrs:.1f}h since last (need {MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT}h)")
+    wk = _posts_in_last_week(account_name)
+    if wk >= MAX_POSTS_PER_ACCOUNT_PER_WEEK:
+        reasons.append(f"weekly cap: {wk}/{MAX_POSTS_PER_ACCOUNT_PER_WEEK}")
+    if _posts_in_last_24h_total() >= MAX_POSTS_PER_DAY_TOTAL:
+        reasons.append(f"daily cap total: {_posts_in_last_24h_total()}/{MAX_POSTS_PER_DAY_TOTAL}")
+    return reasons
+
+
+def account_snapshot(account_name: str) -> dict:
+    """Data payload for AccountState events."""
+    last = _last_post_for(account_name)
+    state = _load_state()
+    last_post = None
+    for p in reversed(state.get("posts", [])):
+        if p["account"] == account_name:
+            last_post = p
+            break
+    return {
+        "eligible_now": not describe_block_reasons(account_name),
+        "next_eligible_at": next_eligible_at(account_name),
+        "block_reasons": describe_block_reasons(account_name),
+        "posts_last_24h_total": _posts_in_last_24h_total(),
+        "posts_last_7d_this_account": _posts_in_last_week(account_name),
+        "last_post_at": last,
+        "last_post_url": (last_post or {}).get("url"),
+    }
 
 
 def pick_next_account(machine_name: str) -> Account | None:

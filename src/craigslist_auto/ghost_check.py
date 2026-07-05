@@ -103,8 +103,13 @@ def check_all_recent(proxy: str | None = None) -> None:
     else:
         logger.info("ghost-check using caller-supplied --proxy (skipping exit-IP verify)")
 
+    from . import reporter
+    from .events import GhostCheck
+    from .stats import extract_post_id
+
     state = _load_state()
-    now = datetime.now(timezone.utc).isoformat()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     GHOST_LOG.parent.mkdir(parents=True, exist_ok=True)
     with GHOST_LOG.open("a", encoding="utf-8") as f:
         for p in state.get("posts", []):
@@ -122,3 +127,15 @@ def check_all_recent(proxy: str | None = None) -> None:
             f.write(json.dumps(entry) + "\n")
             status = "VISIBLE" if visible else "GHOSTED"
             logger.info(f"[{p['account']}] {status}  {p['url']}")
+
+            post_id = extract_post_id(p["url"])
+            if post_id:
+                try:
+                    reporter.emit(GhostCheck(
+                        ts=now_dt,
+                        post_id=post_id,
+                        account=p["account"],
+                        ghosted=not visible,
+                    ))
+                except Exception as e:
+                    logger.warning(f"ghost_check emit failed for {post_id}: {e}")

@@ -18,6 +18,9 @@ from .content import generate_ad
 from .ghost_check import check_all_recent
 from .poster import launch_account, post_ad
 from . import stats as stats_mod
+from . import reporter as reporter_mod
+from .events import PostAttempt
+from .stats import LoginExpiredError, extract_post_id
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -148,6 +151,9 @@ def post(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="DEBUG-level console logging"),
 ):
     """Post one ad now, picking the next eligible account for this machine."""
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+
     _setup_logging(verbose=verbose)
     machine = _machine_name()
     if account:
@@ -165,19 +171,100 @@ def post(
         acct = pick_next_account(machine)
         if acct is None:
             typer.echo("No eligible account right now. Run `cl status` to see why.")
+            # Emit "skipped_no_eligible" for the dashboard's last-attempt indicator
+            reporter_mod.emit(PostAttempt(
+                ts=_dt.now(_tz.utc),
+                machine=machine,
+                account="(none)",
+                outcome="skipped_no_eligible",
+            ))
             raise typer.Exit(0)
 
-    ad = generate_ad(acct)
-    logger.info(f"Generated ad: {ad.title}  ({len(ad.photos)} photos)")
-    url = post_ad(acct, ad, headless=headless, dry_run=dry_run)
-    if url and not dry_run:
-        record_post(acct, ad.title, url)
-        typer.echo(f"Posted: {url}")
-    elif dry_run:
-        typer.echo("Dry run complete.")
-    else:
+    started = _time.monotonic()
+    ad_title: str | None = None
+    photos_attached: list[str] = []
+    cover_photo: str | None = None
+    try:
+        ad = generate_ad(acct)
+        ad_title = ad.title
+        photos_attached = [p.name for p in ad.photos]
+        # First photo is the cover when present (see content._select_photos)
+        cover_photo = ad.photos[0].name if ad.photos else None
+        logger.info(f"Generated ad: {ad.title}  ({len(ad.photos)} photos)")
+        url = post_ad(acct, ad, headless=headless, dry_run=dry_run)
+    except LoginExpiredError as e:
+        _emit_post_failure(machine, acct.name, "failed_login", str(e), started, ad_title, photos_attached, cover_photo)
+        typer.echo(f"Login expired for {acct.name}. Run `cl init-account {acct.name}`.")
+        raise typer.Exit(3)
+    except Exception as e:
+        logger.exception("post_ad raised")
+        error_type = "failed_form" if "form" in repr(e).lower() else "failed_other"
+        _emit_post_failure(machine, acct.name, error_type, repr(e), started, ad_title, photos_attached, cover_photo)
         typer.echo("Post failed — check logs.")
         raise typer.Exit(3)
+
+    duration = _time.monotonic() - started
+
+    if dry_run:
+        reporter_mod.emit(PostAttempt(
+            ts=_dt.now(_tz.utc),
+            machine=machine,
+            account=acct.name,
+            outcome="dry_run",
+            duration_seconds=duration,
+            ad_title=ad_title,
+            photos_attached=photos_attached,
+            cover_photo=cover_photo,
+        ))
+        typer.echo("Dry run complete.")
+        return
+
+    if url:
+        record_post(acct, ad.title, url)
+        reporter_mod.emit(PostAttempt(
+            ts=_dt.now(_tz.utc),
+            machine=machine,
+            account=acct.name,
+            outcome="posted",
+            duration_seconds=duration,
+            post_id=extract_post_id(url),
+            post_url=url,
+            ad_title=ad_title,
+            photos_attached=photos_attached,
+            cover_photo=cover_photo,
+        ))
+        typer.echo(f"Posted: {url}")
+    else:
+        _emit_post_failure(machine, acct.name, "failed_form", "post_ad returned no url",
+                          started, ad_title, photos_attached, cover_photo)
+        typer.echo("Post failed — check logs.")
+        raise typer.Exit(3)
+
+
+def _emit_post_failure(
+    machine: str,
+    account_name: str,
+    error_type: str,
+    error_message: str,
+    started_monotonic: float,
+    ad_title: str | None,
+    photos_attached: list[str],
+    cover_photo: str | None,
+) -> None:
+    import time as _time
+    from datetime import datetime as _dt, timezone as _tz
+    reporter_mod.emit(PostAttempt(
+        ts=_dt.now(_tz.utc),
+        machine=machine,
+        account=account_name,
+        outcome=error_type,  # type: ignore[arg-type]
+        duration_seconds=_time.monotonic() - started_monotonic,
+        ad_title=ad_title,
+        photos_attached=photos_attached,
+        cover_photo=cover_photo,
+        error_type=error_type,
+        error_message=error_message[:500],
+    ))
 
 
 @app.command("check-ghosts")
@@ -325,6 +412,210 @@ def stats(
             f"{r['d_views']:>+4d}  {title}"
         )
         typer.echo(f"           {r['url']}")
+
+
+@app.command("reporter-daemon")
+def reporter_daemon(
+    heartbeat_minutes: int = typer.Option(5, help="AccountState heartbeat cadence"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """
+    Long-running process: drains the outbox to the VPS and emits AccountState
+    heartbeats. Installed by scripts/install-reporter-daemon.ps1 and started
+    at boot.
+    """
+    import signal
+    import threading
+    from datetime import datetime as _dt, timezone as _tz
+
+    from .accounts import account_snapshot
+    from .config import (
+        ACCOUNTS, MAX_POSTS_PER_ACCOUNT_PER_WEEK, MAX_POSTS_PER_DAY_TOTAL,
+        MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT, POST_WEEKDAYS_ONLY,
+        POST_WINDOW_END_HOUR, POST_WINDOW_START_HOUR,
+    )
+    from .events import AccountState, SchedulerConfig, StatsSyncHealth
+
+    _setup_logging(verbose=verbose)
+    machine = _machine_name()
+
+    stop = threading.Event()
+
+    def _handle_signal(signum, frame):  # pragma: no cover
+        logger.info(f"reporter-daemon received signal {signum}")
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handle_signal)
+        except Exception:
+            pass  # not all signals settable on Windows
+
+    # Emit a SchedulerConfig at startup so the dashboard reflects real guardrails
+    try:
+        reporter_mod.emit(SchedulerConfig(
+            ts=_dt.now(_tz.utc),
+            machine=machine,
+            posting_cadence=None,       # Task Scheduler cadence isn't introspectable from here
+            stats_sync_cadence=None,
+            min_hours_between_posts_same_account=MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT,
+            max_posts_per_day_total=MAX_POSTS_PER_DAY_TOTAL,
+            max_posts_per_account_per_week=MAX_POSTS_PER_ACCOUNT_PER_WEEK,
+            post_window_start_hour=POST_WINDOW_START_HOUR,
+            post_window_end_hour=POST_WINDOW_END_HOUR,
+            post_weekdays_only=POST_WEEKDAYS_ONLY,
+        ))
+    except Exception as e:
+        logger.warning(f"scheduler_config emit failed: {e}")
+
+    # Heartbeat runs on its own thread so the flusher can run independently.
+    heartbeat_seconds = max(30, heartbeat_minutes * 60)
+
+    def _heartbeat_loop():
+        health = stats_mod.health_report()
+        while not stop.is_set():
+            for account in ACCOUNTS:
+                if account.allowed_machine != machine:
+                    continue
+                try:
+                    snap = account_snapshot(account.name)
+                    h = health.get(account.name)
+                    stats_health = None
+                    if h is not None:
+                        try:
+                            stats_health = StatsSyncHealth(
+                                ok=bool(h.get("ok")),
+                                last_run_ts=_dt.fromisoformat(h["last_run_ts_utc"]) if h.get("last_run_ts_utc") else None,
+                                error_type=h.get("error_type"),
+                                error_message=(h.get("message") or None),
+                            )
+                        except Exception:
+                            stats_health = None
+                    reporter_mod.emit(AccountState(
+                        ts=_dt.now(_tz.utc),
+                        machine=machine,
+                        account=account.name,
+                        eligible_now=snap["eligible_now"],
+                        next_eligible_at=snap["next_eligible_at"],
+                        block_reasons=snap["block_reasons"],
+                        posts_last_24h_total=snap["posts_last_24h_total"],
+                        posts_last_7d_this_account=snap["posts_last_7d_this_account"],
+                        last_post_at=snap["last_post_at"],
+                        last_post_url=snap["last_post_url"],
+                        stats_sync_health=stats_health,
+                    ))
+                except Exception as e:
+                    logger.warning(f"heartbeat emit failed for {account.name}: {e}")
+            # Reload health each cycle (stats.py rewrites the json)
+            health = stats_mod.health_report()
+            if stop.wait(heartbeat_seconds):
+                return
+
+    heartbeat_thread = threading.Thread(target=_heartbeat_loop, name="cl-heartbeat", daemon=True)
+    heartbeat_thread.start()
+
+    # Flusher runs on the main thread; blocks until stop is set.
+    reporter_mod.flush_forever(stop_event=stop)
+
+
+@app.command("photo-inventory")
+def photo_inventory(verbose: bool = typer.Option(False, "--verbose", "-v")):
+    """Scan photo directories per account and emit PhotoInventory events."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from .config import ACCOUNTS, COVERS_DIR
+    from .content import PHOTO_REUSE_LOG, PHOTO_COOLDOWN_DAYS
+    from .events import PhotoInventory
+
+    _setup_logging(verbose=verbose)
+    now_utc = _dt.now(_tz.utc)
+
+    usage = {}
+    if PHOTO_REUSE_LOG.exists():
+        import json as _json
+        try:
+            usage = _json.loads(PHOTO_REUSE_LOG.read_text(encoding="utf-8"))
+        except Exception:
+            usage = {}
+
+    _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+    for account in ACCOUNTS:
+        # Regular photos
+        photo_dir = account.photo_dir
+        photos = [p for p in photo_dir.iterdir() if p.is_file() and p.suffix.lower() in _IMG_EXTS] if photo_dir.exists() else []
+        never_used = [p for p in photos if str(p) not in usage]
+        eligible = [p for p in photos if _photo_is_eligible(p, usage, now_utc, PHOTO_COOLDOWN_DAYS)]
+
+        # Covers claimed for this account (not counting used/ subdir)
+        cover_dir = COVERS_DIR / account.name
+        covers = [p for p in cover_dir.iterdir() if p.is_file() and p.suffix.lower() in _IMG_EXTS] if cover_dir.exists() else []
+
+        try:
+            reporter_mod.emit(PhotoInventory(
+                ts=now_utc,
+                account=account.name,
+                photos_total=len(photos),
+                photos_never_used=len(never_used),
+                photos_eligible=len(eligible),
+                covers_total=len(covers),
+                covers_never_used=len(covers),   # covers have no reuse — claimed==unused
+                covers_eligible=len(covers),
+            ))
+        except Exception as e:
+            logger.warning(f"photo_inventory emit failed for {account.name}: {e}")
+
+        typer.echo(
+            f"  {account.name:10s}  photos {len(never_used)}/{len(photos)} never-used, "
+            f"{len(eligible)} eligible  |  covers {len(covers)}"
+        )
+
+
+def _photo_is_eligible(path, usage: dict, now_utc, cooldown_days: int) -> bool:
+    from datetime import datetime as _dt
+    last = usage.get(str(path))
+    if last is None:
+        return True
+    try:
+        last_dt = _dt.fromisoformat(last)
+    except Exception:
+        return True
+    return (now_utc - last_dt).days >= cooldown_days
+
+
+@app.command("backfill-postgres")
+def backfill_postgres(
+    dsn: str = typer.Option(..., help="Target Postgres DSN, e.g. postgresql://user:pass@host/db"),
+    since: str = typer.Option(None, help="Only backfill posts posted on/after YYYY-MM-DD"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """
+    One-shot: read local stats.sqlite + state.json and INSERT directly into
+    Postgres. Idempotent by natural keys — safe to re-run.
+    """
+    _setup_logging(verbose=verbose)
+    try:
+        import psycopg  # local import; not a script runtime dep
+    except ImportError:
+        typer.echo("psycopg not installed. Run:  uv add psycopg[binary]")
+        raise typer.Exit(1)
+    from . import backfill
+    backfill.run(dsn=dsn, since=since)
+
+
+@app.command("outbox")
+def outbox(
+    purge_days: int = typer.Option(0, help="Purge sent events older than N days (0 = don't purge)"),
+):
+    """Show reporter outbox status. Optionally purge old sent events."""
+    summary = reporter_mod.outbox_summary()
+    typer.echo(f"Reporter configured: {summary['configured']}")
+    typer.echo(f"  pending: {summary['pending']}")
+    typer.echo(f"  sent:    {summary['sent']}")
+    typer.echo(f"  retrying:{summary['retrying']}   max_attempts={summary['max_attempts']}")
+    if purge_days > 0:
+        n = reporter_mod.purge_sent(older_than_days=purge_days)
+        typer.echo(f"  purged:  {n}")
 
 
 @app.command("tail")

@@ -1,0 +1,95 @@
+# Deploys the API + SPA behind the shared Traefik proxy documented in
+# SERVER_SETUP.md. Postgres is expected to run natively on the VPS host
+# (Option A) — the API reaches it via host.docker.internal.
+#
+# Build context is the REPO ROOT so both Dockerfiles can COPY files from
+# either backend/, frontend/, or src/ (the shared events schema).
+
+name: craigslist_automation
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: craigslist_automation/api:latest
+    container_name: craigslist_api
+    env_file: [.env.prod]
+    environment:
+      - LOG_LEVEL=INFO
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [craigslist-net, traefik-public]
+    security_opt:
+      - "no-new-privileges:true"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.craigslist-api.rule=Host(`${API_HOST}`)"
+      - "traefik.http.routers.craigslist-api.entrypoints=websecure"
+      - "traefik.http.routers.craigslist-api.tls=true"
+      - "traefik.http.routers.craigslist-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.craigslist-api.loadbalancer.server.port=8000"
+      # Rate limit — protects the whole API. Login has an additional slowapi
+      # limit inside FastAPI (5/min).
+      - "traefik.http.routers.craigslist-api.middlewares=craigslist-api-ratelimit"
+      - "traefik.http.middlewares.craigslist-api-ratelimit.ratelimit.average=120"
+      - "traefik.http.middlewares.craigslist-api-ratelimit.ratelimit.burst=200"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits:   { cpus: '1',   memory: 512M }
+        reservations: { cpus: '0.25', memory: 128M }
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: "https://${API_HOST}"
+    image: craigslist_automation/web:latest
+    container_name: craigslist_web
+    expose: ["80"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [craigslist-net, traefik-public]
+    security_opt:
+      - "no-new-privileges:true"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.craigslist-web.rule=Host(`${WEB_HOST}`)"
+      - "traefik.http.routers.craigslist-web.entrypoints=websecure"
+      - "traefik.http.routers.craigslist-web.tls=true"
+      - "traefik.http.routers.craigslist-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.craigslist-web.loadbalancer.server.port=80"
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 256M }
+
+networks:
+  craigslist-net:
+    driver: bridge
+  traefik-public:
+    name: traefik-public
+    external: true
