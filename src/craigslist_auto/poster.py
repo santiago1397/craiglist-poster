@@ -699,7 +699,11 @@ def _extract_post_url(page: Page) -> str | None:
     link = page.locator("a[href*='/d/']").first
     if link.count():
         return link.get_attribute("href")
-    # 2. Paid-category receipt page: extract PostingID and build a search URL.
+    # 2. Paid-category receipt page: extract PostingID and resolve it to the
+    #    canonical /d/ URL by loading the search-by-posting-ID page. That page
+    #    renders the matching post at the top with a normal /d/... link, so
+    #    we hand back the same URL a public visitor would copy from their
+    #    address bar — what dashboards and ghost-checks should compare on.
     #    The /k/...?s=billing receipt URL itself is session-bound and 404s
     #    once the session ends, so we must NOT save it.
     try:
@@ -708,8 +712,30 @@ def _extract_post_url(page: Page) -> str | None:
         m = re.search(r"PostingID\s*[:#]?\s*(\d{6,})", html)
         if m:
             post_id = m.group(1)
-            logger.info(f"  extracted PostingID={post_id} from receipt page")
-            return f"https://miami.craigslist.org/search/sss?postingID={post_id}"
+            search_url = f"https://miami.craigslist.org/search/sss?postingID={post_id}"
+            logger.info(f"  extracted PostingID={post_id} from receipt page; resolving → {search_url}")
+            try:
+                page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
+                read_pause(800)
+                sleep_jitter(1.0)
+                canonical = page.locator("a[href*='/d/']").first
+                if canonical.count():
+                    href = canonical.get_attribute("href")
+                    logger.info(f"  resolved PostingID={post_id} → {href}")
+                    return href
+                # Post may not be indexed yet, or could be ghosted already.
+                # Either way, the search URL still resolves the post live.
+                logger.warning(
+                    f"  PostingID={post_id} search page returned no /d/ link "
+                    f"(post not yet indexed, or ghosted). Saving search URL."
+                )
+                return search_url
+            except Exception as e:
+                logger.warning(
+                    f"  PostingID={post_id} resolution failed ({e!r}); "
+                    f"falling back to search URL."
+                )
+                return search_url
     except Exception as e:
         logger.warning(f"  PostingID extraction failed: {e}")
     # 3. Last resort — return current URL (may be session-bound, not durable).
