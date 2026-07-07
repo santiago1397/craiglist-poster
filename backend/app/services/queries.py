@@ -79,7 +79,7 @@ def dashboard_accounts(conn: psycopg.Connection) -> list[dict]:
             SELECT account FROM latest_state
             UNION SELECT account FROM latest_inventory
             UNION SELECT account FROM last_success
-            UNION SELECT account FROM last_attempt
+            UNION SELECT account FROM last_attempt WHERE account != '(none)'
         )
         SELECT
             a.account,
