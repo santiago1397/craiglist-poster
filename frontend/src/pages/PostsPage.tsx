@@ -27,14 +27,6 @@ type AccountsResp = { accounts: string[] };
 
 const PAGE_SIZE = 50;
 
-const SORT_OPTIONS = [
-  { key: "posted_ts", label: "Posted" },
-  { key: "views", label: "Views" },
-  { key: "impressions", label: "Impressions" },
-  { key: "views_per_day", label: "Views / day" },
-  { key: "impressions_per_day", label: "Impr / day" },
-];
-
 export default function PostsPage() {
   const [account, setAccount] = useState<string>("");
   const [status, setStatus] = useState<string>("");
