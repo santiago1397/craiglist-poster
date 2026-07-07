@@ -61,7 +61,7 @@ services:
     container_name: craigslist_web
     expose: ["80"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz | grep -q ok"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz | grep -q ok"]
       interval: 10s
       timeout: 5s
       retries: 5

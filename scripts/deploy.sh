@@ -26,7 +26,7 @@ ssh "$SSH_ALIAS" "test -f $VPS_REPO_PATH/.env.prod" || {
 }
 
 echo "→ git fetch + fast-forward pull"
-ssh "$SSH_ALIAS" "cd $VPS_REPO_PATH && git fetch origin && git merge --ff-only origin/main" || {
+ssh "$SSH_ALIAS" "cd $VPS_REPO_PATH && git fetch origin && git merge --ff-only origin/master" || {
   echo "!! git pull failed (probably non-fast-forward). Reconcile on the server." >&2
   exit 1
 }
