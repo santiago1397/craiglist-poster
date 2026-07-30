@@ -87,13 +87,23 @@ def generate_images(
             logger.warning(f"image generation failed: {e}")
             break
         for data in blobs:
-            row = _store(
-                conn, data,
-                source="generated", kind=kind, prompt=prompt,
-                provider=provider.name, model=g["image_model"], cost=unit_cost,
-            )
+            try:
+                row = _store(
+                    conn, data,
+                    source="generated", kind=kind, prompt=prompt,
+                    provider=provider.name, model=g["image_model"], cost=unit_cost,
+                )
+            except OSError as e:
+                # Disk full, bad volume permissions, read-only mount. Report it
+                # rather than 500 — the caller has already paid for the image
+                # and deserves to be told why it vanished.
+                error = f"could not store image: {e}"
+                logger.error(error)
+                break
             if row:
                 created.append(row)
+        if error:
+            break
 
     if created:
         conn.execute(
