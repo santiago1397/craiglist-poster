@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # (useful if you would rather drive generation from host cron).
     generation_interval_minutes: int = 30
 
+    # Where image bytes live. A mounted volume in production, anywhere writable
+    # in dev. Content-addressed, so the directory is safe to rsync or back up.
+    images_dir: str = "/var/lib/cl/images"
+
     # --- CORS ---
     # Comma-separated origins allowed for browser JS. Backend appends the
     # cookie only if the origin is in this list.

@@ -83,7 +83,7 @@ def create_app() -> FastAPI:
 
     # Routers registered lazily so tests can import create_app cheaply
     from .routers import (
-        accounts, auth, dashboard, drafts, events, posts, queue, reference,
+        accounts, auth, dashboard, drafts, events, images, posts, queue, reference,
         settings as settings_router,
     )
 
@@ -96,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(queue.router, prefix="/queue", tags=["queue"])
     app.include_router(settings_router.router, prefix="/settings", tags=["settings"])
     app.include_router(reference.router, prefix="/reference", tags=["reference"])
+    app.include_router(images.router, prefix="/images", tags=["images"])
 
     @app.get("/health", tags=["ops"])
     def health() -> dict:
