@@ -63,8 +63,8 @@ All commands run via `uv run cl <command>`.
 | `cl post --account craigs1` | Force a specific account (still respects machine binding). |
 | `cl post --dry-run` | Walk through the form without publishing. Use this to verify selectors. |
 | `cl post --headless` | Run browser headless (not recommended — easier to detect). |
-| `cl check-ghosts` | Check whether recent posts are visible in public search. |
-| `cl check-ghosts --proxy http://host:port` | Ghost-check from a different network (phone hotspot, residential proxy). True external check. |
+| `cl check-ghosts --proxy http://host:port` | Check whether recent posts are visible in public search, from a different network (phone hotspot or any proxy you supply). |
+| `cl check-ghosts --allow-local-ip` | Same check from this machine's IP. Weaker — CL shows you your own ghosted posts. |
 
 ### Eligibility rules
 
@@ -152,22 +152,26 @@ submitted successfully.
 
 ### Are the posts visible (not ghosted)?
 
-Same-network check (fast, but Craigslist often shows your own posts to you even
-when they're ghosted to everyone else):
-
-```bash
-uv run cl check-ghosts
-```
-
-True external check — required for a reliable answer. Use a residential proxy or
-your phone hotspot:
+There is no built-in proxy — you supply the exit. Use a phone hotspot or any
+non-home proxy so the search runs from a different IP than the one that posted:
 
 ```bash
 uv run cl check-ghosts --proxy http://host:port
 ```
 
+Without `--proxy` the command **refuses to run**, because a check from the
+posting machine's own IP isn't trustworthy — Craigslist keeps showing you your
+own posts after they're ghosted for everyone else. If you want that weaker
+check anyway:
+
+```bash
+uv run cl check-ghosts --allow-local-ip
+```
+
 Results append to `logs/ghost_check.jsonl` (one JSON line per check with
-`visible: true/false`) and update each account's ghost count in state.
+`visible: true/false` and `proxied: true/false`) and update each account's
+ghost count in state. Treat `visible: true` with `proxied: false` as
+"not proven ghosted", not as "confirmed live".
 
 ```bash
 type logs\ghost_check.jsonl
