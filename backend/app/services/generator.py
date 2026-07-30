@@ -328,13 +328,30 @@ def known_accounts(conn: psycopg.Connection) -> list[str]:
     return [r["account"] for r in rows]
 
 
+# Every caller — the background loop and the manual endpoint — must serialise
+# through this. Without it they race: a run that starts while another is still
+# committing reads a stale depth of 0 and generates a second full batch, which
+# is exactly how a target of 15 produced 18 per account in production.
+TOPUP_LOCK_KEY = 8_412_337_001
+
+
 def topup(conn: psycopg.Connection, *, force: bool = False, limit: int = 50) -> dict:
     """Bring every account's queue up to target. Returns a summary.
 
     Runs on a floor/target hysteresis so it generates in useful batches rather
     than one draft at a time: nothing happens until an account drops below the
     floor, then it fills to target.
+
+    Serialised by a transaction-scoped advisory lock. A concurrent caller does
+    not queue up behind it — it returns immediately, because by the time the
+    holder finishes the queue is full and there is nothing left to do.
     """
+    if not conn.execute(
+        "SELECT pg_try_advisory_xact_lock(%s) AS ok", (TOPUP_LOCK_KEY,)
+    ).fetchone()["ok"]:
+        logger.info("topup already running elsewhere; skipping this run")
+        return {"skipped": "already running", "created": 0, "accounts": {}}
+
     g = get_generation_settings(conn)
     if not g["enabled"] and not force:
         return {"skipped": "generation disabled", "created": 0, "accounts": {}}
@@ -369,6 +386,17 @@ def topup(conn: psycopg.Connection, *, force: bool = False, limit: int = 50) -> 
         for account, remaining in list(wants.items()):
             if remaining <= 0 or created_total >= limit:
                 continue
+            # Re-read depth each time rather than trusting the count taken at
+            # the top of the run: generating a batch takes minutes of model
+            # calls, and drafts can be added or removed meanwhile.
+            live_depth = conn.execute(
+                "SELECT COUNT(*) AS n FROM drafts WHERE account = %s AND status = 'queued'",
+                (account,),
+            ).fetchone()["n"]
+            if live_depth >= target:
+                wants[account] = 0
+                continue
+
             draft = build_draft(conn, account=account, rng=rng)
             if draft is None:
                 wants[account] = 0
