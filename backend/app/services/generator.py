@@ -97,9 +97,20 @@ def get_generation_settings(conn: psycopg.Connection) -> dict:
     if row is None:  # pragma: no cover — migration seeds it
         raise RuntimeError("generation_settings is empty; run migrations")
     g = dict(row)
-    # Blank prompts fall back to the built-in defaults so a fresh install
-    # generates sensibly before anyone edits anything.
-    g["system_prompt"] = (g.get("system_prompt") or "").strip() or DEFAULT_SYSTEM_PROMPT
+    # The library is the source of truth once a default exists there; the
+    # columns remain as a fallback so an install with an empty library still
+    # generates, and the built-in constants backstop both.
+    from . import prompts as prompts_svc
+
+    g["system_prompt"] = (
+        prompts_svc.get_default_body(conn, "ad_copy")
+        or (g.get("system_prompt") or "").strip()
+        or DEFAULT_SYSTEM_PROMPT
+    )
+    g["tail_template"] = (
+        prompts_svc.get_default_body(conn, "keyword_tail")
+        or (g.get("tail_template") or "")
+    )
     g["user_template"] = (g.get("user_template") or "").strip() or DEFAULT_USER_TEMPLATE
     return g
 
