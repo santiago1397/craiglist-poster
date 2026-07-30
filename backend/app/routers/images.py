@@ -99,6 +99,66 @@ async def upload(file: UploadFile = File(...), kind: str = Query(default="photo"
     return row
 
 
+class OverlayBody(BaseModel):
+    # Lines may contain {phone}, {license}, {city}. Omit to use the default
+    # call-to-action template.
+    lines: list[str] | None = None
+    position: str = Field(default="bottom", pattern="^(top|bottom)$")
+    phone: str = ""
+    license: str = ""
+    city: str = ""
+    # Replace the source image rather than adding a second row.
+    replace: bool = False
+
+
+@router.post("/{image_id}/overlay", dependencies=[admin])
+def apply_overlay(image_id: int, body: OverlayBody) -> dict:
+    """Composite call-to-action text onto an image and store the result.
+
+    The model draws the picture; Pillow draws the words, so the phone number is
+    always exactly right and re-wording costs nothing (decision 11).
+    """
+    from ..services import overlay as overlay_svc
+
+    with tx() as c:
+        row = c.execute("SELECT * FROM images WHERE id = %s", (image_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
+        src = storage.open_path(row["storage_path"])
+        if not src.exists():
+            raise HTTPException(status_code=status.HTTP_410_GONE, detail="Image bytes are missing")
+
+        tpl = (
+            overlay_svc.OverlayTemplate(lines=body.lines, position=body.position)
+            if body.lines
+            else overlay_svc.DEFAULT_TEMPLATE
+        )
+        try:
+            rendered = overlay_svc.render(
+                src.read_bytes(), tpl,
+                {"phone": body.phone, "license": body.license, "city": body.city},
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"could not render overlay: {e}",
+            )
+
+        out = images_svc._store(
+            c, rendered, source=row["source"], kind="cover",
+            prompt=row["prompt"], provider=row["provider"], model=row["model"],
+            cost=0, mime="image/jpeg", status="approved",
+        )
+        if out is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="that exact overlay already exists in the stack",
+            )
+        if body.replace and row["used_at"] is None:
+            images_svc.delete_image(c, image_id)
+    return out
+
+
 @router.patch("/{image_id}", dependencies=[admin])
 def set_status(image_id: int, body: StatusBody) -> dict:
     with tx() as c:

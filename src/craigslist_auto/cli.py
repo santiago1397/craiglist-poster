@@ -239,9 +239,21 @@ def post(
         raise typer.Exit(0)
 
     acct = ACCOUNTS_BY_NAME[draft["account"]]
-    ad = content_mod.ad_from_draft(draft)
     draft_id = int(draft["id"])
-    logger.info(f"draft {draft_id} for {acct.name}: {ad.title!r}")
+
+    # Images are optional. A download that fails costs pictures, not the post.
+    try:
+        photos = queue_client.fetch_draft_images(draft)
+    except Exception as e:
+        logger.warning(f"image download failed, posting without pictures: {e}")
+        reporter_mod.report_flow_error("post", e, step="fetch_images",
+                                       account=acct.name, context={"draft_id": draft_id})
+        photos = []
+
+    ad = content_mod.ad_from_draft(draft, photos)
+    logger.info(
+        f"draft {draft_id} for {acct.name}: {ad.title!r}  ({len(photos)} image(s))"
+    )
 
     started = _time.monotonic()
     try:
@@ -289,6 +301,8 @@ def post(
             post_url=url,
             ad_title=ad.title,
             draft_id=draft_id,
+            photos_attached=[p.name for p in ad.photos],
+            cover_photo=ad.photos[0].name if ad.photos else None,
         ))
         typer.echo(f"Posted: {url}")
     else:

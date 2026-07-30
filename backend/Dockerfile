@@ -27,6 +27,7 @@ RUN pip install --upgrade pip && \
         "python-dotenv>=1.0.1" \
         "loguru>=0.7.2" \
         "httpx>=0.27.2" \
+        "pillow>=10.4.0" \
         "sqlalchemy>=2.0.0"
 
 # ---- runtime stage ----

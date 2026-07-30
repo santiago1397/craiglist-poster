@@ -314,6 +314,66 @@ def mark_used(conn: psycopg.Connection, image_ids: list[int]) -> None:
         )
 
 
+def roll_photo_count(rng: random.Random) -> int:
+    """How many images this draft should carry.
+
+    Roughly one post in ten goes out with no pictures at all — a deliberate
+    choice, so the account does not look mechanically identical every time.
+    The rest get 1-5, which matches what the old poster did.
+    """
+    if rng.random() < 0.10:
+        return 0
+    return rng.randint(1, MAX_SLOTS)
+
+
+def autoattach(
+    conn: psycopg.Connection, *, draft_id: int, account: str, rng: random.Random | None = None
+) -> list[dict]:
+    """Fill a freshly generated draft's image slots from the approved stack.
+
+    Best-effort by design: images are optional, so an empty or exhausted stack
+    produces a text-only post rather than blocking the draft. Slot 1 prefers a
+    'cover' image because it becomes the Craigslist thumbnail.
+    """
+    rng = rng or random.Random()
+    want = roll_photo_count(rng)
+    if want == 0:
+        return []
+
+    chosen: list[dict] = []
+    covers = conn.execute(
+        """
+        SELECT * FROM images
+        WHERE status = 'approved' AND kind = 'cover' AND used_at IS NULL
+          AND (owner_account IS NULL OR owner_account = %s)
+        ORDER BY random() LIMIT 1
+        """,
+        (account,),
+    ).fetchall()
+    if covers:
+        chosen.append(dict(covers[0]))
+
+    remaining = want - len(chosen)
+    if remaining > 0:
+        for img in pick_for_draft(conn, account=account, count=remaining + 4, rng=rng):
+            if len(chosen) >= want:
+                break
+            if any(c["id"] == img["id"] for c in chosen):
+                continue
+            chosen.append(img)
+
+    attached: list[dict] = []
+    for slot, img in enumerate(chosen, start=1):
+        try:
+            attach(conn, draft_id=draft_id, image_id=img["id"], slot=slot)
+            attached.append(img)
+        except ValueError as e:
+            logger.warning(f"could not attach image {img['id']} to draft {draft_id}: {e}")
+    if attached:
+        logger.info(f"attached {len(attached)}/{want} image(s) to draft {draft_id}")
+    return attached
+
+
 def pick_for_draft(
     conn: psycopg.Connection, *, account: str, count: int, rng: random.Random | None = None
 ) -> list[dict]:

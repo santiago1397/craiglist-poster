@@ -15,12 +15,21 @@ is exactly the behaviour the queue exists to remove.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+from pathlib import Path
 
 import httpx
 from loguru import logger
 
+from .config import DATA_DIR
+
 REQUEST_TIMEOUT = 20.0
+IMAGE_TIMEOUT = 120.0
+
+# Downloaded image bytes live here, named by digest. Content-addressed, so a
+# cached file is always exactly the image the server means and never goes stale.
+IMAGE_CACHE = DATA_DIR / "image_cache"
 
 
 class QueueUnavailable(RuntimeError):
@@ -67,6 +76,59 @@ def fetch_settings() -> dict:
 def fetch_queue(limit: int = 10) -> list[dict]:
     """Prefetch window. Read-only; claims nothing."""
     return _request("GET", "", params={"limit": limit}).get("drafts", [])
+
+
+_EXT_BY_MIME = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+
+
+def fetch_image(image_id: int, sha256: str, mime: str = "image/jpeg") -> Path:
+    """Download one image into the local cache and return its path.
+
+    Cached by digest, so a file already present is byte-identical to what the
+    server holds and is reused without a round trip. The download is verified
+    against the digest before being accepted — a truncated file handed to
+    Craigslist would publish a broken image.
+    """
+    IMAGE_CACHE.mkdir(parents=True, exist_ok=True)
+    dest = IMAGE_CACHE / f"{sha256}{_EXT_BY_MIME.get(mime, '.jpg')}"
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+
+    url = f"{_base_url().rsplit('/', 1)[0]}/images/{image_id}/raw"
+    try:
+        resp = httpx.get(url, headers=_headers(), timeout=IMAGE_TIMEOUT, follow_redirects=True)
+    except httpx.HTTPError as e:
+        raise QueueUnavailable(f"image {image_id} download failed: {e!r}") from e
+    if resp.status_code // 100 != 2:
+        raise QueueUnavailable(f"image {image_id} -> HTTP {resp.status_code}")
+
+    got = hashlib.sha256(resp.content).hexdigest()
+    if got != sha256:
+        raise QueueUnavailable(
+            f"image {image_id} digest mismatch: expected {sha256[:12]}, got {got[:12]}"
+        )
+
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    tmp.write_bytes(resp.content)
+    tmp.replace(dest)
+    logger.debug(f"cached image {image_id} ({len(resp.content) // 1024} KB)")
+    return dest
+
+
+def fetch_draft_images(draft: dict) -> list[Path]:
+    """Download every image attached to a claimed draft, in slot order.
+
+    Images are optional: one that cannot be fetched is skipped with a warning
+    rather than aborting the post. Slot 1 is the Craigslist thumbnail, so order
+    is preserved exactly as the server assigned it.
+    """
+    out: list[Path] = []
+    for img in sorted(draft.get("images") or [], key=lambda i: i["slot"]):
+        try:
+            out.append(fetch_image(img["id"], img["sha256"], img.get("mime", "image/jpeg")))
+        except QueueUnavailable as e:
+            logger.warning(f"skipping image in slot {img['slot']}: {e}")
+    return out
 
 
 def eligibility(accounts: list[str]) -> dict:

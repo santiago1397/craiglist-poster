@@ -18,6 +18,9 @@ dependencies = [
     "loguru>=0.7.2",
     # Outbound calls to the copy-generation model.
     "httpx>=0.27.2",
+    # Cover text overlays — see app.services.overlay for why text is composited
+    # rather than generated.
+    "pillow>=10.4.0",
 ]
 
 [project.scripts]
