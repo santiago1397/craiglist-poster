@@ -277,7 +277,16 @@ def claim_next(
             """,
             (machine, row["id"]),
         ).fetchone()
-        return {"draft": dict(claimed), "eligibility": report}
+        draft = dict(claimed)
+        # The desktop needs id + sha256 to fetch and cache the bytes; sha256 is
+        # what makes its local cache safe to reuse across runs.
+        from . import images as images_svc
+
+        draft["images"] = [
+            {"id": i["id"], "slot": i["slot"], "sha256": i["sha256"], "mime": i["mime"]}
+            for i in images_svc.images_for_draft(conn, draft["id"])
+        ]
+        return {"draft": draft, "eligibility": report}
 
     # Every eligible account raced empty between the depth check and here.
     return {"draft": None, "eligibility": report}
@@ -332,6 +341,14 @@ def mark_posted(
     post_id: str | None,
     posted_at: datetime | None = None,
 ) -> None:
+    # Stamp the attached images as published. That starts their 30-day reuse
+    # cooldown and makes the account claim permanent — Craigslist has now seen
+    # these photos under this seller.
+    from . import images as images_svc
+
+    images_svc.mark_used(
+        conn, [i["id"] for i in images_svc.images_for_draft(conn, draft_id)]
+    )
     conn.execute(
         """
         UPDATE drafts

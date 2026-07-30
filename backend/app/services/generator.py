@@ -315,6 +315,14 @@ def build_draft(
         "WHERE singleton",
         (source,),
     )
+
+    # Best-effort: images are optional, so an empty stack yields a text-only
+    # post rather than a failed draft.
+    from . import images as images_svc
+
+    draft["images"] = images_svc.autoattach(
+        conn, draft_id=draft["id"], account=account, rng=rng
+    )
     draft["generated_by"] = source
     return draft
 
