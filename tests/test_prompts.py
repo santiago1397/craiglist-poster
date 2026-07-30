@@ -156,5 +156,16 @@ with conn() as c:
     assert c.execute("SELECT COUNT(*) AS n FROM images WHERE status='test'").fetchone()["n"] == 0
 ok.append("discarding sweeps every abandoned test render")
 
+# --- no generated purpose opens with an empty tab --------------------------
+# An empty tab reads as "there is no prompt", which is the opposite of true:
+# generation would be falling through to a constant the operator cannot see.
+# keyword_tail is excluded deliberately — it is literal text imported from the
+# workbook, so a fresh install genuinely has none until seeds are loaded.
+with conn() as c:
+    for purpose in ("cover_image", "photo_image", "ad_copy"):
+        assert prompts_svc.get_default_body(c, purpose), \
+            f"{purpose} has no default; its studio tab would open empty"
+ok.append("every generated purpose has a default, so no studio tab opens empty")
+
 print("\n".join(f"  OK  {line}" for line in ok))
 print(f"\n{len(ok)} checks passed")
