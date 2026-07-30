@@ -115,6 +115,7 @@ export default function ReviewPage() {
   const [accounts, setAccounts] = useState<string[]>([]);
   const [editing, setEditing] = useState<Draft | null>(null);
   const [creating, setCreating] = useState(false);
+  const [previewing, setPreviewing] = useState<Draft | null>(null);
   const [posting, setPosting] = useState<PostingState | null>(null);
   const [locations, setLocations] = useState<LocationRef | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
@@ -263,6 +264,7 @@ export default function ReviewPage() {
               draft={d}
               busy={busy}
               onEdit={() => setEditing(d)}
+              onPreview={() => setPreviewing(d)}
               onReview={() => mutate(() => api.patch(`/drafts/${d.id}`, { reviewed: !d.reviewed }))}
               onTop={() => mutate(() => api.post(`/drafts/${d.id}/reorder`, { after_id: null }))}
               onRequeue={() => mutate(() => api.post(`/drafts/${d.id}/requeue`))}
@@ -281,6 +283,10 @@ export default function ReviewPage() {
             setEditing(null);
           }}
         />
+      )}
+
+      {previewing && (
+        <PreviewDialog draft={previewing} onClose={() => setPreviewing(null)} />
       )}
 
       {creating && (
@@ -742,6 +748,7 @@ function DraftRow(props: {
   draft: Draft;
   busy: boolean;
   onEdit: () => void;
+  onPreview: () => void;
   onReview: () => void;
   onTop: () => void;
   onRequeue: () => void;
@@ -816,6 +823,11 @@ function DraftRow(props: {
           )}
         </div>
         <div className="flex shrink-0 gap-1">
+          {/* Preview is for things not yet published — once it is live, the
+              real Craigslist page is the truth, not a mock-up. */}
+          {(d.status === "queued" || d.status === "needs_attention") && (
+            <Action label="Preview" onClick={props.onPreview} busy={busy} />
+          )}
           <Action label="Edit" onClick={props.onEdit} busy={busy} />
           {d.status === "queued" && (
             <>
@@ -998,6 +1010,136 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// A deliberately faithful mock of a Craigslist posting page, so you can judge
+// the ad as a buyer sees it rather than as a database row. Rendered light-on-
+// white regardless of the dashboard theme, because that is what Craigslist is —
+// and because the contrast is exactly what makes the disclaimer unmissable.
+function PreviewDialog(props: { draft: Draft; onClose: () => void }) {
+  const d = props.draft;
+  const [images, setImages] = useState<{ id: number; slot: number }[]>([]);
+  const [active, setActive] = useState(0);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await api.get<{ images: { id: number; slot: number }[] }>(
+          `/images/draft/${d.id}`,
+        );
+        setImages(r.images);
+      } catch {
+        setImages([]);
+      }
+    })();
+  }, [d.id]);
+
+  const area = d.geographic_area || d.city;
+  const county = d.county ? `${d.county.toLowerCase()} county` : "";
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/80 flex items-start justify-center p-4 z-20 overflow-auto"
+      onClick={props.onClose}
+    >
+      <div
+        className="bg-white text-black w-full max-w-4xl my-4 rounded shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Unmissable, and it stays put while you scroll the ad. */}
+        <div className="sticky top-0 z-10 bg-amber-400 text-black px-4 py-2.5 flex items-center justify-between gap-3 rounded-t">
+          <div>
+            <strong className="text-base">PREVIEW ONLY — NOT PUBLISHED</strong>
+            <p className="text-xs mt-0.5">
+              This is a mock-up of how draft #{d.id} would look on Craigslist. It
+              is not live, has no real post ID, and nobody else can see it.
+            </p>
+          </div>
+          <button
+            onClick={props.onClose}
+            className="shrink-0 px-3 py-1 rounded bg-black/80 text-white text-sm hover:bg-black"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="p-4 font-sans text-[13px] leading-snug">
+          <div className="text-[11px] text-blue-700 mb-3">
+            <span className="text-slate-600">south florida</span>
+            {county && <> &gt; <span className="text-slate-600">{county}</span></>}
+            {" > "}services{" > "}skilled trade services
+          </div>
+
+          <h2 className="text-[19px] font-bold mb-1">
+            {d.title}
+            {area && <span className="font-normal text-slate-700"> ({area})</span>}
+          </h2>
+          <p className="text-[11px] text-slate-500 mb-3">
+            compensation: contact for estimate · employment type: contract
+          </p>
+
+          {images.length > 0 ? (
+            <div className="mb-4">
+              <div className="bg-slate-100 flex items-center justify-center">
+                <img
+                  src={`${IMG_BASE}/images/${images[active]?.id}/raw`}
+                  alt={`${active + 1} of ${images.length}`}
+                  className="max-h-[420px] w-auto object-contain"
+                />
+              </div>
+              <p className="text-[11px] text-slate-600 mt-1">
+                image {active + 1} of {images.length}
+              </p>
+              {images.length > 1 && (
+                <div className="flex gap-1 mt-1 flex-wrap">
+                  {images.map((img, i) => (
+                    <button key={img.id} onClick={() => setActive(i)}>
+                      <img
+                        src={`${IMG_BASE}/images/${img.id}/raw`}
+                        alt=""
+                        className={cn(
+                          "h-12 w-16 object-cover border-2",
+                          i === active ? "border-blue-600" : "border-transparent",
+                        )}
+                      />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="mb-4 text-[12px] text-slate-500 italic border border-dashed border-slate-300 p-3">
+              No images attached — this ad would publish as text only, with no
+              thumbnail in search results.
+            </p>
+          )}
+
+          {d.phone_number && (
+            <p className="mb-3">
+              <span className="inline-block border border-slate-400 rounded px-2 py-1 text-[12px] bg-slate-50">
+                ☎ {d.phone_number}
+              </span>
+            </p>
+          )}
+
+          {/* Craigslist preserves the body verbatim, dot padding and keyword
+              wall included. Showing it honestly is the point — it is what a
+              buyer scrolls past. */}
+          <div className="whitespace-pre-wrap break-words border-t border-slate-200 pt-3">
+            {d.body}
+          </div>
+
+          <div className="mt-5 pt-3 border-t border-slate-200 text-[11px] text-slate-600 space-y-0.5">
+            <p>post id: <span className="text-slate-400">(assigned when it publishes)</span></p>
+            <p>posted: <span className="text-slate-400">not yet posted</span></p>
+            <p className="text-slate-400">
+              ♦ this is a preview generated by your dashboard, not a Craigslist page
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
