@@ -34,6 +34,41 @@ class TokenCreate(BaseModel):
     label: str = ""
 
 
+class PostingSwitch(BaseModel):
+    enabled: bool
+    # Free text shown wherever the pause is surfaced, so a week later you know
+    # why it was stopped.
+    reason: str | None = Field(default=None, max_length=200)
+
+
+@router.get("/posting")
+def get_posting_state() -> dict:
+    with conn() as c:
+        g = queue_svc.get_guardrails(c)
+    return {
+        "enabled": g.get("posting_enabled", True),
+        "paused_at": g.get("paused_at"),
+        "paused_reason": g.get("paused_reason"),
+    }
+
+
+@router.put("/posting")
+def set_posting_state(body: PostingSwitch) -> dict:
+    """Stop or resume posting across every machine.
+
+    The queue is left alone — drafts keep their order and resume where they
+    left off. Takes effect on the next claim; a post already in flight runs to
+    completion.
+    """
+    with tx() as c:
+        g = queue_svc.set_posting_enabled(c, enabled=body.enabled, reason=body.reason)
+    return {
+        "enabled": g["posting_enabled"],
+        "paused_at": g.get("paused_at"),
+        "paused_reason": g.get("paused_reason"),
+    }
+
+
 @router.get("/guardrails")
 def get_guardrails() -> dict:
     with conn() as c:
