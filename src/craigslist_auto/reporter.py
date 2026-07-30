@@ -235,6 +235,41 @@ def pending_count() -> int:
         return 0
 
 
+def pending_history_count() -> int:
+    """Unsent events that would leave the server's post history stale.
+
+    Only a post_attempt reporting `outcome='posted'` creates a row the server's
+    cooldown maths depends on. Skips, dry-runs and failures carry no history, so
+    refusing to claim because of them would strand the queue behind noise that
+    can never affect the answer — and with the reporter unconfigured, strand it
+    permanently.
+    """
+    try:
+        with _connect() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM outbox "
+                    "WHERE sent_ts IS NULL AND event_type = 'post_attempt' "
+                    "AND json_extract(payload_json, '$.outcome') = 'posted'"
+                ).fetchone()
+                return row["n"] or 0
+            except sqlite3.OperationalError:
+                # Very old SQLite without the JSON1 extension — fall back to
+                # decoding the payloads here rather than failing open.
+                rows = conn.execute(
+                    "SELECT payload_json FROM outbox "
+                    "WHERE sent_ts IS NULL AND event_type = 'post_attempt'"
+                ).fetchall()
+                return sum(
+                    1 for r in rows
+                    if json.loads(r["payload_json"]).get("outcome") == "posted"
+                )
+    except Exception as e:
+        # Fail closed: if we cannot tell, assume history is stale.
+        logger.warning(f"pending_history_count failed: {e}")
+        return 1
+
+
 def flush_until_empty(max_batches: int = 20) -> int:
     """Drain the outbox before claiming.
 

@@ -10,6 +10,7 @@ line per check on success.
 ```bash
 uv run python tests/test_events_schema.py     # event union, new fields, legacy compat
 uv run python tests/test_guardrail_clamp.py   # compiled ceilings actually clamp
+uv run python tests/test_outbox_guard.py     # only unsent *posted* attempts block a claim
 ```
 
 `test_events_schema.py` covers the thing most likely to break silently: an

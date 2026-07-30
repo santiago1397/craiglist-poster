@@ -143,7 +143,12 @@ DASHBOARD (VPS)                      DESKTOP (Windows)
   depends on it.
 - The desktop **flushes its outbox before claiming**. A backlog of unsent
   `post_attempt` events would leave the server's history stale and let it
-  authorise a post that breaches a cooldown.
+  authorise a post that breaches a cooldown. Only attempts with
+  `outcome='posted'` hold up a claim: skips, dry runs and failures carry no
+  history, and blocking on them strands the queue behind noise — permanently if
+  the reporter is unconfigured, which is exactly the state the production
+  machine was found in (11 unsent `skipped_no_eligible` events, no
+  `REPORTER_URL`).
 - The calendar projection is computed server-side (decision 15 supersedes the
   original plan of projecting from `next_eligible_at` shipped on the heartbeat).
 - Generated images use Craigslist's thumbnail aspect (~4:3), not square — slot 1
