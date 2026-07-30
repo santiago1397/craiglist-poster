@@ -6,6 +6,7 @@ import PostsPage from "./pages/PostsPage";
 import PostDetailPage from "./pages/PostDetailPage";
 import ReviewPage from "./pages/ReviewPage";
 import ImagesPage from "./pages/ImagesPage";
+import PromptsPage from "./pages/PromptsPage";
 import { cn } from "./lib/cn";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -40,6 +41,7 @@ function NavBar() {
         {link("/", "Dashboard")}
         {link("/review", "Review")}
         {link("/images", "Images")}
+        {link("/prompts", "Prompts")}
         {link("/posts", "Posts")}
       </div>
       <div className="flex items-center gap-3 text-sm text-slate-400">
@@ -80,6 +82,14 @@ export default function App() {
             element={
               <Protected>
                 <ImagesPage />
+              </Protected>
+            }
+          />
+          <Route
+            path="/prompts"
+            element={
+              <Protected>
+                <PromptsPage />
               </Protected>
             }
           />

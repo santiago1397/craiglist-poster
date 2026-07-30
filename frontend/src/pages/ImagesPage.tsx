@@ -49,6 +49,9 @@ export default function ImagesPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("pending");
   const [count, setCount] = useState(4);
+  // Cover vs photo matters: covers get text composited on and are drawn from a
+  // separate prompt, so the distinction has to be made at upload and generate.
+  const [kind, setKind] = useState<"photo" | "cover">("photo");
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -92,7 +95,7 @@ export default function ImagesPage() {
     try {
       const r = await api.post<{ created: number; cost_usd: number; error: string | null }>(
         "/images/generate",
-        { count },
+        { count, kind },
       );
       // Generation reports provider trouble in the body rather than failing, so
       // surface both outcomes: what arrived, and what went wrong.
@@ -118,11 +121,12 @@ export default function ImagesPage() {
     for (const f of Array.from(files)) {
       const form = new FormData();
       form.append("file", f);
-      const res = await fetch(`${BASE.replace(/\/+$/, "")}/images/upload`, {
-        method: "POST",
-        credentials: "include",
-        body: form,
-      });
+      // kind was never being sent, so every upload became a photo and a cover
+      // could not be uploaded at all.
+      const res = await fetch(
+        `${BASE.replace(/\/+$/, "")}/images/upload?kind=${encodeURIComponent(kind)}`,
+        { method: "POST", credentials: "include", body: form },
+      );
       if (res.ok) added++;
       else skipped.push(`${f.name} (${res.status === 409 ? "already in stack" : `HTTP ${res.status}`})`);
     }
@@ -151,6 +155,15 @@ export default function ImagesPage() {
             onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
             className="w-16 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm"
           />
+          <select
+            value={kind}
+            onChange={(e) => setKind(e.target.value as "photo" | "cover")}
+            className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm"
+            title="Covers get the phone number composited on and use their own prompt"
+          >
+            <option value="photo">photo</option>
+            <option value="cover">cover</option>
+          </select>
           <button
             disabled={busy}
             onClick={() => void generate()}

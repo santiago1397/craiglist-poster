@@ -47,6 +47,24 @@ ROOF_KINDS = [
 # Generation
 # ---------------------------------------------------------------------------
 
+def _default_prompt(conn: psycopg.Connection, kind: str) -> str:
+    """The library's default for this kind, or the built-in if none is set.
+
+    Covers and photos are separate on purpose: a cover has text composited over
+    its lower third, so it needs that area kept clear.
+    """
+    from . import prompts as prompts_svc
+
+    purpose = "cover_image" if kind == "cover" else "photo_image"
+    return prompts_svc.get_default_body(conn, purpose) or DEFAULT_IMAGE_PROMPT
+
+
+def _kinds(conn: psycopg.Connection) -> list[str]:
+    from . import prompts as prompts_svc
+
+    return prompts_svc.get_image_kinds(conn) or ROOF_KINDS
+
+
 def generate_images(
     conn: psycopg.Connection,
     *,
@@ -54,6 +72,8 @@ def generate_images(
     city: str | None = None,
     kind: str = "photo",
     rng: random.Random | None = None,
+    prompt_override: str | None = None,
+    status: str = "pending",
 ) -> dict:
     """Generate into the pending shelf. Never raises for provider problems —
     returns what succeeded plus the error, because a failed batch must not take
@@ -62,7 +82,8 @@ def generate_images(
     g = conn.execute("SELECT * FROM generation_settings LIMIT 1").fetchone()
     settings = get_settings()
 
-    template = (g["image_prompt"] or "").strip() or DEFAULT_IMAGE_PROMPT
+    template = (prompt_override or "").strip() or _default_prompt(conn, kind)
+    kinds = _kinds(conn)
     unit_cost = float(g["image_cost_usd"] or 0)
 
     try:
@@ -78,10 +99,16 @@ def generate_images(
     created: list[dict] = []
     error: str | None = None
     for _ in range(count):
-        prompt = template.format(
-            city=city or "South Florida",
-            kind=rng.choice(ROOF_KINDS),
-        )
+        # A prompt is free text, so it may contain braces that are not ours.
+        # Fall back to the literal text rather than failing the whole batch on
+        # a stray brace the operator typed.
+        try:
+            prompt = template.format(
+                city=city or "South Florida", kind=rng.choice(kinds)
+            )
+        except (KeyError, IndexError, ValueError) as e:
+            logger.warning(f"prompt has an unrecognised placeholder ({e}); using it literally")
+            prompt = template
         try:
             blobs = provider.generate(prompt, aspect=g["image_aspect"], n=1)
         except ImageGenError as e:
@@ -94,6 +121,7 @@ def generate_images(
                     conn, data,
                     source="generated", kind=kind, prompt=prompt,
                     provider=provider.name, model=g["image_model"], cost=unit_cost,
+                    status=status,
                 )
             except OSError as e:
                 # Disk full, bad volume permissions, read-only mount. Report it
@@ -150,6 +178,30 @@ def _store(
         logger.debug(f"image {digest[:12]} already stored; skipping duplicate")
         return None
     return dict(row)
+
+
+def purge_test_renders(conn: psycopg.Connection, older_than_hours: int = 2) -> int:
+    """Delete test renders nobody kept.
+
+    The studio deletes them when you close it, but a closed tab or a lost
+    connection would otherwise leave paid-for junk on the volume forever.
+    """
+    if older_than_hours <= 0:
+        # "Discard everything." Not expressed as an age filter because NOW() is
+        # transaction-start time in Postgres, so a row inserted in this same
+        # transaction is never strictly older than it and would survive.
+        rows = conn.execute("SELECT id FROM images WHERE status = 'test'").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id FROM images WHERE status = 'test' "
+            "AND created_at < NOW() - make_interval(hours => %s)",
+            (older_than_hours,),
+        ).fetchall()
+    for r in rows:
+        delete_image(conn, r["id"])
+    if rows:
+        logger.info(f"purged {len(rows)} abandoned test render(s)")
+    return len(rows)
 
 
 def store_upload(conn: psycopg.Connection, data: bytes, *, mime: str, kind: str = "photo") -> dict | None:
