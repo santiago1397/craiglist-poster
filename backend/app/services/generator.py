@@ -137,13 +137,35 @@ def _extract_json(content: str) -> dict:
         if start == -1 or end <= start:
             raise GenerationError(f"no JSON object in model output: {content[:200]!r}")
         text = text[start: end + 1]
+    # strict=False permits literal control characters inside strings. The model
+    # writes real newlines between paragraphs rather than \n escapes, which is
+    # invalid JSON by the letter of the spec — in production this alone caused
+    # roughly a third of generations to fall back.
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise GenerationError(f"model output was not valid JSON: {e}") from e
+        data = json.loads(text, strict=False)
+    except json.JSONDecodeError:
+        data = _salvage(text)
     if not isinstance(data, dict):
         raise GenerationError("model returned JSON that is not an object")
     return data
+
+
+# Last-resort extraction for output that is JSON-shaped but not parseable —
+# typically an unescaped quote inside the body. Cheaper than burning a
+# regeneration, and anything it returns still has to pass _validate.
+_TITLE_RE = re.compile(r'"title"\s*:\s*"(.*?)"\s*,\s*"body_head"', re.S)
+_HEAD_RE = re.compile(r'"body_head"\s*:\s*"(.*)"\s*\}?\s*$', re.S)
+
+
+def _salvage(text: str) -> dict:
+    title_m, head_m = _TITLE_RE.search(text), _HEAD_RE.search(text)
+    if not (title_m and head_m):
+        raise GenerationError(
+            f"model output was not valid JSON and could not be salvaged: {text[:200]!r}"
+        )
+    unescape = lambda s: s.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
+    logger.debug("salvaged title/body_head from malformed JSON")
+    return {"title": unescape(title_m.group(1)), "body_head": unescape(head_m.group(1))}
 
 
 def _validate(data: dict, seed: dict) -> tuple[str, str]:
@@ -326,27 +348,36 @@ def topup(conn: psycopg.Connection, *, force: bool = False, limit: int = 50) -> 
 
     rng = random.Random()
     summary: dict[str, dict] = {}
-    created_total = 0
+    wants: dict[str, int] = {}
 
     for account in accounts:
         depth = conn.execute(
             "SELECT COUNT(*) AS n FROM drafts WHERE account = %s AND status = 'queued'",
             (account,),
         ).fetchone()["n"]
+        summary[account] = {"depth": depth, "created": 0, "ai": 0, "fallback": 0}
         if depth >= floor and not force:
-            summary[account] = {"depth": depth, "created": 0, "reason": "above floor"}
+            summary[account]["reason"] = "above floor"
             continue
+        wants[account] = max(0, target - depth)
 
-        want = max(0, target - depth)
-        made, by_source = 0, {"ai": 0, "fallback": 0}
-        for _ in range(min(want, limit - created_total)):
+    # Round-robin rather than draining one account at a time: with a batch limit
+    # smaller than the total shortfall, the first account would otherwise eat the
+    # whole budget and leave the others empty.
+    created_total = 0
+    while created_total < limit and any(v > 0 for v in wants.values()):
+        for account, remaining in list(wants.items()):
+            if remaining <= 0 or created_total >= limit:
+                continue
             draft = build_draft(conn, account=account, rng=rng)
             if draft is None:
-                break
-            by_source[draft["generated_by"]] += 1
-            made += 1
+                wants[account] = 0
+                continue
+            wants[account] -= 1
+            summary[account]["created"] += 1
+            summary[account]["depth"] += 1
+            summary[account][draft["generated_by"]] += 1
             created_total += 1
-        summary[account] = {"depth": depth + made, "created": made, **by_source}
 
     logger.info(f"topup created {created_total} draft(s): {summary}")
     return {
