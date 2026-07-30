@@ -25,8 +25,8 @@ for county, cities in LOCATIONS.items():
         assert city.strip(), f"empty city in {county}"
         assert zipc.isdigit() and len(zipc) == 5, f"bad zip for {city}: {zipc!r}"
         total_cities += 1
-assert total_cities == 42, f"expected 42 county/city pairs from the workbook, got {total_cities}"
-ok.append(f"42 county/city pairs across {len(LOCATIONS)} counties, all zips well-formed")
+assert total_cities == 40, f"expected 40 county/city pairs, got {total_cities}"
+ok.append(f"40 county/city pairs across {len(LOCATIONS)} counties, all zips well-formed")
 
 # No city may appear under two counties — the composer keys cities off county.
 seen: dict[str, str] = {}
@@ -49,12 +49,13 @@ for county in LOCATIONS:
     )
 ok.append("subarea_supported agrees with poster._select_subarea for every county")
 
-# Monroe is the known gap; assert it is flagged rather than silently offered.
-assert "Monroe" in LOCATIONS
-assert not subarea_supported("Monroe"), "Monroe must be flagged as not routable"
-assert subarea_supported("Miami-Dade") and subarea_supported("Broward") \
-    and subarea_supported("Palm Beach")
-ok.append("Monroe flagged as not routable; the other three are routable")
+# Monroe is not offered at all — the poster cannot route the Keys, so listing it
+# would only invite a mis-filed ad. Every county we DO offer must be routable.
+assert "Monroe" not in LOCATIONS, "Monroe must not be offered in the composer"
+assert not subarea_supported("Monroe"), "Monroe must still read as not routable"
+assert all(subarea_supported(c) for c in LOCATIONS), \
+    f"an unroutable county is being offered: {[c for c in LOCATIONS if not subarea_supported(c)]}"
+ok.append("every offered county is routable; Monroe is not offered")
 
 # Constants match the workbook.
 assert LICENSE_NUMBER == "CCC1334317"
