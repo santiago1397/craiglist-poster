@@ -9,7 +9,7 @@ import typer
 from dotenv import load_dotenv
 from loguru import logger
 
-# Load .env (INSTANTPROXIES_USER/PASS, etc.) before any module reads os.environ.
+# Load .env (REPORTER_URL/REPORTER_TOKEN, etc.) before any module reads os.environ.
 load_dotenv()
 
 from .accounts import eligibility_report, pick_next_account, record_post
@@ -271,17 +271,23 @@ def _emit_post_failure(
 def check_ghosts(
     proxy: str = typer.Option(
         None,
-        help="HTTP proxy override. If omitted, uses INSTANTPROXIES_USER/PASS from .env "
-        "with the configured GHOST_CHECK_PROXY_HOST. Fail-closed: aborts if neither is set.",
-    )
+        help="HTTP proxy to check through, e.g. http://host:port. Use a phone "
+        "hotspot or any non-home exit so the check is a true public view.",
+    ),
+    allow_local_ip: bool = typer.Option(
+        False,
+        "--allow-local-ip",
+        help="Check from this machine's own IP. Weaker: CL shows you your own "
+        "ghosted posts, so 'visible' results can be false.",
+    ),
 ):
     """
     Check whether recent posts are visible in public search.
-    Runs through a non-home IP (default: configured InstantProxies NY exit) so
-    your own session doesn't see ghosted posts as 'visible'.
+    Prefer --proxy so the request egresses from a different IP than the one that
+    created the post; otherwise your own session sees ghosted posts as 'visible'.
     """
     _setup_logging()
-    check_all_recent(proxy=proxy)
+    check_all_recent(proxy=proxy, allow_local_ip=allow_local_ip)
 
 
 @app.command("posts")
@@ -327,7 +333,7 @@ def posts(
         typer.echo(f"  {flag} {when}  {p['account']:8s}  {title}")
         typer.echo(f"           {url}")
     typer.echo("")
-    typer.echo("Tip: run `cl check-ghosts --proxy ...` to refresh ghost status from a different network.")
+    typer.echo("Tip: run `cl check-ghosts --proxy http://host:port` to refresh ghost status from a different network.")
 
 
 @app.command("stats-sync")

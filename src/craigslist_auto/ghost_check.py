@@ -1,43 +1,15 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote
 
 import httpx
 from loguru import logger
 
 from .accounts import mark_ghosted
-from .config import (
-    CL_SEARCH_URL,
-    GHOST_CHECK_PROXY_HOST,
-    GHOST_CHECK_PROXY_PORT,
-    GHOST_LOG,
-    STATE_FILE,
-)
-
-
-def _build_ghost_proxy_url() -> str | None:
-    """Return the InstantProxies HTTP proxy URL, or None if creds missing."""
-    user = os.environ.get("INSTANTPROXIES_USER")
-    pw = os.environ.get("INSTANTPROXIES_PASS")
-    if not (user and pw):
-        return None
-    return f"http://{quote(user, safe='')}:{quote(pw, safe='')}@{GHOST_CHECK_PROXY_HOST}:{GHOST_CHECK_PROXY_PORT}"
-
-
-def _verify_proxy_exit_ip(proxy_url: str, expected_ip: str) -> None:
-    """Confirm the proxy is up AND egresses from the IP we expect. Raises on mismatch."""
-    with httpx.Client(timeout=15, proxy=proxy_url) as c:
-        seen = c.get("https://api.ipify.org").text.strip()
-    if seen != expected_ip:
-        raise RuntimeError(
-            f"Proxy exit IP mismatch: got {seen!r}, expected {expected_ip!r}. "
-            "Aborting to avoid leaking ghost-check traffic from the wrong IP."
-        )
+from .config import CL_SEARCH_URL, GHOST_LOG, STATE_FILE
 
 
 def _load_state() -> dict:
@@ -49,8 +21,9 @@ def _load_state() -> dict:
 def _search_html(query: str, proxy: str | None = None) -> str:
     """
     Fetch CL search results as anonymous user.
-    For a TRUE ghost check, run this from a different network than the posting machine
-    (set HTTP_PROXY/HTTPS_PROXY env vars to a residential proxy or your phone hotspot).
+    For a TRUE ghost check, run this from a different network than the posting
+    machine — pass `--proxy` (e.g. a phone hotspot's proxy) so the request does
+    not egress from the IP that created the post.
     """
     headers = {
         "User-Agent": (
@@ -85,23 +58,25 @@ def check_post_visibility(post_url: str, title: str, *, proxy: str | None = None
     return post_id in html
 
 
-def check_all_recent(proxy: str | None = None) -> None:
-    # Fail-closed: ghost-check MUST go through a non-home IP. If caller didn't
-    # pass an explicit --proxy, build one from env. If neither is available,
-    # abort rather than silently leaking checks from the posting machine's IP.
-    if proxy is None:
-        proxy = _build_ghost_proxy_url()
-    if proxy is None:
+def check_all_recent(proxy: str | None = None, *, allow_local_ip: bool = False) -> None:
+    # Still fail-closed by default: a check run from the posting machine's own
+    # IP is not trustworthy, because CL keeps showing you your own posts even
+    # after they're ghosted for everyone else. There is no built-in proxy any
+    # more — the caller supplies one, or explicitly accepts the weaker check.
+    if proxy is None and not allow_local_ip:
         raise RuntimeError(
-            "Refusing to run ghost-check from the local IP. "
-            "Set INSTANTPROXIES_USER/INSTANTPROXIES_PASS in .env, or pass --proxy."
+            "Refusing to run ghost-check from the local IP — results would be "
+            "unreliable (CL shows you your own ghosted posts). Pass --proxy "
+            "http://host:port to check from another network, or --allow-local-ip "
+            "to accept the weaker check."
         )
-    # If using the configured InstantProxies host, verify exit IP matches.
-    if GHOST_CHECK_PROXY_HOST in proxy:
-        _verify_proxy_exit_ip(proxy, GHOST_CHECK_PROXY_HOST)
-        logger.info(f"ghost-check proxy verified: egressing as {GHOST_CHECK_PROXY_HOST}")
+    if proxy:
+        logger.info("ghost-check using caller-supplied --proxy")
     else:
-        logger.info("ghost-check using caller-supplied --proxy (skipping exit-IP verify)")
+        logger.warning(
+            "ghost-check running from the LOCAL IP (--allow-local-ip). "
+            "'VISIBLE' results here are not proof a post isn't ghosted."
+        )
 
     from . import reporter
     from .events import GhostCheck
@@ -123,6 +98,9 @@ def check_all_recent(proxy: str | None = None) -> None:
                 "post_at": p["at"],
                 "url": p["url"],
                 "visible": visible,
+                # Records how much this row can be trusted — an unproxied check
+                # can report 'visible' for a post that's ghosted to the public.
+                "proxied": bool(proxy),
             }
             f.write(json.dumps(entry) + "\n")
             status = "VISIBLE" if visible else "GHOSTED"

@@ -18,12 +18,6 @@ CL_SITE = "https://miami.craigslist.org"
 CL_POST_URL = "https://post.craigslist.org/c/mia"
 CL_SEARCH_URL = "https://miami.craigslist.org/search/sss"
 
-# Ghost-check egress proxy. Visiting CL search from a different IP than the
-# posting machine prevents false-negatives (CL shows your own post to you even
-# when it's ghosted for the public). Creds come from .env: INSTANTPROXIES_USER/PASS.
-GHOST_CHECK_PROXY_HOST = "181.177.78.206"
-GHOST_CHECK_PROXY_PORT = 8800
-
 # Anti-ban guardrails. Do NOT raise these without proving accounts survive.
 MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 20
 MAX_POSTS_PER_DAY_TOTAL = 3
