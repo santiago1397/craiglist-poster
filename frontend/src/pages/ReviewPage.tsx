@@ -46,6 +46,12 @@ type Health = {
   needs_attention: number;
 };
 
+type PostingState = {
+  enabled: boolean;
+  paused_at: string | null;
+  paused_reason: string | null;
+};
+
 const FILTERS = [
   { key: "needs_attention", label: "Needs attention" },
   { key: "unreviewed", label: "Unreviewed" },
@@ -69,6 +75,7 @@ export default function ReviewPage() {
   const [accounts, setAccounts] = useState<string[]>([]);
   const [editing, setEditing] = useState<Draft | null>(null);
   const [creating, setCreating] = useState(false);
+  const [posting, setPosting] = useState<PostingState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -88,12 +95,14 @@ export default function ReviewPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [list, accts] = await Promise.all([
+      const [list, accts, posting] = await Promise.all([
         api.get<{ drafts: Draft[] }>("/drafts", params),
         api.get<{ accounts: string[] }>("/accounts"),
+        api.get<PostingState>("/settings/posting"),
       ]);
       setDrafts(list.drafts);
       setAccounts(accts.accounts);
+      setPosting(posting);
       if (accts.accounts.length) {
         setHealth(await api.get<Health>("/drafts/health", { accounts: accts.accounts.join(",") }));
       }
@@ -143,6 +152,16 @@ export default function ReviewPage() {
         <div className="rounded border border-red-800 bg-red-950/50 px-3 py-2 text-sm text-red-200">
           {error}
         </div>
+      )}
+
+      {posting && (
+        <PostingSwitch
+          state={posting}
+          busy={busy}
+          onToggle={(enabled, reason) =>
+            mutate(() => api.put("/settings/posting", { enabled, reason }))
+          }
+        />
       )}
 
       {health && <QueueHealth health={health} accounts={accounts} />}
@@ -332,6 +351,67 @@ function Field(props: {
         className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
       />
     </label>
+  );
+}
+
+// The kill switch. Deliberately the loudest thing on the page when paused —
+// a system that has silently stopped posting is the expensive failure here.
+function PostingSwitch(props: {
+  state: PostingState;
+  busy: boolean;
+  onToggle: (enabled: boolean, reason?: string) => void;
+}) {
+  const { state, busy } = props;
+  const [reason, setReason] = useState("");
+
+  if (!state.enabled) {
+    return (
+      <section className="rounded border border-amber-600 bg-amber-950/40 p-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <p className="font-semibold text-amber-200">Posting is paused</p>
+            <p className="text-xs text-amber-200/70 mt-0.5">
+              Paused {fmt(state.paused_at)}
+              {state.paused_reason ? ` — ${state.paused_reason}` : ""}. The queue is
+              untouched; drafts resume in the same order.
+            </p>
+          </div>
+          <button
+            disabled={busy}
+            onClick={() => props.onToggle(true)}
+            className="px-4 py-1.5 rounded text-sm bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 shrink-0"
+          >
+            Resume posting
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded border border-slate-800 bg-slate-900/50 p-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-emerald-500" />
+          <span className="text-sm text-slate-300">Posting is active</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Reason (optional)"
+            className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs w-48"
+          />
+          <button
+            disabled={busy}
+            onClick={() => props.onToggle(false, reason || undefined)}
+            className="px-4 py-1.5 rounded text-sm bg-amber-700 hover:bg-amber-600 disabled:opacity-40"
+          >
+            Stop posting
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 

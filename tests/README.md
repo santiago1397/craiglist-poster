@@ -41,6 +41,7 @@ PYTHONPATH=backend uv run python tests/test_routes_auth.py    # no DB reads, but
 PYTHONPATH=backend uv run python tests/test_queue_logic.py    # eligibility, claim, state machine
 PYTHONPATH=backend uv run python tests/test_accounts_list.py  # account picker on a fresh DB
 PYTHONPATH=backend uv run python tests/test_queue_http.py     # machine tokens over HTTP
+PYTHONPATH=backend uv run python tests/test_posting_switch.py # pause/resume actually stops claims
 
 dropdb cl_scratch
 ```

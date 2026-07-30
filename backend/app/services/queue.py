@@ -35,6 +35,30 @@ def get_guardrails(conn: psycopg.Connection) -> dict:
     return dict(row)
 
 
+def set_posting_enabled(
+    conn: psycopg.Connection, *, enabled: bool, reason: str | None = None
+) -> dict:
+    """Flip the operator kill switch.
+
+    Pausing leaves the queue completely untouched — drafts keep their order and
+    resume exactly where they left off. It only makes every account ineligible,
+    so the next claim returns nothing. A post already in flight is not
+    interrupted; the desktop finishes it and reports normally.
+    """
+    conn.execute(
+        """
+        UPDATE guardrail_settings
+        SET posting_enabled = %s,
+            paused_at     = CASE WHEN %s THEN NULL ELSE NOW() END,
+            paused_reason = CASE WHEN %s THEN NULL ELSE %s END,
+            updated_at    = NOW()
+        WHERE singleton
+        """,
+        (enabled, enabled, enabled, (reason or "").strip()[:200] or None),
+    )
+    return get_guardrails(conn)
+
+
 def update_guardrails(conn: psycopg.Connection, values: dict) -> dict:
     """Patch the singleton settings row. Only known keys are written."""
     allowed = {
@@ -106,6 +130,13 @@ def evaluate_eligibility(
     local = _local_now(now)
 
     global_blocks: list[str] = []
+    # Operator kill switch. Checked first so a paused system reports one clear
+    # reason instead of burying it under time-of-day noise.
+    if not g.get("posting_enabled", True):
+        reason = (g.get("paused_reason") or "").strip()
+        global_blocks.append(
+            f"posting paused from the dashboard{': ' + reason if reason else ''}"
+        )
     if g["post_weekdays_only"] and local.weekday() >= 5:
         global_blocks.append("weekend: posting restricted to Mon-Fri")
     if not (g["post_window_start_hour"] <= local.hour < g["post_window_end_hour"]):

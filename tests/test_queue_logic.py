@@ -24,7 +24,10 @@ def reset():
         c.execute("TRUNCATE drafts, posts, post_attempts, ghost_checks, flow_errors CASCADE")
         c.execute("UPDATE guardrail_settings SET max_posts_per_day_total = 3, "
                   "min_hours_between_posts_same_account = 20, "
-                  "max_posts_per_account_per_week = 7")
+                  "max_posts_per_account_per_week = 7, "
+                  # Reset the kill switch too, or a previous test leaving it
+                  # paused makes every check here fail for the wrong reason.
+                  "posting_enabled = TRUE, paused_at = NULL, paused_reason = NULL")
 
 
 def add_draft(account, title, body="body text here", **kw):
