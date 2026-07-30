@@ -52,6 +52,19 @@ type PostingState = {
   paused_reason: string | null;
 };
 
+type CountyRef = {
+  name: string;
+  subarea_supported: boolean;
+  cities: { city: string; zip: string }[];
+};
+
+type LocationRef = {
+  counties: CountyRef[];
+  phone_numbers: string[];
+  license_number: string;
+  service_offered: string;
+};
+
 const FILTERS = [
   { key: "needs_attention", label: "Needs attention" },
   { key: "unreviewed", label: "Unreviewed" },
@@ -76,6 +89,7 @@ export default function ReviewPage() {
   const [editing, setEditing] = useState<Draft | null>(null);
   const [creating, setCreating] = useState(false);
   const [posting, setPosting] = useState<PostingState | null>(null);
+  const [locations, setLocations] = useState<LocationRef | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -95,14 +109,16 @@ export default function ReviewPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [list, accts, posting] = await Promise.all([
+      const [list, accts, posting, locs] = await Promise.all([
         api.get<{ drafts: Draft[] }>("/drafts", params),
         api.get<{ accounts: string[] }>("/accounts"),
         api.get<PostingState>("/settings/posting"),
+        api.get<LocationRef>("/reference/locations"),
       ]);
       setDrafts(list.drafts);
       setAccounts(accts.accounts);
       setPosting(posting);
+      setLocations(locs);
       if (accts.accounts.length) {
         setHealth(await api.get<Health>("/drafts/health", { accounts: accts.accounts.join(",") }));
       }
@@ -221,6 +237,7 @@ export default function ReviewPage() {
       {creating && (
         <CreateDialog
           accounts={accounts}
+          locations={locations}
           onClose={() => setCreating(false)}
           onCreate={async (payload) => {
             await mutate(() => api.post("/drafts", payload));
@@ -237,9 +254,11 @@ export default function ReviewPage() {
 // same queue and still editable in the same dialog.
 function CreateDialog(props: {
   accounts: string[];
+  locations: LocationRef | null;
   onClose: () => void;
   onCreate: (payload: Record<string, unknown>) => Promise<void>;
 }) {
+  const L = props.locations;
   const [f, setF] = useState({
     account: props.accounts[0] ?? "",
     title: "",
@@ -252,7 +271,32 @@ function CreateDialog(props: {
   });
   const set = (k: keyof typeof f) => (e: { target: { value: string } }) =>
     setF({ ...f, [k]: e.target.value });
-  const valid = f.account && f.title.trim() && f.body.trim();
+
+  // Prefill the constants once reference data lands — license and phone are
+  // the same on every ad, so making you retype them only invites typos.
+  useEffect(() => {
+    if (!L) return;
+    setF((prev) => ({
+      ...prev,
+      license_number: prev.license_number || L.license_number,
+      phone_number: prev.phone_number || L.phone_numbers[0],
+    }));
+  }, [L]);
+
+  const county = L?.counties.find((c) => c.name === f.county) ?? null;
+
+  // Changing county invalidates the chosen city, so clear both it and the zip
+  // rather than leaving a Broward city sitting under Palm Beach.
+  const onCounty = (name: string) =>
+    setF({ ...f, county: name, city: "", postal_code: "" });
+
+  // Selecting a city fills its zip, still editable afterwards.
+  const onCity = (city: string) => {
+    const hit = county?.cities.find((c) => c.city === city);
+    setF({ ...f, city, postal_code: hit?.zip ?? f.postal_code });
+  };
+
+  const valid = f.account && f.title.trim() && f.body.trim() && f.county && f.city;
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-10">
@@ -285,12 +329,72 @@ function CreateDialog(props: {
             ) : (
               <Field label="Account (e.g. craigs1)" value={f.account} onChange={set("account")} />
             )}
-            <Field label="City" value={f.city} onChange={set("city")} />
-            <Field label="County" value={f.county} onChange={set("county")} />
+            {/* County first: it decides which cities are valid, and it is what
+                the poster uses to pick the Craigslist subarea. */}
+            <label className="block">
+              <span className="text-xs text-slate-400">County</span>
+              <select
+                value={f.county}
+                onChange={(e) => onCounty(e.target.value)}
+                className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
+              >
+                <option value="">Select…</option>
+                {L?.counties.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                    {c.subarea_supported ? "" : "  (not routable)"}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="text-xs text-slate-400">
+                City {county ? `(${county.cities.length})` : ""}
+              </span>
+              <select
+                value={f.city}
+                onChange={(e) => onCity(e.target.value)}
+                disabled={!county}
+                className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm disabled:opacity-40"
+              >
+                <option value="">{county ? "Select…" : "Pick a county first"}</option>
+                {county?.cities.map((c) => (
+                  <option key={c.city} value={c.city}>
+                    {c.city}
+                  </option>
+                ))}
+              </select>
+            </label>
+
             <Field label="Zip" value={f.postal_code} onChange={set("postal_code")} />
-            <Field label="Phone" value={f.phone_number} onChange={set("phone_number")} />
+
+            <label className="block">
+              <span className="text-xs text-slate-400">Phone</span>
+              <select
+                value={f.phone_number}
+                onChange={set("phone_number")}
+                className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
+              >
+                {L?.phone_numbers.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </label>
+
             <Field label="License" value={f.license_number} onChange={set("license_number")} />
           </div>
+
+          {county && !county.subarea_supported && (
+            <p className="text-xs text-amber-300 border border-amber-800/60 bg-amber-950/30 rounded px-2 py-1.5">
+              The poster cannot map <strong>{county.name}</strong> to a Craigslist
+              subarea — it will fall back to the first option on the form and file
+              the ad under the wrong area. Use a different county until that is
+              fixed.
+            </p>
+          )}
           <Field label="Title" value={f.title} onChange={set("title")} />
           <label className="block">
             <span className="text-xs text-slate-400">
@@ -320,6 +424,7 @@ function CreateDialog(props: {
               onClick={() =>
                 void props.onCreate({
                   ...f,
+                  service_offered: L?.service_offered ?? "",
                   // body_head drives the advisory similarity score; without a
                   // generator to split head from tail, the body doubles as it.
                   body_head: f.body.split("\n\n.")[0].slice(0, 2000),
