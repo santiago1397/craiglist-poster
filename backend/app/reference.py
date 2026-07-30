@@ -64,11 +64,14 @@ LOCATIONS: dict[str, list[tuple[str, str]]] = {
         ("Lake Worth Beach", "33460"),
         ("West Palm Beach", "33401"),
     ],
-    "Monroe": [
-        ("Key Largo", "33037"),
-        ("Key West", "33040"),
-    ],
 }
+
+# Monroe (Key West, Key Largo) was in the original workbook but is deliberately
+# not offered. Craigslist puts the Keys on their own site rather than treating
+# them as a Miami subarea, so `poster._select_subarea` cannot route them and
+# would file those ads under whichever area happened to be first on the form.
+# The five Monroe seed rows were deleted rather than left to be picked by
+# mistake. Re-adding them means teaching the poster to post to a second site.
 
 # Substrings `poster._select_subarea` matches on. Kept here so the dashboard can
 # warn about a county the poster cannot route, instead of the operator finding
