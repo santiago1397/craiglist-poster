@@ -18,7 +18,11 @@ def list_accounts() -> dict:
                 SELECT account FROM posts
                 UNION SELECT account FROM post_attempts
                 UNION SELECT account FROM account_states
+                -- Include drafts so an account shows up as soon as it has
+                -- queued work, rather than only after it has posted.
+                UNION SELECT account FROM drafts
             ) sub
+            WHERE account <> '(none)'
             ORDER BY account
             """
         ).fetchall()

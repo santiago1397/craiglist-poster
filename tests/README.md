@@ -38,6 +38,7 @@ cd backend && uv run alembic upgrade head && cd ..
 
 PYTHONPATH=backend uv run python tests/test_routes_auth.py    # no DB reads, but imports the app
 PYTHONPATH=backend uv run python tests/test_queue_logic.py    # eligibility, claim, state machine
+PYTHONPATH=backend uv run python tests/test_accounts_list.py  # account picker on a fresh DB
 PYTHONPATH=backend uv run python tests/test_queue_http.py     # machine tokens over HTTP
 
 dropdb cl_scratch

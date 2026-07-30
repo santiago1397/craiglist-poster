@@ -68,6 +68,7 @@ export default function ReviewPage() {
   const [filter, setFilter] = useState<FilterKey>("needs_attention");
   const [accounts, setAccounts] = useState<string[]>([]);
   const [editing, setEditing] = useState<Draft | null>(null);
+  const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -122,12 +123,20 @@ export default function ReviewPage() {
     <div className="p-4 space-y-4">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-semibold">Review</h1>
-        <button
-          onClick={() => void load()}
-          className="text-sm px-2 py-1 rounded hover:bg-slate-800 text-slate-300"
-        >
-          Refresh
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setCreating(true)}
+            className="text-sm px-3 py-1 rounded bg-sky-700 hover:bg-sky-600"
+          >
+            New draft
+          </button>
+          <button
+            onClick={() => void load()}
+            className="text-sm px-2 py-1 rounded hover:bg-slate-800 text-slate-300"
+          >
+            Refresh
+          </button>
+        </div>
       </header>
 
       {error && (
@@ -189,7 +198,140 @@ export default function ReviewPage() {
           }}
         />
       )}
+
+      {creating && (
+        <CreateDialog
+          accounts={accounts}
+          onClose={() => setCreating(false)}
+          onCreate={async (payload) => {
+            await mutate(() => api.post("/drafts", payload));
+            setCreating(false);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// Phase 1 has no generator yet, so drafts are written by hand here. Phase 2
+// replaces this with MiniMax-drafted copy from a prompt, still landing in the
+// same queue and still editable in the same dialog.
+function CreateDialog(props: {
+  accounts: string[];
+  onClose: () => void;
+  onCreate: (payload: Record<string, unknown>) => Promise<void>;
+}) {
+  const [f, setF] = useState({
+    account: props.accounts[0] ?? "",
+    title: "",
+    body: "",
+    city: "",
+    county: "",
+    postal_code: "",
+    phone_number: "",
+    license_number: "",
+  });
+  const set = (k: keyof typeof f) => (e: { target: { value: string } }) =>
+    setF({ ...f, [k]: e.target.value });
+  const valid = f.account && f.title.trim() && f.body.trim();
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-10">
+      <div className="bg-slate-900 border border-slate-700 rounded-lg w-full max-w-3xl max-h-[90vh] flex flex-col">
+        <div className="p-3 border-b border-slate-800 flex items-center justify-between">
+          <h2 className="font-medium">New draft</h2>
+          <button onClick={props.onClose} className="text-slate-400 hover:text-white px-2">
+            ✕
+          </button>
+        </div>
+        <div className="p-3 space-y-3 overflow-auto">
+          <div className="grid grid-cols-2 gap-3">
+            {/* On a fresh database no account has posted yet, so the list is
+                empty — fall back to typing the name rather than dead-ending. */}
+            {props.accounts.length > 0 ? (
+              <label className="block">
+                <span className="text-xs text-slate-400">Account</span>
+                <select
+                  value={f.account}
+                  onChange={set("account")}
+                  className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
+                >
+                  {props.accounts.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <Field label="Account (e.g. craigs1)" value={f.account} onChange={set("account")} />
+            )}
+            <Field label="City" value={f.city} onChange={set("city")} />
+            <Field label="County" value={f.county} onChange={set("county")} />
+            <Field label="Zip" value={f.postal_code} onChange={set("postal_code")} />
+            <Field label="Phone" value={f.phone_number} onChange={set("phone_number")} />
+            <Field label="License" value={f.license_number} onChange={set("license_number")} />
+          </div>
+          <Field label="Title" value={f.title} onChange={set("title")} />
+          <label className="block">
+            <span className="text-xs text-slate-400">
+              Body — paste the full posting text, keyword tail included
+            </span>
+            <textarea
+              value={f.body}
+              onChange={set("body")}
+              rows={14}
+              className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm font-mono"
+            />
+          </label>
+        </div>
+        <div className="p-3 border-t border-slate-800 flex justify-between items-center">
+          <span className="text-xs text-slate-500">
+            Goes to the back of {f.account || "the"} queue. Use Top to promote it.
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={props.onClose}
+              className="px-3 py-1.5 rounded text-sm text-slate-300 hover:bg-slate-800"
+            >
+              Cancel
+            </button>
+            <button
+              disabled={!valid}
+              onClick={() =>
+                void props.onCreate({
+                  ...f,
+                  // body_head drives the advisory similarity score; without a
+                  // generator to split head from tail, the body doubles as it.
+                  body_head: f.body.split("\n\n.")[0].slice(0, 2000),
+                  source: "manual",
+                })
+              }
+              className="px-3 py-1.5 rounded text-sm bg-sky-700 hover:bg-sky-600 disabled:opacity-40"
+            >
+              Create
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Field(props: {
+  label: string;
+  value: string;
+  onChange: (e: { target: { value: string } }) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs text-slate-400">{props.label}</span>
+      <input
+        value={props.value}
+        onChange={props.onChange}
+        className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
+      />
+    </label>
   );
 }
 
