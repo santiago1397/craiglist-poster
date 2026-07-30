@@ -45,6 +45,13 @@ COPY src/craigslist_auto/events.py ./app/schemas/events.py
 
 # Non-root user
 RUN useradd -m -u 10001 appuser
+
+# Create the image-storage mount point *before* dropping privileges and before
+# the volume is first attached. Docker seeds a new named volume from the image's
+# directory, ownership included — without this the volume arrives owned by root
+# and the non-root process cannot write to it.
+RUN mkdir -p /var/lib/cl/images && chown -R appuser:appuser /var/lib/cl
+
 USER appuser
 
 EXPOSE 8000
