@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     # --- Ingest ---
     ingest_bearer_token: str = Field(min_length=16)
 
+    # --- Draft generation ---
+    # Optional. Without it, generation still runs but every draft falls back to
+    # the workbook copy in seed_ads, so the queue keeps filling either way.
+    minimax_api_key: str = ""
+    # How often the background top-up checks queue depth. 0 disables the loop
+    # (useful if you would rather drive generation from host cron).
+    generation_interval_minutes: int = 30
+
     # --- CORS ---
     # Comma-separated origins allowed for browser JS. Backend appends the
     # cookie only if the origin is in this list.

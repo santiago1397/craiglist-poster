@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ..auth import require_admin
+from ..config import get_settings
 from ..db import conn, tx
 from ..security import issue_machine_token, revoke_machine_token
 from ..services import queue as queue_svc
@@ -92,6 +93,39 @@ def put_guardrails(body: GuardrailUpdate) -> dict:
                 detail="queue_depth_floor cannot exceed queue_depth_target",
             )
         return queue_svc.update_guardrails(c, patch)
+
+
+class GenerationUpdate(BaseModel):
+    enabled: bool | None = None
+    model: str | None = Field(default=None, max_length=100)
+    api_base: str | None = Field(default=None, max_length=300)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    system_prompt: str | None = None
+    user_template: str | None = None
+    tail_template: str | None = None
+
+
+@router.get("/generation")
+def get_generation() -> dict:
+    """Prompts, model and run stats. `seed_ads` count tells you whether the
+    workbook fallback has anything to fall back to."""
+    from ..services import generator
+
+    with conn() as c:
+        g = generator.get_generation_settings(c)
+        g["api_key_configured"] = bool(get_settings().minimax_api_key)
+        g["seed_ads"] = c.execute(
+            "SELECT COUNT(*) AS n FROM seed_ads WHERE active"
+        ).fetchone()["n"]
+    return g
+
+
+@router.put("/generation")
+def put_generation(body: GenerationUpdate) -> dict:
+    from ..services import generator
+
+    with tx() as c:
+        return generator.update_generation_settings(c, body.model_dump(exclude_unset=True))
 
 
 @router.get("/machine-tokens")
