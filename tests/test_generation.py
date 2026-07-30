@@ -180,5 +180,47 @@ with tx() as c:
     c.execute("UPDATE generation_settings SET enabled=TRUE WHERE singleton")
 ok.append("disabled generation is skipped; force overrides it, respecting limit")
 
+# --- 10. Concurrent runs cannot both generate a full batch ----------------
+# Reproduces the production overshoot: a manual trigger and the background loop
+# started a second apart, the second read a stale depth of 0, and a target of 15
+# became 18 per account.
+import psycopg  # noqa: E402
+from app.config import get_settings  # noqa: E402
+
+with tx() as c:
+    c.execute("TRUNCATE drafts CASCADE")
+
+holder = psycopg.connect(get_settings().dsn)
+holder.autocommit = False
+with holder.cursor() as cur:
+    cur.execute("SELECT pg_try_advisory_xact_lock(%s)", (generator.TOPUP_LOCK_KEY,))
+    assert cur.fetchone()[0] is True, "could not take the lock for the test"
+    # A second caller must back off rather than generate a duplicate batch.
+    with tx() as c:
+        blocked = generator.topup(c, force=True, limit=5)
+    assert blocked["created"] == 0, blocked
+    assert blocked.get("skipped") == "already running", blocked
+holder.rollback()
+holder.close()
+ok.append("a second concurrent topup backs off instead of generating a duplicate batch")
+
+# Once the lock is free, it works again.
+with tx() as c:
+    after = generator.topup(c, force=True, limit=3)
+assert after["created"] == 3, after
+ok.append("topup resumes normally once the lock is released")
+
+# --- 11. Never exceed target, even across runs ----------------------------
+with tx() as c:
+    c.execute("UPDATE guardrail_settings SET queue_depth_floor=3, queue_depth_target=5")
+    generator.topup(c, force=True)
+with tx() as c:
+    generator.topup(c, force=True)
+with conn() as c:
+    for acct in ("craigs1", "craigs2"):
+        n = drafts_svc.list_drafts(c, account=acct, status="queued")["total"]
+        assert n <= 5, f"{acct} overshot target: {n}"
+ok.append("repeated forced runs never push an account past target")
+
 print("\n".join(f"  OK  {line}" for line in ok))
 print(f"\n{len(ok)} checks passed")

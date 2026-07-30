@@ -645,6 +645,7 @@ function DraftRow(props: {
 }) {
   const { draft: d, busy } = props;
   const parked = d.status === "needs_attention";
+  const [open, setOpen] = useState(false);
   return (
     <li
       className={cn(
@@ -653,7 +654,15 @@ function DraftRow(props: {
       )}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+        {/* The whole left side toggles the preview — clicking a draft to read
+            it is the obvious gesture, and Edit is a deliberate second step. */}
+        <div
+          className="min-w-0 cursor-pointer flex-1"
+          onClick={() => setOpen((v) => !v)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen((v) => !v)}
+        >
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-slate-500">#{d.id}</span>
             <span className="text-xs px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
@@ -683,7 +692,10 @@ function DraftRow(props: {
               </span>
             )}
           </div>
-          <p className="mt-1 truncate font-medium">{d.title}</p>
+          <p className="mt-1 font-medium">
+            <span className="text-slate-500 mr-1.5 select-none">{open ? "▾" : "▸"}</span>
+            {d.title}
+          </p>
           <p className="text-xs text-slate-500 mt-0.5">
             {d.city}
             {d.postal_code ? ` ${d.postal_code}` : ""} · created {fmt(d.created_at)}
@@ -711,6 +723,25 @@ function DraftRow(props: {
           <Action label="Delete" onClick={props.onDelete} busy={busy} danger />
         </div>
       </div>
+
+      {open && (
+        <div className="mt-3 border-t border-slate-800 pt-3 space-y-2">
+          <div className="flex gap-4 text-xs text-slate-500 flex-wrap">
+            <span>{d.county} / {d.city} {d.postal_code}</span>
+            <span>{d.phone_number}</span>
+            {d.not_before && <span>not before {fmt(d.not_before)}</span>}
+            {d.expires_at && <span>expires {fmt(d.expires_at)}</span>}
+          </div>
+          {/* Images arrive in a later phase; say so rather than leaving an
+              unexplained gap where a thumbnail should be. */}
+          <p className="text-xs text-slate-500 italic">
+            No images yet — posts currently go out text-only.
+          </p>
+          <pre className="text-xs text-slate-300 whitespace-pre-wrap font-mono max-h-96 overflow-auto bg-slate-950/60 rounded p-2">
+            {d.body}
+          </pre>
+        </div>
+      )}
     </li>
   );
 }
