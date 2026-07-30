@@ -96,6 +96,9 @@ const FILTERS = [
 
 type FilterKey = (typeof FILTERS)[number]["key"];
 
+// Craigslist accepts 24 images per posting: one thumbnail plus 23 more.
+const MAX_IMAGE_SLOTS = 24;
+
 const IMG_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
 
 function fmt(ts: string | null): string {
@@ -895,16 +898,16 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
 
   // Slot 1 is the Craigslist thumbnail, so new attachments land at the end
   // rather than silently displacing the cover.
-  const nextSlot = Math.min(5, (attached.length ? Math.max(...attached.map((a) => a.slot)) : 0) + 1);
+  const nextSlot = Math.min(MAX_IMAGE_SLOTS, (attached.length ? Math.max(...attached.map((a) => a.slot)) : 0) + 1);
   const free = pool.filter((p) => !attached.some((a) => a.id === p.id));
 
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-xs text-slate-400">
-          Images ({attached.length}/5){attached.length ? " — slot 1 is the thumbnail" : ""}
+          Images ({attached.length}/{MAX_IMAGE_SLOTS}){attached.length ? " — slot 1 is the thumbnail" : ""}
         </span>
-        {attached.length < 5 && (
+        {attached.length < MAX_IMAGE_SLOTS && (
           <button
             disabled={props.busy}
             onClick={() => void openPicker()}
