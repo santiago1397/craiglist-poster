@@ -206,10 +206,16 @@ def post(
         raise typer.Exit(1)
 
     # The server owns post history, so it must not authorise a post while we
-    # still hold unsent post_attempt events (see DESIGN.md, derived reqs).
-    pending = reporter_mod.flush_until_empty()
-    if pending:
-        logger.warning(f"outbox still has {pending} unsent event(s) after flushing")
+    # still hold unsent evidence of a completed post (see DESIGN.md, derived
+    # reqs). Only 'posted' attempts matter — blocking on unsent skips would
+    # strand the queue behind noise, permanently if the reporter is unset.
+    still_queued = reporter_mod.flush_until_empty()
+    pending = reporter_mod.pending_history_count()
+    if still_queued:
+        logger.warning(
+            f"outbox has {still_queued} unsent event(s) after flushing "
+            f"({pending} of them affect post history)"
+        )
 
     try:
         draft = (
