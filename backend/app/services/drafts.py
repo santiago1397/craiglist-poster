@@ -18,7 +18,8 @@ import psycopg
 
 _EDITABLE = (
     "account", "title", "body", "body_head", "county", "city", "service_offered",
-    "postal_code", "license_number", "phone_number", "not_before", "expires_at",
+    "postal_code", "license_number", "phone_number", "geographic_area",
+    "not_before", "expires_at",
     "reviewed", "status",
 )
 

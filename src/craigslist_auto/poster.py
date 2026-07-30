@@ -168,12 +168,14 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
                     human_type(zip_input, ad.postal_code)
                     sleep_jitter(0.4)
 
-            if ad.city:
+            # Craigslist's "city or neighborhood" box. Free text, so the draft
+            # may widen it beyond the city — see Ad.geo_text.
+            if ad.geo_text:
                 step = "form_city"
                 logger.debug(f"step: {step}")
                 geo = page.locator("input[name='geographic_area']")
                 if geo.count():
-                    human_type(geo, ad.city)
+                    human_type(geo, ad.geo_text)
                     sleep_jitter(0.3)
 
             if ad.license_number:

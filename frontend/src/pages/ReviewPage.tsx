@@ -21,6 +21,7 @@ type Draft = {
   city: string;
   county: string;
   postal_code: string;
+  geographic_area: string | null;
   phone_number: string;
   not_before: string | null;
   expires_at: string | null;
@@ -94,6 +95,8 @@ const FILTERS = [
 ] as const;
 
 type FilterKey = (typeof FILTERS)[number]["key"];
+
+const IMG_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
 
 function fmt(ts: string | null): string {
   if (!ts) return "—";
@@ -309,6 +312,7 @@ function CreateDialog(props: {
     city: "",
     county: "",
     postal_code: "",
+    geographic_area: "",
     phone_number: "",
     license_number: "",
   });
@@ -334,9 +338,16 @@ function CreateDialog(props: {
     setF({ ...f, county: name, city: "", postal_code: "" });
 
   // Selecting a city fills its zip, still editable afterwards.
+  // Picking a city seeds the free-text area box too, but leaves it editable —
+  // widening it to nearby towns is the whole point of the separate field.
   const onCity = (city: string) => {
     const hit = county?.cities.find((c) => c.city === city);
-    setF({ ...f, city, postal_code: hit?.zip ?? f.postal_code });
+    setF({
+      ...f,
+      city,
+      postal_code: hit?.zip ?? f.postal_code,
+      geographic_area: f.geographic_area.trim() ? f.geographic_area : city,
+    });
   };
 
   const valid = f.account && f.title.trim() && f.body.trim() && f.county && f.city;
@@ -438,6 +449,19 @@ function CreateDialog(props: {
               fixed.
             </p>
           )}
+          <label className="block">
+            <span className="text-xs text-slate-400">
+              City or neighborhood — Craigslist's free-text area box. Accepts
+              more than one place: “Fort Lauderdale, Davie, Plantation” widens
+              the searches you show up in.
+            </span>
+            <input
+              value={f.geographic_area}
+              onChange={set("geographic_area")}
+              placeholder={f.city || "e.g. Davie, Plantation, Cooper City"}
+              className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
+            />
+          </label>
           <Field label="Title" value={f.title} onChange={set("title")} />
           <label className="block">
             <span className="text-xs text-slate-400">
@@ -802,24 +826,176 @@ function DraftRow(props: {
       </div>
 
       {open && (
-        <div className="mt-3 border-t border-slate-800 pt-3 space-y-2">
+        <div className="mt-3 border-t border-slate-800 pt-3 space-y-3">
           <div className="flex gap-4 text-xs text-slate-500 flex-wrap">
             <span>{d.county} / {d.city} {d.postal_code}</span>
+            <span>“{d.geographic_area || d.city}” in the CL area box</span>
             <span>{d.phone_number}</span>
             {d.not_before && <span>not before {fmt(d.not_before)}</span>}
             {d.expires_at && <span>expires {fmt(d.expires_at)}</span>}
           </div>
-          {/* Images arrive in a later phase; say so rather than leaving an
-              unexplained gap where a thumbnail should be. */}
-          <p className="text-xs text-slate-500 italic">
-            No images yet — posts currently go out text-only.
-          </p>
+          <DraftImages draftId={d.id} account={d.account} busy={busy} />
           <pre className="text-xs text-slate-300 whitespace-pre-wrap font-mono max-h-96 overflow-auto bg-slate-950/60 rounded p-2">
             {d.body}
           </pre>
         </div>
       )}
     </li>
+  );
+}
+
+// Attached images, plus a picker over the approved stack. Only images this
+// account may use are offered — one already claimed by another account would be
+// rejected by the server anyway, so it is never shown.
+function DraftImages(props: { draftId: number; account: string; busy: boolean }) {
+  const [attached, setAttached] = useState<{ id: number; slot: number }[]>([]);
+  const [pool, setPool] = useState<{ id: number; kind: string }[]>([]);
+  const [picking, setPicking] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.get<{ images: { id: number; slot: number }[] }>(
+        `/images/draft/${props.draftId}`,
+      );
+      setAttached(r.images);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }, [props.draftId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function openPicker() {
+    setErr(null);
+    try {
+      const r = await api.get<{ images: { id: number; kind: string }[] }>("/images", {
+        status: "approved",
+        account: props.account,
+        limit: 60,
+      });
+      setPool(r.images);
+      setPicking(true);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  async function act(fn: () => Promise<unknown>) {
+    setErr(null);
+    try {
+      await fn();
+      await load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    }
+  }
+
+  // Slot 1 is the Craigslist thumbnail, so new attachments land at the end
+  // rather than silently displacing the cover.
+  const nextSlot = Math.min(5, (attached.length ? Math.max(...attached.map((a) => a.slot)) : 0) + 1);
+  const free = pool.filter((p) => !attached.some((a) => a.id === p.id));
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-slate-400">
+          Images ({attached.length}/5){attached.length ? " — slot 1 is the thumbnail" : ""}
+        </span>
+        {attached.length < 5 && (
+          <button
+            disabled={props.busy}
+            onClick={() => void openPicker()}
+            className="text-xs px-2 py-0.5 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+          >
+            + Attach image
+          </button>
+        )}
+      </div>
+      {err && <p className="text-xs text-red-300">{err}</p>}
+
+      {attached.length === 0 ? (
+        <p className="text-xs text-slate-500 italic">
+          No images — this post will go out text-only.
+        </p>
+      ) : (
+        <ul className="flex gap-2 flex-wrap">
+          {attached.map((a) => (
+            <li key={a.id} className="relative">
+              <img
+                src={`${IMG_BASE}/images/${a.id}/raw`}
+                alt={`slot ${a.slot}`}
+                className="h-20 w-28 object-cover rounded border border-slate-700"
+              />
+              <span className="absolute top-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-white">
+                {a.slot === 1 ? "cover" : a.slot}
+              </span>
+              <button
+                onClick={() => act(() => api.del(`/images/draft/${props.draftId}/attach/${a.id}`))}
+                className="absolute top-0.5 right-0.5 text-[10px] px-1 rounded bg-black/70 text-red-300 hover:bg-red-900"
+                title="Detach"
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {picking && (
+        <div className="border border-slate-700 rounded p-2 bg-slate-950/60">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-slate-400">
+              Approved and available to {props.account}
+            </span>
+            <button
+              onClick={() => setPicking(false)}
+              className="text-xs text-slate-400 hover:text-white px-1"
+            >
+              close
+            </button>
+          </div>
+          {free.length === 0 ? (
+            <p className="text-xs text-slate-500">
+              Nothing available. Generate and approve images on the Images page.
+            </p>
+          ) : (
+            <ul className="flex gap-2 flex-wrap max-h-44 overflow-auto">
+              {free.map((p) => (
+                <li key={p.id}>
+                  <button
+                    onClick={() =>
+                      act(async () => {
+                        await api.post(`/images/draft/${props.draftId}/attach`, {
+                          image_id: p.id,
+                          slot: nextSlot,
+                        });
+                        setPicking(false);
+                      })
+                    }
+                    className="block relative"
+                    title={`Attach as slot ${nextSlot}`}
+                  >
+                    <img
+                      src={`${IMG_BASE}/images/${p.id}/raw`}
+                      alt={`image ${p.id}`}
+                      className="h-16 w-24 object-cover rounded border border-slate-700 hover:border-sky-500"
+                    />
+                    {p.kind === "cover" && (
+                      <span className="absolute bottom-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-amber-200">
+                        cover
+                      </span>
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -847,6 +1023,7 @@ function EditDialog(props: {
 }) {
   const [title, setTitle] = useState(props.draft.title);
   const [body, setBody] = useState(props.draft.body);
+  const [geo, setGeo] = useState(props.draft.geographic_area ?? props.draft.city);
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-10">
@@ -863,6 +1040,19 @@ function EditDialog(props: {
             <input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
+              className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-xs text-slate-400">
+              City or neighborhood — goes in Craigslist's free-text area box.
+              Not limited to one city: “Fort Lauderdale, Davie, Plantation” or a
+              neighbourhood both work, and widen the searches you appear in.
+            </span>
+            <input
+              value={geo}
+              onChange={(e) => setGeo(e.target.value)}
+              placeholder={props.draft.city}
               className="w-full mt-1 bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
             />
           </label>
@@ -886,7 +1076,7 @@ function EditDialog(props: {
             Cancel
           </button>
           <button
-            onClick={() => void props.onSave({ title, body, reviewed: true })}
+            onClick={() => void props.onSave({ title, body, geographic_area: geo, reviewed: true })}
             className="px-3 py-1.5 rounded text-sm bg-sky-700 hover:bg-sky-600"
           >
             Save &amp; mark reviewed
