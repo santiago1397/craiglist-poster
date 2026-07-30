@@ -38,6 +38,7 @@ class _EventBase(BaseModel):
 PostOutcome = Literal[
     "posted",
     "skipped_no_eligible",
+    "skipped_no_drafts",
     "failed_login",
     "failed_form",
     "failed_other",
@@ -52,6 +53,11 @@ class PostAttempt(_EventBase):
     outcome: PostOutcome
     duration_seconds: float | None = None
 
+    # Which queued draft this attempt was for. Ingest uses it to move the draft
+    # to posted / back to the queue / into needs_attention, so outcome reporting
+    # rides the same durable outbox as everything else.
+    draft_id: int | None = None
+
     # Populated when outcome == "posted"
     post_id: str | None = None
     post_url: str | None = None
@@ -62,6 +68,10 @@ class PostAttempt(_EventBase):
     # Populated on failures
     error_type: str | None = None
     error_message: str | None = None
+    # The poster's internal step name (e.g. "form_body", "billing"). Decides
+    # whether a failed draft can be auto-requeued or must be parked, because
+    # anything at or after "photo_upload" has already pushed images to CL.
+    failed_step: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +184,26 @@ class SchedulerConfig(_EventBase):
 
 
 # ---------------------------------------------------------------------------
+# 7. flow_error — any flow that raises, anywhere, reports it here.
+#
+# post_attempt already carries posting failures; this covers everything else
+# (stats sync, ghost check, queue sync, image download, cover generation) so a
+# silent failure in a background job is visible from the dashboard instead of
+# only in run.log on a machine nobody is looking at.
+# ---------------------------------------------------------------------------
+
+class FlowError(_EventBase):
+    event_type: Literal["flow_error"] = "flow_error"
+    machine: str
+    flow: str                      # "stats_sync" | "ghost_check" | "queue_sync" | ...
+    step: str | None = None
+    account: str | None = None
+    error_type: str
+    error_message: str | None = None
+    context: dict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
 # Envelope + discriminated union
 # ---------------------------------------------------------------------------
 
@@ -185,6 +215,7 @@ AnyEvent = Annotated[
         AccountState,
         GhostCheck,
         SchedulerConfig,
+        FlowError,
     ],
     Field(discriminator="event_type"),
 ]
@@ -212,6 +243,7 @@ __all__ = [
     "AccountState",
     "GhostCheck",
     "SchedulerConfig",
+    "FlowError",
     "StatsSyncHealth",
     "PostOutcome",
 ]

@@ -12,15 +12,16 @@ from loguru import logger
 # Load .env (REPORTER_URL/REPORTER_TOKEN, etc.) before any module reads os.environ.
 load_dotenv()
 
-from .accounts import eligibility_report, pick_next_account, record_post
-from .config import ACCOUNTS_BY_NAME, EXCEL_PATH, LOGS_DIR
-from .content import generate_ad
+from .accounts import record_post
+from .config import ACCOUNTS, ACCOUNTS_BY_NAME, EXCEL_PATH, LOGS_DIR, clamp_guardrails
 from .ghost_check import check_all_recent
-from .poster import launch_account, post_ad
+from .poster import PosterFailure, launch_account, post_ad
+from . import content as content_mod
+from . import queue_client
 from . import stats as stats_mod
 from . import reporter as reporter_mod
 from .events import PostAttempt
-from .stats import LoginExpiredError, extract_post_id
+from .stats import extract_post_id
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -118,13 +119,38 @@ def init_account(account_name: str):
 
 @app.command("status")
 def status():
-    """Show which accounts are eligible to post right now and why not."""
+    """Show which accounts can post right now and why not.
+
+    Eligibility is answered by the server (decision 15), so this reflects what
+    `cl post` will actually be allowed to do — not a local guess.
+    """
     _setup_logging()
-    typer.echo(f"Machine: {_machine_name()}")
-    for r in eligibility_report():
-        mark = "[OK]" if r["eligible"] else "[--]"
-        reasons = "; ".join(r["reasons"]) if r["reasons"] else "ready"
-        typer.echo(f"  {mark} {r['account']:10s}  {reasons}")
+    machine = _machine_name()
+    typer.echo(f"Machine: {machine}")
+
+    bound = [a.name for a in ACCOUNTS if a.allowed_machine == machine]
+    if not bound:
+        typer.echo("  (no accounts bound to this machine)")
+    else:
+        try:
+            report = queue_client.eligibility(bound)
+        except queue_client.QueueUnavailable as e:
+            typer.echo(f"  [!!] queue unavailable: {e}")
+            typer.echo("       posting is fail-closed, so nothing will post until this clears")
+        else:
+            for reason in report.get("global_blocks") or []:
+                typer.echo(f"  [--] all accounts: {reason}")
+            for name, info in (report.get("accounts") or {}).items():
+                mark = "[OK]" if info["eligible"] else "[--]"
+                reasons = "; ".join(info["reasons"]) if info["reasons"] else "ready"
+                typer.echo(f"  {mark} {name:10s}  depth={info['queue_depth']:<3d} {reasons}")
+
+    outbox = reporter_mod.outbox_summary()
+    typer.echo("")
+    typer.echo(
+        f"Outbox: {outbox['pending']} pending, {outbox['sent']} sent"
+        f"{'  (reporter not configured)' if not outbox['configured'] else ''}"
+    )
 
     health = stats_mod.health_report()
     if health:
@@ -145,61 +171,88 @@ def status():
 
 @app.command("post")
 def post(
-    account: str = typer.Option(None, help="Force a specific account (skips rotation)"),
-    dry_run: bool = typer.Option(False, help="Walk the form but don't publish"),
+    account: str = typer.Option(None, help="Restrict the claim to one account"),
+    dry_run: bool = typer.Option(False, help="Walk the form but don't publish (claims nothing)"),
     headless: bool = typer.Option(False, help="Run browser headless (NOT recommended)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="DEBUG-level console logging"),
 ):
-    """Post one ad now, picking the next eligible account for this machine."""
+    """Claim the next queued draft from the dashboard and post it.
+
+    The server decides whether this machine may post and which account goes
+    next (decision 15). If the queue is empty or nothing is eligible, this
+    no-ops — it never invents an ad.
+    """
     import time as _time
     from datetime import datetime as _dt, timezone as _tz
 
     _setup_logging(verbose=verbose)
     machine = _machine_name()
+
+    bound = [a.name for a in ACCOUNTS if a.allowed_machine == machine]
     if account:
-        acct = ACCOUNTS_BY_NAME.get(account)
-        if not acct:
+        if account not in ACCOUNTS_BY_NAME:
             typer.echo(f"Unknown account: {account}")
             raise typer.Exit(1)
-        if acct.allowed_machine != machine and not dry_run:
+        if account not in bound:
             typer.echo(
-                f"REFUSING: account {account} is bound to machine '{acct.allowed_machine}', "
-                f"but this machine is '{machine}'. Set CL_MACHINE env var or run on correct machine."
+                f"REFUSING: account {account} is bound to machine "
+                f"'{ACCOUNTS_BY_NAME[account].allowed_machine}', but this machine is "
+                f"'{machine}'. Set CL_MACHINE or run on the correct machine."
             )
             raise typer.Exit(2)
-    else:
-        acct = pick_next_account(machine)
-        if acct is None:
-            typer.echo("No eligible account right now. Run `cl status` to see why.")
-            # Emit "skipped_no_eligible" for the dashboard's last-attempt indicator
-            reporter_mod.emit(PostAttempt(
-                ts=_dt.now(_tz.utc),
-                machine=machine,
-                account="(none)",
-                outcome="skipped_no_eligible",
-            ))
-            raise typer.Exit(0)
+        bound = [account]
+    if not bound:
+        typer.echo(f"No accounts are bound to this machine ({machine}).")
+        raise typer.Exit(1)
+
+    # The server owns post history, so it must not authorise a post while we
+    # still hold unsent post_attempt events (see DESIGN.md, derived reqs).
+    pending = reporter_mod.flush_until_empty()
+    if pending:
+        logger.warning(f"outbox still has {pending} unsent event(s) after flushing")
+
+    try:
+        draft = (
+            _peek_draft(bound) if dry_run
+            else queue_client.claim(bound, outbox_pending=pending)
+        )
+    except queue_client.QueueUnavailable as e:
+        logger.error(f"queue unavailable: {e}")
+        reporter_mod.report_flow_error("post", e, step="claim", context={"machine": machine})
+        typer.echo(f"Queue unavailable — not posting. {e}")
+        raise typer.Exit(4)
+
+    if draft is None:
+        typer.echo("Nothing to post right now. Run `cl status` to see why.")
+        reporter_mod.emit(PostAttempt(
+            ts=_dt.now(_tz.utc),
+            machine=machine,
+            account="(none)",
+            outcome="skipped_no_drafts",
+        ))
+        raise typer.Exit(0)
+
+    acct = ACCOUNTS_BY_NAME[draft["account"]]
+    ad = content_mod.ad_from_draft(draft)
+    draft_id = int(draft["id"])
+    logger.info(f"draft {draft_id} for {acct.name}: {ad.title!r}")
 
     started = _time.monotonic()
-    ad_title: str | None = None
-    photos_attached: list[str] = []
-    cover_photo: str | None = None
     try:
-        ad = generate_ad(acct)
-        ad_title = ad.title
-        photos_attached = [p.name for p in ad.photos]
-        # First photo is the cover when present (see content._select_photos)
-        cover_photo = ad.photos[0].name if ad.photos else None
-        logger.info(f"Generated ad: {ad.title}  ({len(ad.photos)} photos)")
         url = post_ad(acct, ad, headless=headless, dry_run=dry_run)
-    except LoginExpiredError as e:
-        _emit_post_failure(machine, acct.name, "failed_login", str(e), started, ad_title, photos_attached, cover_photo)
-        typer.echo(f"Login expired for {acct.name}. Run `cl init-account {acct.name}`.")
+    except PosterFailure as e:
+        _emit_post_failure(
+            machine, acct.name, _outcome_for_step(e.step), str(e.original),
+            started, ad.title, draft_id=draft_id, failed_step=e.step,
+        )
+        typer.echo(f"Post failed at step '{e.step}' — check logs.")
         raise typer.Exit(3)
     except Exception as e:
         logger.exception("post_ad raised")
-        error_type = "failed_form" if "form" in repr(e).lower() else "failed_other"
-        _emit_post_failure(machine, acct.name, error_type, repr(e), started, ad_title, photos_attached, cover_photo)
+        _emit_post_failure(
+            machine, acct.name, "failed_other", repr(e),
+            started, ad.title, draft_id=draft_id, failed_step=None,
+        )
         typer.echo("Post failed — check logs.")
         raise typer.Exit(3)
 
@@ -212,11 +265,10 @@ def post(
             account=acct.name,
             outcome="dry_run",
             duration_seconds=duration,
-            ad_title=ad_title,
-            photos_attached=photos_attached,
-            cover_photo=cover_photo,
+            ad_title=ad.title,
+            draft_id=draft_id,
         ))
-        typer.echo("Dry run complete.")
+        typer.echo("Dry run complete (draft left in the queue).")
         return
 
     if url:
@@ -229,16 +281,36 @@ def post(
             duration_seconds=duration,
             post_id=extract_post_id(url),
             post_url=url,
-            ad_title=ad_title,
-            photos_attached=photos_attached,
-            cover_photo=cover_photo,
+            ad_title=ad.title,
+            draft_id=draft_id,
         ))
         typer.echo(f"Posted: {url}")
     else:
-        _emit_post_failure(machine, acct.name, "failed_form", "post_ad returned no url",
-                          started, ad_title, photos_attached, cover_photo)
+        # post_ad returned without a URL and without raising — the form was
+        # submitted but the confirmation page gave us nothing to record.
+        _emit_post_failure(
+            machine, acct.name, "failed_form", "post_ad returned no url",
+            started, ad.title, draft_id=draft_id, failed_step="confirmation",
+        )
         typer.echo("Post failed — check logs.")
         raise typer.Exit(3)
+
+
+def _peek_draft(accounts: list[str]) -> dict | None:
+    """Head of the queue without claiming it — used by --dry-run so a rehearsal
+    never consumes a real draft."""
+    for d in queue_client.fetch_queue(limit=10):
+        if d["account"] in accounts:
+            return d
+    return None
+
+
+def _outcome_for_step(step: str | None) -> str:
+    if step == "login_check":
+        return "failed_login"
+    if step and step.startswith("form"):
+        return "failed_form"
+    return "failed_other"
 
 
 def _emit_post_failure(
@@ -248,8 +320,9 @@ def _emit_post_failure(
     error_message: str,
     started_monotonic: float,
     ad_title: str | None,
-    photos_attached: list[str],
-    cover_photo: str | None,
+    *,
+    draft_id: int | None = None,
+    failed_step: str | None = None,
 ) -> None:
     import time as _time
     from datetime import datetime as _dt, timezone as _tz
@@ -260,10 +333,10 @@ def _emit_post_failure(
         outcome=error_type,  # type: ignore[arg-type]
         duration_seconds=_time.monotonic() - started_monotonic,
         ad_title=ad_title,
-        photos_attached=photos_attached,
-        cover_photo=cover_photo,
+        draft_id=draft_id,
         error_type=error_type,
         error_message=error_message[:500],
+        failed_step=failed_step,
     ))
 
 
@@ -287,7 +360,12 @@ def check_ghosts(
     created the post; otherwise your own session sees ghosted posts as 'visible'.
     """
     _setup_logging()
-    check_all_recent(proxy=proxy, allow_local_ip=allow_local_ip)
+    try:
+        check_all_recent(proxy=proxy, allow_local_ip=allow_local_ip)
+    except Exception as e:
+        logger.exception("check-ghosts failed")
+        reporter_mod.report_flow_error("ghost_check", e)
+        raise typer.Exit(3)
 
 
 @app.command("posts")
@@ -344,7 +422,12 @@ def stats_sync(
 ):
     """Scrape today's stats snapshot for every account's active postings."""
     _setup_logging(verbose=verbose)
-    summary = stats_mod.sync_all(headless=headless, only_account=account)
+    try:
+        summary = stats_mod.sync_all(headless=headless, only_account=account)
+    except Exception as e:
+        logger.exception("stats-sync failed")
+        reporter_mod.report_flow_error("stats_sync", e, account=account)
+        raise typer.Exit(3)
     typer.echo(f"Snapshot date: {summary['snapshot_date']}")
     for name, info in summary["accounts"].items():
         if info.get("ok"):
@@ -519,6 +602,44 @@ def reporter_daemon(
 
     heartbeat_thread = threading.Thread(target=_heartbeat_loop, name="cl-heartbeat", daemon=True)
     heartbeat_thread.start()
+
+    def _sync_loop():
+        """Pull server-owned guardrails and warm the queue prefetch.
+
+        Nothing here decides anything — claiming happens at the posting slot
+        (decision 4). This exists so the machine notices a clamped setting or an
+        unreachable queue between slots rather than at 9am.
+        """
+        bound = [a.name for a in ACCOUNTS if a.allowed_machine == machine]
+        last_notes: list[str] = []
+        while not stop.is_set():
+            try:
+                remote = queue_client.fetch_settings()
+                guardrails, notes = clamp_guardrails(remote)
+                logger.debug(f"guardrails in effect: {guardrails}")
+                # Only report a clamp when it changes, so a permanently bad
+                # server value doesn't spam the dashboard every cycle.
+                if notes and notes != last_notes:
+                    reporter_mod.report_flow_error(
+                        "queue_sync",
+                        "server guardrails exceeded this machine's compiled ceilings",
+                        step="clamp",
+                        context={"clamps": notes},
+                    )
+                last_notes = notes
+                if bound:
+                    queue_client.fetch_queue(limit=10)
+            except queue_client.QueueUnavailable as e:
+                logger.warning(f"queue sync failed: {e}")
+                reporter_mod.report_flow_error("queue_sync", e, step="fetch")
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning(f"queue sync raised: {e}")
+                reporter_mod.report_flow_error("queue_sync", e)
+            if stop.wait(120):
+                return
+
+    sync_thread = threading.Thread(target=_sync_loop, name="cl-queue-sync", daemon=True)
+    sync_thread.start()
 
     # Flusher runs on the main thread; blocks until stop is set.
     reporter_mod.flush_forever(stop_event=stop)

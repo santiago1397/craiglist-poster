@@ -222,6 +222,74 @@ def _backoff(attempts: int) -> float:
     return min(60.0, 2.0 ** min(attempts, 6))
 
 
+def pending_count() -> int:
+    """Unsent events still in the outbox."""
+    try:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM outbox WHERE sent_ts IS NULL"
+            ).fetchone()
+        return row["n"] or 0
+    except Exception as e:
+        logger.warning(f"pending_count failed: {e}")
+        return 0
+
+
+def flush_until_empty(max_batches: int = 20) -> int:
+    """Drain the outbox before claiming.
+
+    The server is authoritative for post history, so it must not be asked to
+    authorise a post while this machine is still holding unsent post_attempt
+    events — its view of the cooldowns would be stale. Returns the number still
+    pending (0 means fully drained).
+    """
+    for _ in range(max_batches):
+        pending = pending_count()
+        if pending == 0:
+            return 0
+        result = flush_once()
+        if result.sent == 0:
+            # Nothing moved — unreachable, unconfigured, or being rejected.
+            break
+    return pending_count()
+
+
+def report_flow_error(
+    flow: str,
+    error: BaseException | str,
+    *,
+    step: str | None = None,
+    account: str | None = None,
+    context: dict | None = None,
+) -> None:
+    """Emit a flow_error so a failure anywhere is visible from the dashboard.
+
+    Deliberately swallows its own failures: error reporting must never be the
+    reason a flow dies.
+    """
+    from .events import FlowError  # local import keeps module import cheap
+
+    try:
+        if isinstance(error, BaseException):
+            error_type = type(error).__name__
+            message = str(error) or repr(error)
+        else:
+            error_type = "error"
+            message = str(error)
+        emit(FlowError(
+            ts=datetime.now(timezone.utc),
+            machine=machine_id(),
+            flow=flow,
+            step=step,
+            account=account,
+            error_type=error_type,
+            error_message=message[:2000],
+            context=context or {},
+        ))
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"report_flow_error failed for flow={flow}: {e}")
+
+
 def flush_forever(stop_event: threading.Event | None = None) -> None:
     """Long-running flusher. The daemon calls this on the main thread.
 

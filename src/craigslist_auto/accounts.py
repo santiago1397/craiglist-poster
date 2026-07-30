@@ -97,7 +97,13 @@ def _is_allowed_weekday() -> bool:
 
 
 def eligibility_report() -> list[dict]:
-    """Diagnostic — who can post right now and why not."""
+    """DEPRECATED — the server decides eligibility now (decision 15).
+
+    `cl status` asks the API instead, so this local view can disagree with the
+    answer `cl post` will actually get. Kept only as an offline diagnostic.
+
+    Diagnostic — who can post right now and why not.
+    """
     out = []
     weekend_block = not _is_allowed_weekday()
     for a in ACCOUNTS:
@@ -212,7 +218,14 @@ def account_snapshot(account_name: str) -> dict:
 
 
 def pick_next_account(machine_name: str) -> Account | None:
-    """Return the account that should post next from this machine, or None."""
+    """DEPRECATED — superseded by the server-side claim (decision 15).
+
+    Account selection now happens in `app.services.queue.claim_next`, which sees
+    the full post history rather than this machine's local state.json. Kept for
+    reference; nothing calls it.
+
+    Return the account that should post next from this machine, or None.
+    """
     if not _in_posting_window():
         return None
     if not _is_allowed_weekday():

@@ -1,0 +1,169 @@
+"""Admin-facing draft management — the Review module's backend.
+
+Cookie-authenticated. Everything here is an operator action: edit, reorder,
+mark reviewed, delete, retry a parked draft.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
+
+from ..auth import require_admin
+from ..db import conn, tx
+from ..services import drafts as drafts_svc
+from ..services import queue as queue_svc
+
+router = APIRouter(dependencies=[Depends(require_admin)])
+
+
+class DraftCreate(BaseModel):
+    account: str
+    title: str
+    body: str
+    body_head: str | None = None
+    county: str = ""
+    city: str = ""
+    service_offered: str = ""
+    postal_code: str = ""
+    license_number: str = ""
+    phone_number: str = ""
+    not_before: datetime | None = None
+    expires_at: datetime | None = None
+    source: str = "manual"
+
+
+class DraftUpdate(BaseModel):
+    account: str | None = None
+    title: str | None = None
+    body: str | None = None
+    body_head: str | None = None
+    county: str | None = None
+    city: str | None = None
+    service_offered: str | None = None
+    postal_code: str | None = None
+    license_number: str | None = None
+    phone_number: str | None = None
+    not_before: datetime | None = None
+    expires_at: datetime | None = None
+    reviewed: bool | None = None
+    status: str | None = None
+
+
+class ReorderBody(BaseModel):
+    # Draft to sit immediately after. None moves it to the head of its account.
+    after_id: int | None = Field(default=None)
+
+
+@router.get("")
+def list_drafts(
+    status_filter: str | None = Query(default=None, alias="status"),
+    account: str | None = Query(default=None),
+    reviewed: bool | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    with conn() as c:
+        return drafts_svc.list_drafts(
+            c,
+            status=status_filter,
+            account=account,
+            reviewed=reviewed,
+            limit=limit,
+            offset=offset,
+        )
+
+
+@router.get("/health")
+def queue_health(accounts: str = Query(description="comma-separated")) -> dict:
+    """Queue depth and per-account block reasons — the Review module's header."""
+    names = [a.strip() for a in accounts.split(",") if a.strip()]
+    with conn() as c:
+        report = queue_svc.evaluate_eligibility(c, names)
+        unreviewed = c.execute(
+            "SELECT COUNT(*) AS n FROM drafts WHERE status = 'queued' AND NOT reviewed"
+        ).fetchone()["n"]
+        attention = c.execute(
+            "SELECT COUNT(*) AS n FROM drafts WHERE status = 'needs_attention'"
+        ).fetchone()["n"]
+    report["unreviewed"] = unreviewed
+    report["needs_attention"] = attention
+    return report
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_draft(body: DraftCreate) -> dict:
+    with tx() as c:
+        return drafts_svc.create_draft(c, body.model_dump())
+
+
+@router.get("/{draft_id}")
+def get_draft(draft_id: int) -> dict:
+    with conn() as c:
+        draft = drafts_svc.get_draft(c, draft_id)
+        if draft is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        head = draft.get("body_head") or draft.get("body") or ""
+        draft["similarity"] = drafts_svc.similarity_report(
+            c, head=head, exclude_draft_id=draft_id
+        )
+    return draft
+
+
+@router.patch("/{draft_id}")
+def update_draft(draft_id: int, body: DraftUpdate) -> dict:
+    payload = body.model_dump(exclude_unset=True)
+    with tx() as c:
+        existing = drafts_svc.get_draft(c, draft_id)
+        if existing is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        if existing["status"] == "claimed":
+            # Claim is atomic and immediately followed by posting; editing a
+            # draft mid-publish would silently diverge from what went live.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Draft is being posted right now and cannot be edited",
+            )
+        try:
+            updated = drafts_svc.update_draft(c, draft_id, payload)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    return updated
+
+
+@router.post("/{draft_id}/reorder")
+def reorder(draft_id: int, body: ReorderBody) -> dict:
+    with tx() as c:
+        try:
+            moved = drafts_svc.reorder_draft(c, draft_id, after_id=body.after_id)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    if moved is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+    return moved
+
+
+@router.post("/{draft_id}/requeue")
+def requeue(draft_id: int) -> dict:
+    """Send a parked draft back to the queue after you've dealt with it."""
+    with tx() as c:
+        draft = drafts_svc.get_draft(c, draft_id)
+        if draft is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        if draft["status"] not in ("needs_attention", "expired"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Draft is {draft['status']}, not parked",
+            )
+        return drafts_svc.update_draft(c, draft_id, {"status": "queued"})
+
+
+@router.delete("/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_draft(draft_id: int) -> None:
+    with tx() as c:
+        if not drafts_svc.delete_draft(c, draft_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Draft not found, or is being posted right now",
+            )

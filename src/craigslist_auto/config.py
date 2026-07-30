@@ -33,6 +33,114 @@ POST_WINDOW_END_HOUR = 19
 POST_WEEKDAYS_ONLY = True
 
 
+# ---------------------------------------------------------------------------
+# Compiled ceilings (decision 14)
+#
+# The dashboard owns the live throttles, but these are the outer bounds it can
+# never talk this machine past. A fat-fingered "30 posts/day" on the server
+# arrives here, gets clamped to CEILING_MAX_POSTS_PER_DAY_TOTAL, and emits a
+# flow_error so the mistake is visible instead of silent.
+#
+# Changing a ceiling is a deliberate code change + redeploy. That is the point.
+# ---------------------------------------------------------------------------
+
+CEILING_MAX_POSTS_PER_DAY_TOTAL = 5
+CEILING_MAX_POSTS_PER_ACCOUNT_PER_WEEK = 10
+FLOOR_MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 18
+EARLIEST_POST_HOUR = 6
+LATEST_POST_HOUR = 22
+
+
+@dataclass(frozen=True)
+class Guardrails:
+    min_hours_between_posts_same_account: int
+    max_posts_per_day_total: int
+    max_posts_per_account_per_week: int
+    post_window_start_hour: int
+    post_window_end_hour: int
+    post_weekdays_only: bool
+
+
+def compiled_guardrails() -> Guardrails:
+    """The values baked into this file — used when the server has nothing to say."""
+    return Guardrails(
+        min_hours_between_posts_same_account=MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT,
+        max_posts_per_day_total=MAX_POSTS_PER_DAY_TOTAL,
+        max_posts_per_account_per_week=MAX_POSTS_PER_ACCOUNT_PER_WEEK,
+        post_window_start_hour=POST_WINDOW_START_HOUR,
+        post_window_end_hour=POST_WINDOW_END_HOUR,
+        post_weekdays_only=POST_WEEKDAYS_ONLY,
+    )
+
+
+def clamp_guardrails(remote: dict) -> tuple[Guardrails, list[str]]:
+    """Clamp server-supplied throttles to the compiled ceilings.
+
+    Returns the safe values plus a list of human-readable clamp notes. A
+    non-empty list means the server asked for something this machine refused,
+    and the caller should report it.
+    """
+    notes: list[str] = []
+    base = compiled_guardrails()
+
+    def _clamp(key: str, value, lo=None, hi=None, default=None):
+        if value is None:
+            return default
+        out = value
+        if lo is not None and out < lo:
+            notes.append(f"{key}: server sent {value}, clamped up to {lo}")
+            out = lo
+        if hi is not None and out > hi:
+            notes.append(f"{key}: server sent {value}, clamped down to {hi}")
+            out = hi
+        return out
+
+    return (
+        Guardrails(
+            min_hours_between_posts_same_account=_clamp(
+                "min_hours_between_posts_same_account",
+                remote.get("min_hours_between_posts_same_account"),
+                lo=FLOOR_MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT,
+                default=base.min_hours_between_posts_same_account,
+            ),
+            max_posts_per_day_total=_clamp(
+                "max_posts_per_day_total",
+                remote.get("max_posts_per_day_total"),
+                lo=0,
+                hi=CEILING_MAX_POSTS_PER_DAY_TOTAL,
+                default=base.max_posts_per_day_total,
+            ),
+            max_posts_per_account_per_week=_clamp(
+                "max_posts_per_account_per_week",
+                remote.get("max_posts_per_account_per_week"),
+                lo=0,
+                hi=CEILING_MAX_POSTS_PER_ACCOUNT_PER_WEEK,
+                default=base.max_posts_per_account_per_week,
+            ),
+            post_window_start_hour=_clamp(
+                "post_window_start_hour",
+                remote.get("post_window_start_hour"),
+                lo=EARLIEST_POST_HOUR,
+                hi=LATEST_POST_HOUR - 1,
+                default=base.post_window_start_hour,
+            ),
+            post_window_end_hour=_clamp(
+                "post_window_end_hour",
+                remote.get("post_window_end_hour"),
+                lo=EARLIEST_POST_HOUR + 1,
+                hi=LATEST_POST_HOUR,
+                default=base.post_window_end_hour,
+            ),
+            post_weekdays_only=(
+                base.post_weekdays_only
+                if remote.get("post_weekdays_only") is None
+                else bool(remote["post_weekdays_only"])
+            ),
+        ),
+        notes,
+    )
+
+
 @dataclass(frozen=True)
 class Account:
     name: str

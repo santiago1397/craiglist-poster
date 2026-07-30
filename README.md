@@ -4,6 +4,15 @@ Anti-detect Craigslist roofing ad poster for South Florida. Rotates 3 accounts
 across machines, uses real Chrome via patchright, human-like typing, photo +
 content deduplication, strict cooldowns, and an anonymous ghost-check.
 
+> **The posting model has changed.** `cl post` no longer generates an ad from
+> `data/ads.xlsx` at post time. It claims a pre-written draft from the dashboard
+> queue, and the **server** decides whether this machine may post and which
+> account goes next. With no queue configured (`QUEUE_URL` / `MACHINE_TOKEN`) or
+> an empty queue, `cl post` does nothing — posting is fail-closed on purpose.
+>
+> See [DESIGN.md](DESIGN.md) for the decisions behind this and what is still to
+> come (AI-drafted copy, generated images, the studio module).
+
 ---
 
 ## One-time setup
@@ -58,26 +67,33 @@ All commands run via `uv run cl <command>`.
 |---|---|
 | `cl init-data` | Create a sample `data/ads.xlsx`. |
 | `cl init-account <name>` | Open Chrome with that account's profile so you can log in. |
-| `cl status` | Show which accounts are eligible to post right now and why not. |
-| `cl post` | Post one ad now. Picks the next eligible account automatically. |
-| `cl post --account craigs1` | Force a specific account (still respects machine binding). |
-| `cl post --dry-run` | Walk through the form without publishing. Use this to verify selectors. |
+| `cl status` | Ask the server which accounts can post right now, why not, and how deep each queue is. |
+| `cl post` | Claim the next queued draft and post it. The server picks the account. No-ops if nothing is eligible or the queue is empty. |
+| `cl post --account craigs1` | Restrict the claim to one account (still respects machine binding). |
+| `cl post --dry-run` | Walk the form without publishing. Reads the head of the queue but **claims nothing**, so it never consumes a draft. |
 | `cl post --headless` | Run browser headless (not recommended — easier to detect). |
 | `cl check-ghosts --proxy http://host:port` | Check whether recent posts are visible in public search, from a different network (phone hotspot or any proxy you supply). |
 | `cl check-ghosts --allow-local-ip` | Same check from this machine's IP. Weaker — CL shows you your own ghosted posts. |
 
 ### Eligibility rules
 
-An account is eligible only if **all** of these pass:
+Evaluated **on the server**, not on this machine. An account can post only if
+**all** of these pass:
 
-- Current local time is between **8 AM and 7 PM**.
-- Current day is **Monday through Friday** (weekend posting is disabled; toggle `POST_WEEKDAYS_ONLY` in `config.py`).
+- Current time (America/New_York) is between **8 AM and 7 PM**.
+- Current day is **Monday through Friday**.
 - Fewer than **3 posts in the last 24h across all accounts**.
 - This account has fewer than **7 posts in the last 7 days**.
 - At least **20 hours** since this account's last post.
+- The account has at least one queued draft.
 - The account's `allowed_machine` matches the current machine.
 
-Tune these in `src/craigslist_auto/config.py`.
+Tune the first five in the dashboard under **Settings → Guardrails**. The
+desktop clamps whatever the server sends to hard ceilings compiled into
+`src/craigslist_auto/config.py` (max 5/day, max 10/week, minimum 18h cooldown,
+06:00–22:00) and reports a `flow_error` when it has to clamp — so a mistyped
+setting can't get an account banned. Raising a *ceiling* is a deliberate code
+change and redeploy.
 
 ---
 
