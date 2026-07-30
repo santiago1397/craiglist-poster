@@ -300,6 +300,9 @@ def build_draft(
         "body_head": head,
         "county": seed["county"],
         "city": seed["city"],
+        # Defaults to the city; widen it per draft in the composer to catch
+        # searches from neighbouring towns.
+        "geographic_area": seed["city"],
         "service_offered": seed["service_offered"],
         "postal_code": seed["postal_code"],
         "license_number": seed["license_number"],

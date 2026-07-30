@@ -24,6 +24,7 @@ class Ad:
     title: str
     body: str
     county: str
+    # The structured city — picks the subarea seed and appears in the copy.
     city: str
     service_offered: str
     postal_code: str
@@ -31,6 +32,14 @@ class Ad:
     phone_number: str
     photos: list[Path]
     source_row: int
+    # What goes in Craigslist's free-text "city or neighborhood" box. Often just
+    # the city, but the field accepts anything — a neighbourhood, or a list of
+    # nearby towns to catch more searches. Blank falls back to `city`.
+    geographic_area: str = ""
+
+    @property
+    def geo_text(self) -> str:
+        return (self.geographic_area or "").strip() or self.city
 
     def content_hash(self) -> str:
         h = hashlib.sha256()
@@ -224,6 +233,7 @@ def ad_from_draft(draft: dict, photos: list[Path] | None = None) -> Ad:
         phone_number=str(draft.get("phone_number") or ""),
         photos=photos or [],
         source_row=int(draft.get("id") or 0),
+        geographic_area=(draft.get("geographic_area") or "").strip(),
     )
 
 

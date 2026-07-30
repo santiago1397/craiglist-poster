@@ -27,6 +27,7 @@ class DraftCreate(BaseModel):
     city: str = ""
     service_offered: str = ""
     postal_code: str = ""
+    geographic_area: str | None = None
     license_number: str = ""
     phone_number: str = ""
     not_before: datetime | None = None
@@ -43,6 +44,7 @@ class DraftUpdate(BaseModel):
     city: str | None = None
     service_offered: str | None = None
     postal_code: str | None = None
+    geographic_area: str | None = None
     license_number: str | None = None
     phone_number: str | None = None
     not_before: datetime | None = None
