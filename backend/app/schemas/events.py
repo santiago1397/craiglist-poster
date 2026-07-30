@@ -1,23 +1,21 @@
 """
-DO NOT EDIT DIRECTLY.
+Event schema shared between the Windows script and the FastAPI backend.
 
-This file is a copy of src/craigslist_auto/events.py. Both sides need it:
-  - The Windows script imports from craigslist_auto.events
-  - The backend imports from app.schemas.events
+Every event has:
+  event_id   — UUID generated at emit time; the backend uses it as an
+               idempotency key so retries of the outbox never double-insert.
+  ts         — UTC ISO timestamp of when the *thing* actually happened,
+               not when the row was delivered.
+  event_type — literal string discriminator; the backend dispatches on it.
 
-Sync mechanism:
-  - Docker builds: the Dockerfile COPYs src/craigslist_auto/events.py over this
-    file, so production always matches the script.
-  - Local dev: run `python scripts/sync_schemas.py` at the repo root after any
-    change to the source of truth.
-
-Source of truth: src/craigslist_auto/events.py
+The `Envelope` wraps a payload for transport. The reporter serialises the
+envelope to JSON and POSTs it to /events (or /events/batch).
 """
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Literal, Union
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,12 +28,17 @@ class _EventBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     event_id: str = Field(default_factory=_uuid_str)
-    ts: datetime
+    ts: datetime  # UTC
 
+
+# ---------------------------------------------------------------------------
+# 1. post_attempt — every `cl post` invocation, success or failure.
+# ---------------------------------------------------------------------------
 
 PostOutcome = Literal[
     "posted",
     "skipped_no_eligible",
+    "skipped_no_drafts",
     "failed_login",
     "failed_form",
     "failed_other",
@@ -49,28 +52,51 @@ class PostAttempt(_EventBase):
     account: str
     outcome: PostOutcome
     duration_seconds: float | None = None
+
+    # Which queued draft this attempt was for. Ingest uses it to move the draft
+    # to posted / back to the queue / into needs_attention, so outcome reporting
+    # rides the same durable outbox as everything else.
+    draft_id: int | None = None
+
+    # Populated when outcome == "posted"
     post_id: str | None = None
     post_url: str | None = None
     ad_title: str | None = None
-    photos_attached: list[str] = Field(default_factory=list)
+    photos_attached: list[str] = Field(default_factory=list)  # filenames only
     cover_photo: str | None = None
+
+    # Populated on failures
     error_type: str | None = None
     error_message: str | None = None
+    # The poster's internal step name (e.g. "form_body", "billing"). Decides
+    # whether a failed draft can be auto-requeued or must be parked, because
+    # anything at or after "photo_upload" has already pushed images to CL.
+    failed_step: str | None = None
 
+
+# ---------------------------------------------------------------------------
+# 2. snapshot_taken — mirrors one row of the local stats.sqlite `snapshots`
+# ---------------------------------------------------------------------------
 
 class SnapshotTaken(_EventBase):
     event_type: Literal["snapshot_taken"] = "snapshot_taken"
-    snapshot_date: str
+    snapshot_date: str  # YYYY-MM-DD in America/New_York
     post_id: str
     account: str
+
+    # Post dimension fields (backend upserts into its posts table too)
     title: str | None = None
     url: str | None = None
     posted_ts: datetime | None = None
+
+    # Metric fields
     status: str | None = None
     impressions: int | None = None
     views: int | None = None
     shares: int | None = None
     favorites: int | None = None
+
+    # Dimension fields captured on the snapshot
     area: str | None = None
     category: str | None = None
     expires_in_days: int | None = None
@@ -78,16 +104,26 @@ class SnapshotTaken(_EventBase):
     freshness_note: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# 3. photo_inventory — nightly cron per account.
+# ---------------------------------------------------------------------------
+
 class PhotoInventory(_EventBase):
     event_type: Literal["photo_inventory"] = "photo_inventory"
     account: str
+
     photos_total: int
     photos_never_used: int
     photos_eligible: int
+
     covers_total: int
     covers_never_used: int
     covers_eligible: int
 
+
+# ---------------------------------------------------------------------------
+# 4. account_state — heartbeat from the reporter daemon (every ~5 min).
+# ---------------------------------------------------------------------------
 
 class StatsSyncHealth(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -101,15 +137,23 @@ class AccountState(_EventBase):
     event_type: Literal["account_state"] = "account_state"
     machine: str
     account: str
+
     eligible_now: bool
-    next_eligible_at: datetime | None = None
+    next_eligible_at: datetime | None = None  # None when weekly cap keeps it out for >1w
     block_reasons: list[str] = Field(default_factory=list)
+
     posts_last_24h_total: int
     posts_last_7d_this_account: int
+
     last_post_at: datetime | None = None
     last_post_url: str | None = None
+
     stats_sync_health: StatsSyncHealth | None = None
 
+
+# ---------------------------------------------------------------------------
+# 5. ghost_check — after cl check-ghosts marks a post visible/ghosted.
+# ---------------------------------------------------------------------------
 
 class GhostCheck(_EventBase):
     event_type: Literal["ghost_check"] = "ghost_check"
@@ -118,11 +162,19 @@ class GhostCheck(_EventBase):
     ghosted: bool
 
 
+# ---------------------------------------------------------------------------
+# 6. scheduler_config — sent by the daemon on startup so the dashboard knows
+#    the actual Task Scheduler cadence + current guardrail constants.
+# ---------------------------------------------------------------------------
+
 class SchedulerConfig(_EventBase):
     event_type: Literal["scheduler_config"] = "scheduler_config"
     machine: str
-    posting_cadence: str | None = None
+
+    posting_cadence: str | None = None       # free-form; e.g. "every 3h 08-19 Mon-Fri"
     stats_sync_cadence: str | None = None
+
+    # Snapshot of the guardrails currently compiled into the script
     min_hours_between_posts_same_account: int
     max_posts_per_day_total: int
     max_posts_per_account_per_week: int
@@ -130,6 +182,30 @@ class SchedulerConfig(_EventBase):
     post_window_end_hour: int
     post_weekdays_only: bool
 
+
+# ---------------------------------------------------------------------------
+# 7. flow_error — any flow that raises, anywhere, reports it here.
+#
+# post_attempt already carries posting failures; this covers everything else
+# (stats sync, ghost check, queue sync, image download, cover generation) so a
+# silent failure in a background job is visible from the dashboard instead of
+# only in run.log on a machine nobody is looking at.
+# ---------------------------------------------------------------------------
+
+class FlowError(_EventBase):
+    event_type: Literal["flow_error"] = "flow_error"
+    machine: str
+    flow: str                      # "stats_sync" | "ghost_check" | "queue_sync" | ...
+    step: str | None = None
+    account: str | None = None
+    error_type: str
+    error_message: str | None = None
+    context: dict = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Envelope + discriminated union
+# ---------------------------------------------------------------------------
 
 AnyEvent = Annotated[
     Union[
@@ -139,17 +215,20 @@ AnyEvent = Annotated[
         AccountState,
         GhostCheck,
         SchedulerConfig,
+        FlowError,
     ],
     Field(discriminator="event_type"),
 ]
 
 
 class EventEnvelope(BaseModel):
+    """Single-event ingest payload for POST /events."""
     model_config = ConfigDict(extra="forbid")
     event: AnyEvent
 
 
 class EventBatch(BaseModel):
+    """Batched ingest payload for POST /events/batch."""
     model_config = ConfigDict(extra="forbid")
     events: list[AnyEvent] = Field(min_length=1, max_length=500)
 
@@ -164,6 +243,7 @@ __all__ = [
     "AccountState",
     "GhostCheck",
     "SchedulerConfig",
+    "FlowError",
     "StatsSyncHealth",
     "PostOutcome",
 ]

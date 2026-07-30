@@ -205,8 +205,39 @@ def _roll_photo_count(row: dict, rng: random.Random) -> int:
         return rng.randint(0, 5)
 
 
+def ad_from_draft(draft: dict, photos: list[Path] | None = None) -> Ad:
+    """Build an Ad from a draft claimed off the server queue.
+
+    This is the path `cl post` uses now. No spintax, no random row, no dedup
+    roll — the draft is already concrete text that the operator could have read
+    and edited (decision 1). Phase 1 posts are text-only, so `photos` defaults
+    to empty; phase 3 passes locally-cached image paths here.
+    """
+    return Ad(
+        title=(draft.get("title") or "").strip(),
+        body=(draft.get("body") or "").strip(),
+        county=draft.get("county") or "",
+        city=draft.get("city") or "",
+        service_offered=draft.get("service_offered") or "",
+        postal_code=str(draft.get("postal_code") or ""),
+        license_number=str(draft.get("license_number") or ""),
+        phone_number=str(draft.get("phone_number") or ""),
+        photos=photos or [],
+        source_row=int(draft.get("id") or 0),
+    )
+
+
 def generate_ad(account: Account, seed: int | None = None) -> Ad:
-    """Pick a random row, expand spintax + tokens, pick photos. Avoid recent duplicates."""
+    """DEPRECATED — not called by `cl post` any more. Use `ad_from_draft`.
+
+    Posting is queue-only now (decision 1): the desktop posts drafts written on
+    the server, never content it invented locally. Kept because phase 2 reuses
+    `_load_excel_rows` to turn the workbook into seed briefs, and phase 3 reuses
+    `_select_photos` / `pick_cover` for image attachment.
+
+    Pick a random row, expand spintax + tokens, pick photos. Avoid recent
+    duplicates.
+    """
     rng = random.Random(seed)
     rows = _load_excel_rows()
     if not rows:

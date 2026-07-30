@@ -4,6 +4,7 @@ import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import PostsPage from "./pages/PostsPage";
 import PostDetailPage from "./pages/PostDetailPage";
+import ReviewPage from "./pages/ReviewPage";
 import { cn } from "./lib/cn";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -36,6 +37,7 @@ function NavBar() {
       <div className="flex items-center gap-2">
         <span className="font-semibold mr-4">CL Automation</span>
         {link("/", "Dashboard")}
+        {link("/review", "Review")}
         {link("/posts", "Posts")}
       </div>
       <div className="flex items-center gap-3 text-sm text-slate-400">
@@ -60,6 +62,14 @@ export default function App() {
             element={
               <Protected>
                 <DashboardPage />
+              </Protected>
+            }
+          />
+          <Route
+            path="/review"
+            element={
+              <Protected>
+                <ReviewPage />
               </Protected>
             }
           />

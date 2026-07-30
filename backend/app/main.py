@@ -42,18 +42,21 @@ def create_app() -> FastAPI:
             CORSMiddleware,
             allow_origins=settings.cors_origin_list,
             allow_credentials=True,
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
             allow_headers=["*"],
         )
 
     # Routers registered lazily so tests can import create_app cheaply
-    from .routers import accounts, auth, dashboard, events, posts
+    from .routers import accounts, auth, dashboard, drafts, events, posts, queue, settings as settings_router
 
     app.include_router(auth.router, prefix="/auth", tags=["auth"])
     app.include_router(events.router, prefix="/events", tags=["ingest"])
     app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
     app.include_router(accounts.router, prefix="/accounts", tags=["accounts"])
     app.include_router(posts.router, prefix="/posts", tags=["posts"])
+    app.include_router(drafts.router, prefix="/drafts", tags=["drafts"])
+    app.include_router(queue.router, prefix="/queue", tags=["queue"])
+    app.include_router(settings_router.router, prefix="/settings", tags=["settings"])
 
     @app.get("/health", tags=["ops"])
     def health() -> dict:

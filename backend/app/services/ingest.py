@@ -14,12 +14,14 @@ from loguru import logger
 from ..schemas.events import (
     AccountState,
     AnyEvent,
+    FlowError,
     GhostCheck,
     PhotoInventory,
     PostAttempt,
     SchedulerConfig,
     SnapshotTaken,
 )
+from . import queue as queue_svc
 
 
 def ingest_events(conn: psycopg.Connection, events: list[AnyEvent]) -> dict:
@@ -45,6 +47,8 @@ def ingest_events(conn: psycopg.Connection, events: list[AnyEvent]) -> dict:
             inserted = _insert_account_state(conn, ev)
         elif isinstance(ev, SchedulerConfig):
             inserted = _insert_scheduler_config(conn, ev)
+        elif isinstance(ev, FlowError):
+            inserted = _insert_flow_error(conn, ev)
         else:  # pragma: no cover — pydantic union guarantees exhaustiveness
             logger.warning(f"Unknown event_type: {et}")
             inserted = False
@@ -107,18 +111,43 @@ def _insert_post_attempt(conn: psycopg.Connection, ev: PostAttempt) -> bool:
         INSERT INTO post_attempts (
             event_id, ts, machine, account, outcome, duration_seconds,
             post_id, post_url, ad_title, photos_attached, cover_photo,
-            error_type, error_message
+            error_type, error_message, draft_id, failed_step
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
         ON CONFLICT (event_id) DO NOTHING
         """,
         (
             ev.event_id, ev.ts, ev.machine, ev.account, ev.outcome, ev.duration_seconds,
             ev.post_id, ev.post_url, ev.ad_title, json.dumps(ev.photos_attached), ev.cover_photo,
-            ev.error_type, ev.error_message,
+            ev.error_type, ev.error_message, ev.draft_id, ev.failed_step,
         ),
     )
-    return _did_insert(cur)
+    inserted = _did_insert(cur)
+
+    # Advance the draft's state machine — but only on first receipt. A replayed
+    # event must not park a draft that has since been posted or re-queued.
+    if inserted and ev.draft_id is not None:
+        _route_draft(conn, ev)
+    return inserted
+
+
+def _route_draft(conn: psycopg.Connection, ev: PostAttempt) -> None:
+    """Move the claimed draft on, per decision 16."""
+    if ev.outcome == "posted":
+        queue_svc.mark_posted(
+            conn, draft_id=ev.draft_id, post_id=ev.post_id, posted_at=ev.ts
+        )
+    elif ev.outcome in ("failed_login", "failed_form", "failed_other"):
+        new_status = queue_svc.release_or_park(
+            conn,
+            draft_id=ev.draft_id,
+            failed_step=ev.failed_step,
+            failed_message=ev.error_message,
+        )
+        logger.info(
+            f"draft {ev.draft_id} failed at step {ev.failed_step!r} -> {new_status}"
+        )
+    # dry_run and the skipped_* outcomes never hold a claim, so nothing to do.
 
 
 def _insert_snapshot(conn: psycopg.Connection, ev: SnapshotTaken) -> bool:
@@ -212,6 +241,24 @@ def _insert_account_state(conn: psycopg.Connection, ev: AccountState) -> bool:
             ev.event_id, ev.ts, ev.machine, ev.account, ev.eligible_now, ev.next_eligible_at,
             json.dumps(ev.block_reasons), ev.posts_last_24h_total, ev.posts_last_7d_this_account,
             ev.last_post_at, ev.last_post_url, health_json,
+        ),
+    )
+    return _did_insert(cur)
+
+
+def _insert_flow_error(conn: psycopg.Connection, ev: FlowError) -> bool:
+    cur = conn.execute(
+        """
+        INSERT INTO flow_errors (
+            event_id, ts, machine, flow, step, account,
+            error_type, error_message, context
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+        ON CONFLICT (event_id) DO NOTHING
+        """,
+        (
+            ev.event_id, ev.ts, ev.machine, ev.flow, ev.step, ev.account,
+            ev.error_type, ev.error_message, json.dumps(ev.context),
         ),
     )
     return _did_insert(cur)

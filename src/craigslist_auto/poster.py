@@ -15,6 +15,25 @@ from .human import human_click, human_type, read_pause, scroll_a_bit, sleep_jitt
 
 FAILURES_DIR = LOGS_DIR / "failures"
 
+# Steps at or after this one have already pushed image bytes to Craigslist.
+# The server uses the reported step to decide whether a failed draft can be
+# auto-requeued or must be parked for review (decision 16).
+FIRST_ASSET_CONSUMING_STEP = "photo_upload"
+
+
+class PosterFailure(RuntimeError):
+    """A post_ad failure that remembers which step it died on.
+
+    post_ad tracked `step` for failure dumps already, but the value never left
+    the function. Carrying it on the exception lets the CLI ship it in the
+    post_attempt event.
+    """
+
+    def __init__(self, step: str, original: Exception):
+        super().__init__(f"{step}: {original!r}")
+        self.step = step
+        self.original = original
+
 
 def _dump_failure(page: Page, account_name: str, step: str, err: Exception) -> None:
     FAILURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -101,7 +120,10 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
                 logger.error(
                     f"[{account.name}] not logged in. Run `uv run cl init-account {account.name}` first."
                 )
-                return None
+                raise RuntimeError(
+                    f"account {account.name} is not logged in; "
+                    f"run `cl init-account {account.name}`"
+                )
 
             step = "open_post_form"
             logger.debug(f"step: {step}")
@@ -300,7 +322,7 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             return post_url
         except Exception as e:
             _dump_failure(page, account.name, step, e)
-            raise
+            raise PosterFailure(step, e) from e
 
 
 # ─── Photo upload helpers ─────────────────────────────────────────────────────

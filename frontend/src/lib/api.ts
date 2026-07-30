@@ -61,4 +61,7 @@ export const api = {
   get: <T,>(path: string, params?: Record<string, string | number | undefined | null>) =>
     request<T>("GET", path, undefined, params),
   post: <T,>(path: string, body?: unknown) => request<T>("POST", path, body),
+  patch: <T,>(path: string, body?: unknown) => request<T>("PATCH", path, body),
+  // 204 responses have no body; request() resolves them as null.
+  del: <T,>(path: string) => request<T>("DELETE", path),
 };
