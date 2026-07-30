@@ -99,6 +99,24 @@ class GenerateBody(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
 
 
+@router.get("/schedule")
+def schedule(
+    accounts: str = Query(description="comma-separated"),
+    horizon_days: int = Query(default=21, ge=1, le=60),
+) -> dict:
+    """Forecast when each queued draft will publish.
+
+    Replays the claim decision against the real 9am/1pm/5pm fire times and every
+    guardrail. Approximate by nature — pausing, a failed post or an edit shifts
+    it — so it answers "roughly when", not "definitely then".
+    """
+    names = [a.strip() for a in accounts.split(",") if a.strip()]
+    with conn() as c:
+        return {"schedule": queue_svc.project_schedule(
+            c, accounts=names, horizon_days=horizon_days
+        )}
+
+
 @router.post("/generate")
 def generate(body: GenerateBody) -> dict:
     """Run the top-up now instead of waiting for the background loop.

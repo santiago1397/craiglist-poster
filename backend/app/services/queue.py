@@ -292,6 +292,125 @@ def claim_next(
     return {"draft": None, "eligibility": report}
 
 
+# The Windows scheduled task fires at these local hours on weekdays. Projecting
+# against the real fire times rather than "any legal hour" is the difference
+# between a useful forecast and a plausible-looking fiction.
+TASK_FIRE_HOURS = (9, 13, 17)
+
+
+def project_schedule(
+    conn: psycopg.Connection,
+    *,
+    accounts: list[str],
+    horizon_days: int = 21,
+    now: datetime | None = None,
+) -> list[dict]:
+    """Forecast when each queued draft will actually publish.
+
+    Replays `claim_next`'s decision at every scheduled fire: the longest-idle
+    eligible account with drafts wins. Every guardrail is applied to the
+    simulated history as it grows, so the forecast tightens and spreads exactly
+    the way reality will.
+
+    Approximate by nature — a paused switch, a failed post or an edit changes
+    it — so treat it as "roughly when", not a promise.
+    """
+    now = now or datetime.now(timezone.utc)
+    g = get_guardrails(conn)
+    tz = get_settings().display_zoneinfo
+
+    if not g.get("posting_enabled", True):
+        return []
+
+    # Real history seeds the cooldowns; simulated posts extend it.
+    history: list[tuple[str, datetime]] = [
+        (r["account"], r["posted_ts"])
+        for r in conn.execute(
+            "SELECT account, posted_ts FROM posts "
+            "WHERE posted_ts >= %s AND posted_ts IS NOT NULL ORDER BY posted_ts",
+            (now - timedelta(days=8),),
+        ).fetchall()
+    ]
+
+    queues: dict[str, list[dict]] = {}
+    for account in accounts:
+        queues[account] = [
+            dict(r) for r in conn.execute(
+                """
+                SELECT id, title, city, not_before FROM drafts
+                WHERE account = %s AND status = 'queued'
+                  AND (expires_at IS NULL OR expires_at > NOW())
+                ORDER BY position
+                """,
+                (account,),
+            ).fetchall()
+        ]
+
+    out: list[dict] = []
+    local = now.astimezone(tz)
+    cursor = local.replace(minute=0, second=0, microsecond=0)
+
+    for _ in range(horizon_days * len(TASK_FIRE_HOURS)):
+        if not any(queues.values()):
+            break
+        fire = _next_fire(cursor, g, tz)
+        if (fire - local).days > horizon_days:
+            break
+        cursor = fire + timedelta(hours=1)
+        fire_utc = fire.astimezone(timezone.utc)
+
+        if sum(1 for _, t in history if t >= fire_utc - timedelta(hours=24)) >= g["max_posts_per_day_total"]:
+            continue
+
+        best: tuple[datetime, str] | None = None
+        for account, drafts in queues.items():
+            if not drafts:
+                continue
+            if drafts[0]["not_before"] and drafts[0]["not_before"] > fire_utc:
+                continue
+            mine = [t for a, t in history if a == account]
+            last = max(mine) if mine else None
+            if last and (fire_utc - last) < timedelta(hours=g["min_hours_between_posts_same_account"]):
+                continue
+            if sum(1 for t in mine if t >= fire_utc - timedelta(days=7)) >= g["max_posts_per_account_per_week"]:
+                continue
+            key = last or datetime.min.replace(tzinfo=timezone.utc)
+            if best is None or key < best[0]:
+                best = (key, account)
+
+        if best is None:
+            continue
+        account = best[1]
+        draft = queues[account].pop(0)
+        history.append((account, fire_utc))
+        out.append({
+            "draft_id": draft["id"],
+            "account": account,
+            "title": draft["title"],
+            "city": draft["city"],
+            "at": fire_utc,
+        })
+
+    return out
+
+
+def _next_fire(cursor: datetime, g: dict, tz) -> datetime:
+    """Next scheduled task fire at or after `cursor`, inside the posting window."""
+    c = cursor
+    for _ in range(400):
+        if g["post_weekdays_only"] and c.weekday() >= 5:
+            c = (c + timedelta(days=1)).replace(hour=0)
+            continue
+        for hour in TASK_FIRE_HOURS:
+            if hour < c.hour:
+                continue
+            if not (g["post_window_start_hour"] <= hour < g["post_window_end_hour"]):
+                continue
+            return c.replace(hour=hour)
+        c = (c + timedelta(days=1)).replace(hour=0)
+    return c
+
+
 # Steps that run before any photo reaches Craigslist. A failure at or before
 # these consumed nothing, so the draft can safely go back to the queue
 # (decision 16). Anything later burned assets and needs a human.

@@ -78,6 +78,14 @@ type LocationRef = {
   service_offered: string;
 };
 
+type ScheduleEntry = {
+  draft_id: number;
+  account: string;
+  title: string;
+  city: string;
+  at: string;
+};
+
 const FILTERS = [
   { key: "needs_attention", label: "Needs attention" },
   { key: "unreviewed", label: "Unreviewed" },
@@ -104,6 +112,7 @@ export default function ReviewPage() {
   const [posting, setPosting] = useState<PostingState | null>(null);
   const [locations, setLocations] = useState<LocationRef | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
+  const [schedule, setSchedule] = useState<ScheduleEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -136,7 +145,13 @@ export default function ReviewPage() {
       setLocations(locs);
       setGeneration(gen);
       if (accts.accounts.length) {
-        setHealth(await api.get<Health>("/drafts/health", { accounts: accts.accounts.join(",") }));
+        const list = accts.accounts.join(",");
+        const [h, s] = await Promise.all([
+          api.get<Health>("/drafts/health", { accounts: list }),
+          api.get<{ schedule: ScheduleEntry[] }>("/drafts/schedule", { accounts: list }),
+        ]);
+        setHealth(h);
+        setSchedule(s.schedule);
       }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : String(e));
@@ -207,6 +222,8 @@ export default function ReviewPage() {
       {generation && <GenerationStatus g={generation} />}
 
       {health && <QueueHealth health={health} accounts={accounts} />}
+
+      {schedule.length > 0 && <Calendar entries={schedule} />}
 
       <div className="flex gap-1">
         {FILTERS.map((f) => (
@@ -630,6 +647,66 @@ function QueueHealth({ health, accounts }: { health: Health; accounts: string[] 
           );
         })}
       </div>
+    </section>
+  );
+}
+
+// Forecast, not a promise: pausing, a failed post or an edit all shift it. Says
+// so plainly rather than implying these are committed times.
+function Calendar({ entries }: { entries: ScheduleEntry[] }) {
+  const [open, setOpen] = useState(false);
+  const days = new Map<string, ScheduleEntry[]>();
+  for (const e of entries) {
+    const key = new Date(e.at).toLocaleDateString(undefined, {
+      weekday: "short", month: "short", day: "numeric",
+    });
+    days.set(key, [...(days.get(key) ?? []), e]);
+  }
+  const shown = open ? [...days] : [...days].slice(0, 3);
+  const last = entries[entries.length - 1];
+
+  return (
+    <section className="rounded border border-slate-800 bg-slate-900/50 p-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+        <div>
+          <span className="text-sm text-slate-300">Projected schedule</span>
+          <span className="text-xs text-slate-500 ml-2">
+            {entries.length} drafts · clears {new Date(last.at).toLocaleDateString(undefined, {
+              month: "short", day: "numeric",
+            })}
+          </span>
+        </div>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="text-xs px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
+        >
+          {open ? "Show less" : `Show all ${days.size} days`}
+        </button>
+      </div>
+      <div className="space-y-1.5">
+        {shown.map(([day, list]) => (
+          <div key={day} className="flex gap-3 text-xs">
+            <span className="text-slate-500 w-28 shrink-0">{day}</span>
+            <div className="flex-1 space-y-0.5">
+              {list.map((e) => (
+                <div key={e.draft_id} className="flex gap-2">
+                  <span className="text-slate-500 w-16 shrink-0">
+                    {new Date(e.at).toLocaleTimeString(undefined, {
+                      hour: "numeric", minute: "2-digit",
+                    })}
+                  </span>
+                  <span className="text-slate-400 w-20 shrink-0">{e.account}</span>
+                  <span className="text-slate-300 truncate">{e.title}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[11px] text-slate-600 mt-2">
+        Estimated from the 9am / 1pm / 5pm task fires and the current caps. A
+        pause, a failed post or a reorder will shift it.
+      </p>
     </section>
   );
 }
