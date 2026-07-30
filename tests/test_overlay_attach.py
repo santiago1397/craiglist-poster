@@ -98,8 +98,38 @@ ok.append("every auto-attached image is claimed by the draft's account")
 counts = [images_svc.roll_photo_count(random.Random(s)) for s in range(2000)]
 zeros = counts.count(0) / len(counts)
 assert 0.06 <= zeros <= 0.15, f"imageless rate {zeros:.1%} is outside the intended ~10%"
-assert max(counts) <= images_svc.MAX_SLOTS and min(counts) >= 0
-ok.append(f"{zeros:.0%} of drafts get no images, the rest 1-{max(counts)}")
+assert max(counts) <= 5, f"default range should stay 1-5, saw {max(counts)}"
+assert min(counts) >= 0
+ok.append(f"{zeros:.0%} of drafts get no images, the rest 1-{max(counts)} by default")
+
+# --- but the ceiling is Craigslist's real limit, not the default -----------
+assert images_svc.MAX_SLOTS == 24, images_svc.MAX_SLOTS
+wide = [images_svc.roll_photo_count(random.Random(s), photos_min=20, photos_max=24,
+                                    imageless_rate=0.0) for s in range(200)]
+assert min(wide) >= 20 and max(wide) <= 24, (min(wide), max(wide))
+# Asking for more than Craigslist accepts must clamp, not overflow.
+clamped = [images_svc.roll_photo_count(random.Random(s), photos_min=30, photos_max=99,
+                                       imageless_rate=0.0) for s in range(50)]
+assert all(c == 24 for c in clamped), set(clamped)
+# imageless_rate=0 must never produce a bare post.
+assert 0 not in wide
+ok.append("the range is tunable up to 24 and clamps above it; rate 0 never yields an empty post")
+
+# --- slots beyond 5 are now accepted ---------------------------------------
+with tx() as c:
+    d24 = drafts_svc.create_draft(c, {"account": "craigs3", "title": "t", "body": "b"})
+    big = images_svc._store(c, jpeg((7, 7, 7)), source="generated", kind="photo",
+                            status="approved")
+    images_svc.attach(c, draft_id=d24["id"], image_id=big["id"], slot=24)
+with conn() as c:
+    assert images_svc.images_for_draft(c, d24["id"])[0]["slot"] == 24
+with tx() as c:
+    try:
+        images_svc.attach(c, draft_id=d24["id"], image_id=big["id"], slot=25)
+        raise AssertionError("accepted slot 25, beyond Craigslist's limit")
+    except ValueError:
+        pass
+ok.append("slot 24 attaches; slot 25 is refused")
 
 # --- publishing stamps the images used -------------------------------------
 with tx() as c:

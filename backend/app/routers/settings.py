@@ -103,6 +103,9 @@ class GenerationUpdate(BaseModel):
     system_prompt: str | None = None
     user_template: str | None = None
     tail_template: str | None = None
+    photos_min: int | None = Field(default=None, ge=0, le=24)
+    photos_max: int | None = Field(default=None, ge=0, le=24)
+    imageless_rate: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 @router.get("/generation")
@@ -124,8 +127,21 @@ def get_generation() -> dict:
 def put_generation(body: GenerationUpdate) -> dict:
     from ..services import generator
 
+    patch = body.model_dump(exclude_unset=True)
     with tx() as c:
-        return generator.update_generation_settings(c, body.model_dump(exclude_unset=True))
+        # Check against the merged result, not the patch: sending only
+        # photos_max could otherwise invert the range against the stored min.
+        merged = {**generator.get_generation_settings(c),
+                  **{k: v for k, v in patch.items() if v is not None}}
+        if merged["photos_min"] > merged["photos_max"]:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"photos_min ({merged['photos_min']}) cannot exceed "
+                    f"photos_max ({merged['photos_max']})"
+                ),
+            )
+        return generator.update_generation_settings(c, patch)
 
 
 @router.get("/machine-tokens")

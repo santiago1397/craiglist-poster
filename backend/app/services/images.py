@@ -26,7 +26,9 @@ from .imagegen import ImageGenError, build_provider
 # Matches the desktop's historic photo rule: an image may be reused within its
 # owning account, but not for 30 days.
 REUSE_COOLDOWN_DAYS = 30
-MAX_SLOTS = 5
+
+# Craigslist's real per-posting limit: one thumbnail plus 23 more.
+MAX_SLOTS = 24
 
 DEFAULT_IMAGE_PROMPT = (
     "Professional photograph of a well-maintained {kind} on a single-family "
@@ -314,16 +316,27 @@ def mark_used(conn: psycopg.Connection, image_ids: list[int]) -> None:
         )
 
 
-def roll_photo_count(rng: random.Random) -> int:
+def roll_photo_count(
+    rng: random.Random,
+    *,
+    photos_min: int = 1,
+    photos_max: int = 5,
+    imageless_rate: float = 0.10,
+) -> int:
     """How many images this draft should carry.
 
-    Roughly one post in ten goes out with no pictures at all — a deliberate
-    choice, so the account does not look mechanically identical every time.
-    The rest get 1-5, which matches what the old poster did.
+    Separate from MAX_SLOTS: Craigslist permits 24, but every upload blocks
+    until the site confirms its thumbnail, so a 24-photo post is minutes of
+    browser time. The range is a setting so that trade-off stays yours.
+
+    A share of posts (10% by default) deliberately carry nothing at all, so an
+    account does not look mechanically identical every time.
     """
-    if rng.random() < 0.10:
+    if rng.random() < imageless_rate:
         return 0
-    return rng.randint(1, MAX_SLOTS)
+    lo = max(0, min(photos_min, MAX_SLOTS))
+    hi = max(lo, min(photos_max, MAX_SLOTS))
+    return rng.randint(lo, hi) if hi else 0
 
 
 def autoattach(
@@ -336,7 +349,15 @@ def autoattach(
     'cover' image because it becomes the Craigslist thumbnail.
     """
     rng = rng or random.Random()
-    want = roll_photo_count(rng)
+    g = conn.execute(
+        "SELECT photos_min, photos_max, imageless_rate FROM generation_settings LIMIT 1"
+    ).fetchone()
+    want = roll_photo_count(
+        rng,
+        photos_min=g["photos_min"],
+        photos_max=g["photos_max"],
+        imageless_rate=g["imageless_rate"],
+    )
     if want == 0:
         return []
 
