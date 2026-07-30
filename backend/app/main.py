@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,16 +11,56 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .config import get_settings
-from .db import close_pool, init_pool
+from .db import close_pool, init_pool, tx
+
+# Arbitrary but fixed. uvicorn runs multiple workers, so without a lock every
+# worker would top the queue up simultaneously and generate duplicate drafts.
+_TOPUP_LOCK_KEY = 8_412_337_001
+
+
+async def _topup_loop(interval_minutes: int) -> None:
+    """Keep the draft queue full. One worker wins the advisory lock and runs;
+    the others no-op, so this is safe under `uvicorn --workers N`."""
+    from .services import generator
+
+    interval = max(60, interval_minutes * 60)
+    # Stagger the first run so a restart storm doesn't stampede the model API.
+    await asyncio.sleep(20)
+    while True:
+        try:
+            def _run() -> dict | None:
+                with tx() as conn:
+                    got = conn.execute(
+                        "SELECT pg_try_advisory_xact_lock(%s) AS ok", (_TOPUP_LOCK_KEY,)
+                    ).fetchone()["ok"]
+                    if not got:
+                        return None
+                    return generator.topup(conn)
+
+            result = await asyncio.to_thread(_run)
+            if result and result.get("created"):
+                logger.info(f"draft top-up created {result['created']} draft(s)")
+        except Exception as e:  # never let the loop die
+            logger.warning(f"draft top-up failed: {e!r}")
+        await asyncio.sleep(interval)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("Starting up — initialising DB pool")
     init_pool()
+    settings = get_settings()
+    task: asyncio.Task | None = None
+    if settings.generation_interval_minutes > 0:
+        task = asyncio.create_task(_topup_loop(settings.generation_interval_minutes))
+        logger.info(
+            f"draft top-up loop every {settings.generation_interval_minutes}m"
+        )
     try:
         yield
     finally:
+        if task is not None:
+            task.cancel()
         logger.info("Shutting down — closing DB pool")
         close_pool()
 

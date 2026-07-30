@@ -28,6 +28,19 @@ type Draft = {
   failed_message: string | null;
   attempts: number;
   created_at: string;
+  generated_by: string | null; // 'ai' | 'fallback' | null when hand-written
+};
+
+type GenerationState = {
+  enabled: boolean;
+  model: string;
+  api_key_configured: boolean;
+  seed_ads: number;
+  last_run_at: string | null;
+  last_source: string | null;
+  last_error: string | null;
+  generated_total: number;
+  fallback_total: number;
 };
 
 type AccountHealth = {
@@ -90,6 +103,7 @@ export default function ReviewPage() {
   const [creating, setCreating] = useState(false);
   const [posting, setPosting] = useState<PostingState | null>(null);
   const [locations, setLocations] = useState<LocationRef | null>(null);
+  const [generation, setGeneration] = useState<GenerationState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -109,16 +123,18 @@ export default function ReviewPage() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [list, accts, posting, locs] = await Promise.all([
+      const [list, accts, posting, locs, gen] = await Promise.all([
         api.get<{ drafts: Draft[] }>("/drafts", params),
         api.get<{ accounts: string[] }>("/accounts"),
         api.get<PostingState>("/settings/posting"),
         api.get<LocationRef>("/reference/locations"),
+        api.get<GenerationState>("/settings/generation"),
       ]);
       setDrafts(list.drafts);
       setAccounts(accts.accounts);
       setPosting(posting);
       setLocations(locs);
+      setGeneration(gen);
       if (accts.accounts.length) {
         setHealth(await api.get<Health>("/drafts/health", { accounts: accts.accounts.join(",") }));
       }
@@ -150,6 +166,14 @@ export default function ReviewPage() {
         <h1 className="text-lg font-semibold">Review</h1>
         <div className="flex gap-2">
           <button
+            disabled={busy}
+            onClick={() => mutate(() => api.post("/drafts/generate", { force: true, limit: 10 }))}
+            className="text-sm px-3 py-1 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-40"
+            title="Fill the queue now instead of waiting for the background job"
+          >
+            {busy ? "Generating…" : "Generate now"}
+          </button>
+          <button
             onClick={() => setCreating(true)}
             className="text-sm px-3 py-1 rounded bg-sky-700 hover:bg-sky-600"
           >
@@ -179,6 +203,8 @@ export default function ReviewPage() {
           }
         />
       )}
+
+      {generation && <GenerationStatus g={generation} />}
 
       {health && <QueueHealth health={health} accounts={accounts} />}
 
@@ -520,6 +546,55 @@ function PostingSwitch(props: {
   );
 }
 
+// Surfaces the one thing that goes wrong quietly: generation silently serving
+// workbook copy for weeks because the model key expired.
+function GenerationStatus({ g }: { g: GenerationState }) {
+  const degraded = !g.api_key_configured || g.last_source === "fallback";
+  return (
+    <section
+      className={cn(
+        "rounded border p-3 text-sm",
+        degraded ? "border-amber-800/70 bg-amber-950/20" : "border-slate-800 bg-slate-900/50",
+      )}
+    >
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-slate-300">Auto-generation</span>
+          <span
+            className={cn(
+              "text-xs px-1.5 py-0.5 rounded",
+              g.enabled ? "bg-emerald-900/60 text-emerald-200" : "bg-slate-800 text-slate-400",
+            )}
+          >
+            {g.enabled ? "on" : "off"}
+          </span>
+          <span className="text-xs text-slate-500">{g.model}</span>
+          {!g.api_key_configured && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-200">
+              no API key — using workbook copy
+            </span>
+          )}
+        </div>
+        <div className="text-xs text-slate-500">
+          {g.seed_ads} seed ads · {g.generated_total} AI / {g.fallback_total} fallback
+          {g.last_run_at ? ` · last run ${fmt(g.last_run_at)}` : " · never run"}
+        </div>
+      </div>
+      {g.last_error && (
+        <p className="text-xs text-amber-200/80 mt-1.5">
+          Last generation error: {g.last_error}
+        </p>
+      )}
+      {g.seed_ads === 0 && (
+        <p className="text-xs text-amber-200 mt-1.5">
+          No seed ads loaded — there is nothing to fall back to if the model
+          fails. Run <code>scripts/import_seed_ads.py</code>.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function QueueHealth({ health, accounts }: { health: Health; accounts: string[] }) {
   return (
     <section className="rounded border border-slate-800 bg-slate-900/50 p-3 space-y-2">
@@ -587,6 +662,19 @@ function DraftRow(props: {
             {!d.reviewed && d.status === "queued" && (
               <span className="text-xs px-1.5 py-0.5 rounded bg-sky-900/60 text-sky-200">
                 unreviewed
+              </span>
+            )}
+            {d.generated_by === "ai" && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-violet-900/60 text-violet-200">
+                AI
+              </span>
+            )}
+            {d.generated_by === "fallback" && (
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-200"
+                title="The model was unavailable, so this uses the workbook copy verbatim"
+              >
+                workbook copy
               </span>
             )}
             {parked && (

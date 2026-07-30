@@ -26,6 +26,7 @@ RUN pip install --upgrade pip && \
         "alembic>=1.14.0" \
         "python-dotenv>=1.0.1" \
         "loguru>=0.7.2" \
+        "httpx>=0.27.2" \
         "sqlalchemy>=2.0.0"
 
 # ---- runtime stage ----

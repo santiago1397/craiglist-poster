@@ -92,6 +92,26 @@ def queue_health(accounts: str = Query(description="comma-separated")) -> dict:
     return report
 
 
+class GenerateBody(BaseModel):
+    # Fill to target even if the queue is above the floor.
+    force: bool = False
+    # Safety cap so a mistyped target cannot mint hundreds of drafts.
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+@router.post("/generate")
+def generate(body: GenerateBody) -> dict:
+    """Run the top-up now instead of waiting for the background loop.
+
+    Never fails because the model is down — unusable output falls back to the
+    workbook copy in seed_ads, and the response says which was used.
+    """
+    from ..services import generator
+
+    with tx() as c:
+        return generator.topup(c, force=body.force, limit=body.limit)
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_draft(body: DraftCreate) -> dict:
     with tx() as c:
