@@ -118,6 +118,22 @@ except generator.GenerationError:
     pass
 ok.append("JSON extraction handles code fences and chatty prose")
 
+# --- 6b. Real-world malformed output the model actually produces -----------
+# MiniMax writes literal newlines between paragraphs instead of \n escapes,
+# which is invalid JSON by the spec. In production this alone caused ~1 in 3
+# generations to fall back before strict=False was used.
+raw_newlines = '{"title": "Roof Repair in Davie", "body_head": "Para one.\n\nPara two.\n\nCall now."}'
+got = generator._extract_json(raw_newlines)
+assert got["title"] == "Roof Repair in Davie", got
+assert "\n\n" in got["body_head"], "paragraph breaks lost"
+ok.append("literal newlines inside JSON strings parse instead of falling back")
+
+# An unescaped quote inside the body is salvaged rather than wasting the call.
+unescaped_quote = '{"title": "Roof "Repair" in Davie", "body_head": "Body text here."}'
+got = generator._extract_json(unescaped_quote)
+assert got["body_head"] == "Body text here.", got
+ok.append("output with an unescaped quote is salvaged")
+
 # --- 7. topup respects floor/target and only known accounts ----------------
 with tx() as c:
     c.execute("TRUNCATE drafts CASCADE")
@@ -131,7 +147,20 @@ with conn() as c:
         assert n == 5, f"{acct} has {n} drafts, expected 5"
 ok.append("topup fills each known account to target (5), no others")
 
+# --- 7b. A small batch limit is shared, not eaten by the first account -----
+with tx() as c:
+    c.execute("TRUNCATE drafts CASCADE")
+    shared = generator.topup(c, limit=4)
+assert shared["created"] == 4, shared
+per_account = {a: v["created"] for a, v in shared["accounts"].items() if v["created"]}
+assert len(per_account) == 2, f"one account consumed the whole batch: {per_account}"
+assert all(n == 2 for n in per_account.values()), per_account
+ok.append("a batch limit smaller than the shortfall is split evenly, not drained by one account")
+
 # --- 8. Above the floor, topup does nothing --------------------------------
+# 7b deliberately left the queues below the floor, so refill first.
+with tx() as c:
+    generator.topup(c)
 with tx() as c:
     again = generator.topup(c)
 assert again["created"] == 0, f"topup generated {again['created']} while above floor"
