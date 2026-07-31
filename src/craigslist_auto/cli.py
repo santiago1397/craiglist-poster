@@ -566,6 +566,18 @@ def stats_sync(
         else:
             typer.echo(f"  [--] {name:10s}  ERROR: {info.get('error')}")
 
+    # Ship the snapshots now rather than waiting on the reporter daemon, for the
+    # same reason `cl post` does: this is a short-lived Scheduled Task, and if
+    # the daemon is not running the events wait forever. That is not
+    # hypothetical — the scrape emitted to the outbox and nothing drained it,
+    # so the dashboard's stats went stale while the scrape itself looked fine.
+    _flush_evidence()
+    pending = reporter_mod.pending_count()
+    if pending:
+        typer.echo(
+            f"  [!] {pending} event(s) still unsent — check REPORTER_URL/REPORTER_TOKEN"
+        )
+
 
 @app.command("stats-seed")
 def stats_seed():
