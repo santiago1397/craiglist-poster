@@ -12,13 +12,13 @@ type DashboardAccount = {
   posts_last_7d_this_account: number | null;
   stats_sync_health: { ok: boolean; last_run_ts?: string; error_type?: string } | null;
   state_ts: string | null;
-  photos_total: number | null;
-  photos_never_used: number | null;
-  photos_eligible: number | null;
-  covers_total: number | null;
-  covers_never_used: number | null;
-  covers_eligible: number | null;
-  inventory_ts: string | null;
+  // Live depth of the server-side stack, counted per account. An unclaimed
+  // image is available to every account, so these do not sum to a stack total.
+  photos_available: number;
+  covers_available: number;
+  images_assigned: number;
+  images_published: number;
+  queued_drafts: number;
   last_success_ts: string | null;
   last_success_url: string | null;
   last_success_title: string | null;
@@ -75,6 +75,56 @@ function OutcomeBadge({ outcome }: { outcome: string | null }) {
   if (!outcome) return <span className="text-fg-subtle text-xs">—</span>;
   const ok = outcome === "posted" || outcome === "dry_run";
   return <StatusBadge ok={ok} label={outcome.replace(/_/g, " ")} />;
+}
+
+// Craigslist takes 24 images: one cover plus 23 photos.
+const PHOTOS_PER_POST = 23;
+
+/** What this account can actually put on a post, and whether it is enough.
+ *
+ * This block used to read `photo_inventory`, which counts files in
+ * `data/photos/` on the Windows box — folders nothing has read since images
+ * moved server-side. It reported 64 usable photos against a real stack of 5.
+ * Everything here is counted live against the images table instead.
+ */
+function ImageStack({ a }: { a: DashboardAccount }) {
+  const demand = a.queued_drafts * PHOTOS_PER_POST;
+  const short = Math.max(0, demand - a.photos_available);
+  return (
+    <div className="text-sm">
+      <div className="text-fg-muted text-xs uppercase tracking-wide">Image stack</div>
+      <div className="flex gap-4 flex-wrap">
+        <span>
+          <span
+            className={cn("font-medium", a.covers_available === 0 && "text-danger-fg")}
+          >
+            {formatNumber(a.covers_available)}
+          </span>{" "}
+          <span className="text-fg-subtle text-xs">covers</span>
+        </span>
+        <span>
+          <span className={cn("font-medium", short > 0 && "text-warn-fg")}>
+            {formatNumber(a.photos_available)}
+          </span>{" "}
+          <span className="text-fg-subtle text-xs">photos free</span>
+        </span>
+        <span className="text-fg-subtle text-xs">
+          {formatNumber(a.images_assigned)} assigned · {formatNumber(a.images_published)} published
+        </span>
+      </div>
+      {a.covers_available === 0 && (
+        <div className="text-xs text-danger-fg mt-0.5">
+          No cover free — a roof photo becomes the thumbnail.
+        </div>
+      )}
+      {short > 0 && (
+        <div className="text-xs text-warn-fg mt-0.5">
+          Short {formatNumber(short)} for {a.queued_drafts} queued draft
+          {a.queued_drafts === 1 ? "" : "s"} — they publish thinner.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function AccountCard({ a }: { a: DashboardAccount }) {
@@ -147,25 +197,7 @@ function AccountCard({ a }: { a: DashboardAccount }) {
         )}
       </div>
 
-      <div className="text-sm">
-        <div className="text-fg-muted text-xs uppercase tracking-wide">Photos</div>
-        <div>
-          {a.photos_never_used !== null ? (
-            <>
-              <span className="font-medium">{formatNumber(a.photos_never_used)}</span> never-used /{" "}
-              {formatNumber(a.photos_total)} total
-              <span className="text-fg-subtle text-xs">
-                {" — "}{formatNumber(a.photos_eligible)} eligible now
-              </span>
-            </>
-          ) : (
-            <span className="text-fg-subtle">— (waiting for photo-inventory)</span>
-          )}
-        </div>
-        <div className="text-xs text-fg-subtle mt-0.5">
-          covers: {formatNumber(a.covers_total)}
-        </div>
-      </div>
+      <ImageStack a={a} />
 
       <div className="pt-2 border-t border-border text-xs text-fg-subtle flex justify-between">
         <span>

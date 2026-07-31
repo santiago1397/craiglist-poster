@@ -30,7 +30,7 @@ import { formatDateTime, formatRelative } from "../lib/format";
 
 type Problem = {
   id: string;
-  kind: "flow_error" | "post_failure" | "machine_silent" | "stuck_claim";
+  kind: "flow_error" | "post_failure" | "machine_silent" | "stuck_claim" | "image_stack";
   severity: "critical" | "warning" | "info";
   ts: string;
   machine: string | null;
@@ -92,6 +92,7 @@ const KIND_LABEL: Record<Problem["kind"], string> = {
   post_failure: "Posting run",
   machine_silent: "Machine offline",
   stuck_claim: "Stuck draft",
+  image_stack: "Image stack",
 };
 
 function ArtifactLinks({ ids }: { ids: string[] }) {

@@ -37,9 +37,20 @@ DEFAULT_WINDOW_DAYS = 90
 def dashboard_accounts(conn: psycopg.Connection) -> list[dict]:
     """Per-account cards for the dashboard.
 
-    Combines: latest account_state (eligibility), latest photo_inventory,
+    Combines: latest account_state (eligibility), live image-stack depth,
     most-recent successful post_attempt (last post link + title), most-recent
     attempt of any outcome (last-attempt indicator including failures).
+
+    Image depth is counted here against the `images` table, not read from
+    `photo_inventory_snapshots`. That table is fed by `cl photo-inventory`
+    scanning `data/photos/` and `data/covers/` on the Windows box — folders the
+    queue stopped reading when images moved server-side. It kept refreshing
+    daily, so the dashboard reported 64 usable photos while the stack that
+    actually feeds posts held 5. A stale number that looks live and reassuring
+    is worse than no number.
+
+    "Available to" is deliberate wording: an unclaimed image counts for every
+    account, so these do not sum to a stack total.
     """
     rows = conn.execute(
         """
@@ -49,14 +60,6 @@ def dashboard_accounts(conn: psycopg.Connection) -> list[dict]:
                 posts_last_24h_total, posts_last_7d_this_account,
                 last_post_at, last_post_url, stats_sync_health
             FROM account_states
-            ORDER BY account, ts DESC
-        ),
-        latest_inventory AS (
-            SELECT DISTINCT ON (account)
-                account, ts AS inventory_ts,
-                photos_total, photos_never_used, photos_eligible,
-                covers_total, covers_never_used, covers_eligible
-            FROM photo_inventory_snapshots
             ORDER BY account, ts DESC
         ),
         last_success AS (
@@ -77,25 +80,62 @@ def dashboard_accounts(conn: psycopg.Connection) -> list[dict]:
         ),
         accounts AS (
             SELECT account FROM latest_state
-            UNION SELECT account FROM latest_inventory
             UNION SELECT account FROM last_success
             UNION SELECT account FROM last_attempt WHERE account != '(none)'
+        ),
+        -- Reserved by a live draft or a live posting's desired set. Mirrors
+        -- images._RESERVED_SQL; kept inline so this stays one round trip.
+        reserved AS (
+            SELECT DISTINCT image_id FROM (
+                SELECT di.image_id
+                  FROM draft_images di JOIN drafts d ON d.id = di.draft_id
+                 WHERE d.status IN ('queued', 'claimed', 'needs_attention')
+                UNION ALL
+                SELECT image_id FROM post_desired_images
+            ) held
+        ),
+        stack AS (
+            SELECT
+                a.account,
+                COUNT(*) FILTER (
+                    WHERE i.kind = 'photo' AND r.image_id IS NULL
+                      AND (i.used_at IS NULL OR i.used_at < NOW() - INTERVAL '30 days')
+                ) AS photos_available,
+                COUNT(*) FILTER (
+                    WHERE i.kind = 'cover' AND r.image_id IS NULL
+                      AND (i.used_at IS NULL OR i.used_at < NOW() - INTERVAL '30 days')
+                ) AS covers_available,
+                COUNT(*) FILTER (WHERE r.image_id IS NOT NULL) AS images_assigned,
+                COUNT(*) FILTER (WHERE i.used_at IS NOT NULL) AS images_published
+            FROM accounts a
+            LEFT JOIN images i
+                   ON i.status = 'approved'
+                  AND (i.owner_account IS NULL OR i.owner_account = a.account)
+            LEFT JOIN reserved r ON r.image_id = i.id
+            GROUP BY a.account
+        ),
+        queue AS (
+            SELECT account, COUNT(*) AS queued_drafts
+            FROM drafts WHERE status = 'queued' GROUP BY account
         )
         SELECT
             a.account,
             ls.eligible_now, ls.next_eligible_at, ls.block_reasons,
             ls.posts_last_24h_total, ls.posts_last_7d_this_account,
             ls.stats_sync_health, ls.ts AS state_ts,
-            li.photos_total, li.photos_never_used, li.photos_eligible,
-            li.covers_total, li.covers_never_used, li.covers_eligible,
-            li.inventory_ts,
+            COALESCE(st.photos_available, 0)  AS photos_available,
+            COALESCE(st.covers_available, 0)  AS covers_available,
+            COALESCE(st.images_assigned, 0)   AS images_assigned,
+            COALESCE(st.images_published, 0)  AS images_published,
+            COALESCE(q.queued_drafts, 0)      AS queued_drafts,
             lsu.last_success_ts, lsu.last_success_url, lsu.last_success_title,
             lsu.last_success_post_id,
             la.last_attempt_ts, la.last_attempt_outcome,
             la.last_attempt_error_type, la.last_attempt_error_message
         FROM accounts a
         LEFT JOIN latest_state ls ON ls.account = a.account
-        LEFT JOIN latest_inventory li ON li.account = a.account
+        LEFT JOIN stack st ON st.account = a.account
+        LEFT JOIN queue q ON q.account = a.account
         LEFT JOIN last_success lsu ON lsu.account = a.account
         LEFT JOIN last_attempt la ON la.account = a.account
         ORDER BY a.account
