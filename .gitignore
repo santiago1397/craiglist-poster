@@ -3,12 +3,30 @@ __pycache__/
 *.pyc
 profiles/*/
 !profiles/.gitkeep
+
+# Runtime state written by the script — do not commit
 logs/*.jsonl
 logs/*.log
+logs/*.json
+logs/artifacts/
+logs/failures/
+data/*.sqlite
+data/stats_health.json
+data/browser.lock
+
+# Ads workbook — live content owned by the operator, not git.
+# Fresh clones need this file copied over manually.
+data/ads.xlsx
+data/*_ads_*.xlsx
+data/20*_ads*.xlsx
+
+# Media
 data/photos/*/*
 !data/photos/*/.gitkeep
-data/outbox.sqlite
-data/stats.sqlite
+data/covers/*/*
+!data/covers/*/.gitkeep
+
+# Secrets
 .env
 .env.prod
 
