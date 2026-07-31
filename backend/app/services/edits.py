@@ -300,22 +300,111 @@ def _touch_desired(conn: psycopg.Connection, post_id: str) -> None:
 
 
 def requeue_desired(conn: psycopg.Connection, post_id: str) -> dict | None:
-    """Send a parked edit back to pending after you've dealt with it."""
+    """Send a parked edit back to pending after you've dealt with it.
+
+    Re-bases `base_hash` on whatever the last hydration read. Without that a
+    `parked_stale` edit could only ever park again — the check that stopped it
+    would compare against the same superseded hash forever, and the Requeue
+    button would look broken.
+
+    Re-basing is safe precisely because it uses `posts.content_hash` rather than
+    trusting the client: that column is written only by hydration, so it is by
+    definition content someone has been shown. An operator who has not reloaded
+    re-bases onto the same value and parks again, which is the correct answer.
+
+    This also covers the case that is not a content change at all — when a fix
+    to a field selector alters what `content_hash` covers, every stored
+    `base_hash` is stale for postings nobody has touched.
+    """
     row = conn.execute(
         """
-        UPDATE post_desired_state
+        UPDATE post_desired_state d
         SET status = 'pending',
+            base_hash = p.content_hash,
             failed_step = NULL,
             failed_message = NULL,
             claimed_at = NULL,
             claimed_by_machine = NULL,
             updated_at = NOW()
-        WHERE post_id = %s AND status = ANY(%s)
-        RETURNING *
+        FROM posts p
+        WHERE d.post_id = p.post_id
+          AND d.post_id = %s
+          AND d.status = ANY(%s)
+        RETURNING d.*
         """,
         (post_id, list(PARKED_STATUSES)),
     ).fetchone()
     return dict(row) if row else None
+
+
+# A request is refused synchronously when the guardrails do not allow it, so a
+# live flag means the desktop has not polled yet — normally seconds. This is the
+# backstop for the daemon being down when the button was pressed. Mirrors
+# queue.POST_REQUEST_TTL_MINUTES.
+RECONCILE_REQUEST_TTL_MINUTES = 20
+
+
+def request_reconcile(
+    conn: psycopg.Connection, *, post_id: str, requested_by: str | None = None
+) -> dict:
+    """Ask the desktop to apply this post's pending edit now.
+
+    Changes *when*, never *whether*: see `pending_work`, which drops the edit
+    window and the per-post cooldown for a requested edit and keeps every other
+    guardrail.
+    """
+    desired = get_desired(conn, post_id)
+    if desired is None:
+        raise ValueError("nothing staged for this post")
+    if desired["status"] == "applying":
+        raise ValueError("the desktop is applying this edit right now")
+    if desired["status"] in PARKED_STATUSES:
+        raise ValueError(
+            f"this edit is {desired['status']} — deal with the cause and use "
+            f"Try this edit again first"
+        )
+    if desired["desired_rev"] <= desired["live_rev"]:
+        raise ValueError("there is no pending change to apply")
+
+    row = conn.execute(
+        """
+        UPDATE post_desired_state
+        SET reconcile_requested_at = NOW(),
+            reconcile_requested_by = %s,
+            reconcile_request_error = NULL,
+            updated_at = NOW()
+        WHERE post_id = %s
+        RETURNING *
+        """,
+        ((requested_by or "")[:200] or None, post_id),
+    ).fetchone()
+    return dict(row)
+
+
+def expire_reconcile_requests(
+    conn: psycopg.Connection, older_than_minutes: int = RECONCILE_REQUEST_TTL_MINUTES
+) -> int:
+    """Drop requests nothing ever collected, and say so on the post.
+
+    The message matters more than the cleanup: without it, "I pressed Apply now
+    and nothing happened" is unanswerable from the dashboard.
+    """
+    cur = conn.execute(
+        """
+        UPDATE post_desired_state
+        SET reconcile_requested_at = NULL,
+            reconcile_requested_by = NULL,
+            reconcile_request_error = 'Apply now expired after '
+                || make_interval(mins => %s) || ' without the desktop picking it '
+                || 'up. Nothing was changed. The machine was most likely offline '
+                || 'or busy with another run.',
+            updated_at = NOW()
+        WHERE reconcile_requested_at IS NOT NULL
+          AND reconcile_requested_at < NOW() - make_interval(mins => %s)
+        """,
+        (older_than_minutes, older_than_minutes),
+    )
+    return cur.rowcount or 0
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +547,8 @@ def evaluate_edit_eligibility(
     conn: psycopg.Connection,
     accounts: list[str],
     now: datetime | None = None,
+    *,
+    ignore_window: bool = False,
 ) -> dict:
     """Why each account may or may not run an edit right now.
 
@@ -483,7 +574,9 @@ def evaluate_edit_eligibility(
             + (f": {reason}" if reason else " — enable it under Settings once the "
                "Craigslist edit-form spike is done")
         )
-    if not (g["edit_window_start_hour"] <= local.hour < g["edit_window_end_hour"]):
+    if not ignore_window and not (
+        g["edit_window_start_hour"] <= local.hour < g["edit_window_end_hour"]
+    ):
         global_blocks.append(
             f"outside edit window "
             f"({g['edit_window_start_hour']:02d}-{g['edit_window_end_hour']:02d} "
@@ -562,43 +655,68 @@ def pending_work(
         ).fetchall()
     ]
 
+    expire_reconcile_requests(conn)
+
     report = evaluate_edit_eligibility(conn, accounts, now=now)
-    eligible = [n for n, i in report["accounts"].items() if i["eligible"]]
+    # An operator standing at the dashboard pressing "Apply now" is not subject
+    # to the pacing rules — the window and the per-post cooldown exist to spread
+    # edits out over time, and they have chosen this moment deliberately. Every
+    # other guardrail still decides: the master posting switch, `edits_enabled`,
+    # the per-account daily cap, and the lifetime cap below.
+    requested_report = evaluate_edit_eligibility(
+        conn, accounts, now=now, ignore_window=True
+    )
 
-    reconcile: list[dict] = []
-    if eligible:
-        g = get_guardrails(conn)
-        last_edit = _last_edit_by_post(conn)
-        applied = _applied_count_by_post(conn)
-        cooldown = timedelta(hours=g["min_hours_between_edits_same_post"])
-        lifetime_cap = g["max_edits_per_post_lifetime"]
+    g = get_guardrails(conn)
+    last_edit = _last_edit_by_post(conn)
+    applied = _applied_count_by_post(conn)
+    cooldown = timedelta(hours=g["min_hours_between_edits_same_post"])
+    lifetime_cap = g["max_edits_per_post_lifetime"]
 
+    def _candidates(accounts_ok: list[str], requested_only: bool) -> list[dict]:
+        if not accounts_ok:
+            return []
         rows = conn.execute(
-            """
-            SELECT d.post_id, d.account, d.desired_rev, p.url
+            f"""
+            SELECT d.post_id, d.account, d.desired_rev, p.url,
+                   d.reconcile_requested_at
             FROM post_desired_state d
             JOIN posts p ON p.post_id = d.post_id
             WHERE d.status = 'pending'
               AND d.desired_rev > d.live_rev
               AND d.account = ANY(%s)
               AND p.editable
-            ORDER BY d.updated_at
+              AND d.reconcile_requested_at IS {"NOT NULL" if requested_only else "NULL"}
+            ORDER BY {"d.reconcile_requested_at" if requested_only else "d.updated_at"}
             LIMIT %s
             """,
-            (eligible, limit),
+            (accounts_ok, limit),
         ).fetchall()
+        out = []
         for r in rows:
             pid = r["post_id"]
-            last = last_edit.get(pid)
-            if last is not None and (now - last) < cooldown:
-                continue
             if applied.get(pid, 0) >= lifetime_cap:
                 continue
-            reconcile.append(dict(r))
+            if not requested_only:
+                last = last_edit.get(pid)
+                if last is not None and (now - last) < cooldown:
+                    continue
+            out.append(dict(r))
+        return out
+
+    # Requested first: someone is watching for it.
+    reconcile = _candidates(
+        [n for n, i in requested_report["accounts"].items() if i["eligible"]],
+        requested_only=True,
+    )
+    reconcile += _candidates(
+        [n for n, i in report["accounts"].items() if i["eligible"]],
+        requested_only=False,
+    )
 
     return {
         "hydrate": hydrate,
-        "reconcile": reconcile,
+        "reconcile": reconcile[:limit],
         "eligibility": report,
     }
 
@@ -704,6 +822,14 @@ PRE_MUTATION_STEPS = frozenset({
 })
 
 
+def _clear_reconcile_request(conn: psycopg.Connection, post_id: str) -> None:
+    conn.execute(
+        "UPDATE post_desired_state SET reconcile_requested_at = NULL, "
+        "reconcile_requested_by = NULL WHERE post_id = %s",
+        (post_id,),
+    )
+
+
 def apply_attempt(conn: psycopg.Connection, ev) -> None:
     """Advance a post's desired state from a reported attempt.
 
@@ -714,8 +840,12 @@ def apply_attempt(conn: psycopg.Connection, ev) -> None:
     if desired is None:
         return
     if ev.outcome in ("dry_run", "skipped_not_eligible", "skipped_lease_held"):
-        # Rehearsals and skips hold no claim and change nothing.
+        # Rehearsals and skips hold no claim and change nothing — and crucially
+        # do not consume a request, or a skipped poll would silently cancel it.
         return
+
+    # The request has been served, whatever the answer was.
+    _clear_reconcile_request(conn, ev.post_id)
 
     if ev.outcome in ("applied", "no_change"):
         conn.execute(

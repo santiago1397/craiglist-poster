@@ -122,19 +122,44 @@ export function PostEditPanel(props: {
             Edit
           </button>
           {pending && (
-            <button
-              disabled={applying || run.isPending}
-              onClick={() => run.mutate(() => api.del(`/edits/${p.post_id}/desired`))}
-              className="text-xs px-2 py-1 rounded border border-border-strong text-danger-fg hover:bg-bg disabled:opacity-40"
-            >
-              Discard change
-            </button>
+            <>
+              <button
+                disabled={applying || run.isPending || !!p.reconcile_requested_at}
+                title={
+                  p.reconcile_requested_at
+                    ? "Already asked — the posting machine picks this up within about 15 seconds"
+                    : "Apply this change to the live posting now"
+                }
+                onClick={() => run.mutate(() => api.post(`/edits/${p.post_id}/apply-now`))}
+                className="text-xs px-2 py-1 rounded bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
+              >
+                {p.reconcile_requested_at ? "Applying soon…" : "Apply now"}
+              </button>
+              <button
+                disabled={applying || run.isPending}
+                onClick={() => run.mutate(() => api.del(`/edits/${p.post_id}/desired`))}
+                className="text-xs px-2 py-1 rounded border border-border-strong text-danger-fg hover:bg-bg disabled:opacity-40"
+              >
+                Discard change
+              </button>
+            </>
           )}
         </div>
       </div>
 
       {p.hydrate_error && (
         <p className="text-xs text-danger-fg">Load failed: {p.hydrate_error}</p>
+      )}
+
+      {p.reconcile_request_error && (
+        <p className="text-xs text-warn-fg">{p.reconcile_request_error}</p>
+      )}
+
+      {p.reconcile_requested_at && (
+        <p className="text-xs text-fg-muted">
+          Waiting for the posting machine to apply this — it polls every 15
+          seconds. Nothing reaches the live ad until it finishes.
+        </p>
       )}
 
       {/* What the last read of the form actually saw. Craigslist's edit form is

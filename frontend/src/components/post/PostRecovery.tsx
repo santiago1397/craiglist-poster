@@ -79,7 +79,8 @@ export function PostRecovery(props: {
       <p className="text-xs text-fg-subtle">
         Requeue only once you have dealt with the cause — a parked edit that goes
         straight back to pending will hit the same wall and burn another attempt
-        against the daily cap.
+        against the daily cap. Requeueing re-bases the change on whatever the
+        last load read, so reload first if the live ad has moved.
       </p>
     </section>
   );

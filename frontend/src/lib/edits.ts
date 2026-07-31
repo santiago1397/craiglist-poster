@@ -63,6 +63,8 @@ export type EditablePost = {
   failed_step: string | null;
   failed_message: string | null;
   last_attempt_at: string | null;
+  reconcile_requested_at: string | null;
+  reconcile_request_error: string | null;
 
   attempts: EditAttempt[];
 };
