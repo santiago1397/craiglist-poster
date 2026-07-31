@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import random
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from loguru import logger
 from patchright.sync_api import BrowserContext, Page, sync_playwright
 
+from . import artifacts
 from .config import CL_SITE, LOGS_DIR, Account
 from .content import Ad, mark_content_used, mark_photos_used
 from .covers import is_cover_path, mark_cover_used
@@ -20,22 +22,66 @@ FAILURES_DIR = LOGS_DIR / "failures"
 # auto-requeued or must be parked for review (decision 16).
 FIRST_ASSET_CONSUMING_STEP = "photo_upload"
 
+# A full-page screenshot plus an HTML dump is ~1-2MB. Every photo slot that
+# misses its thumbnail is worth seeing once; five of them in one run is just
+# five copies of the same broken selector.
+MAX_NONFATAL_CAPTURES = 1
+
+
+@dataclass
+class PostRun:
+    """Everything one posting run learned, not just whether it published.
+
+    `url` used to be the entire return value, which meant the run either
+    succeeded silently or failed loudly — with no way to say "it published, but
+    two photos never landed". Degradations now travel with the result and reach
+    the dashboard on the post_attempt event.
+    """
+
+    url: str | None = None
+    # Human-readable, one line each. These are what the dashboard flags.
+    warnings: list[str] = field(default_factory=list)
+    # Thumbnails Craigslist actually rendered, vs how many we tried to upload.
+    photos_confirmed: int | None = None
+    artifact_ids: list[str] = field(default_factory=list)
+    # Non-fatal captures already spent this run — see MAX_NONFATAL_CAPTURES.
+    nonfatal_captures: int = 0
+
+    def warn(self, message: str) -> None:
+        """Record a degradation and log it. Never affects the outcome."""
+        logger.warning(f"  DEGRADED: {message}")
+        self.warnings.append(message[:300])
+
 
 class PosterFailure(RuntimeError):
     """A post_ad failure that remembers which step it died on.
 
     post_ad tracked `step` for failure dumps already, but the value never left
     the function. Carrying it on the exception lets the CLI ship it in the
-    post_attempt event.
+    post_attempt event — along with the artifacts and any degradations observed
+    before the run died, which would otherwise be lost with the return value.
     """
 
-    def __init__(self, step: str, original: Exception):
+    def __init__(self, step: str, original: Exception, run: PostRun | None = None):
         super().__init__(f"{step}: {original!r}")
         self.step = step
         self.original = original
+        self.run = run or PostRun()
 
 
-def _dump_failure(page: Page, account_name: str, step: str, err: Exception) -> None:
+def _dump_failure(
+    page: Page, account_name: str, step: str, err: Exception
+) -> list[str]:
+    """Capture the page twice: locally for immediate inspection, and spooled
+    for upload so it is readable from the dashboard.
+
+    The local copy under `logs/failures/` is kept because it is the only
+    evidence available when the machine has no network. The spooled copy is the
+    one that matters — a screenshot on a Windows box nobody logs into is not a
+    debugging aid (DESIGN.md decision 17).
+
+    Returns the spooled artifact ids for the post_attempt event.
+    """
     FAILURES_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     stem = FAILURES_DIR / f"{ts}_{account_name}_{step}"
@@ -48,6 +94,12 @@ def _dump_failure(page: Page, account_name: str, step: str, err: Exception) -> N
     except Exception as e:
         logger.warning(f"html dump failed: {e}")
     logger.error(f"[{account_name}] FAILED at step '{step}': {err!r}  (dump → {stem}.png/.html)")
+
+    # capture_page never raises — evidence collection must not be the reason a
+    # flow dies, and we are already on the failure path.
+    return artifacts.capture_page(
+        page, flow="post", label=step, account=account_name
+    )
 
 # Realistic desktop viewports — variation across accounts helps fingerprint diversity
 VIEWPORTS = [
@@ -118,13 +170,15 @@ def is_logged_in(page: Page) -> bool:
     return "settings" in page.url or page.locator("text=postings").count() > 0
 
 
-def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool = False) -> str | None:
+def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool = False) -> PostRun:
     """
-    Post one ad. Returns the post URL if successful.
+    Post one ad. Returns a PostRun carrying the URL plus anything that went
+    wrong without stopping the run.
     NOTE: CL's posting UI changes periodically. If selectors break, run with
     headless=False and step through visually to update them.
     """
     logger.info(f"[{account.name}] posting: {ad.title!r}  photos={len(ad.photos)}")
+    run = PostRun()
     step = "launch"
     with launch_account(account, headless=headless) as ctx:
         page = ctx.new_page()
@@ -158,7 +212,7 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
 
             step = "advance_to_type"
             logger.debug(f"step: {step}")
-            _advance_until(page, expect_selector="input[name='id'][value='so']", county=ad.county, max_steps=5)
+            _advance_until(page, expect_selector="input[name='id'][value='so']", county=ad.county, max_steps=5, run=run)
 
             step = "type_service_offered"
             logger.debug(f"step: {step}")
@@ -173,7 +227,7 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
 
             step = "advance_to_form"
             logger.debug(f"step: {step}")
-            _advance_until(page, expect_selector="input[name='PostingTitle']", county=ad.county, max_steps=4)
+            _advance_until(page, expect_selector="input[name='PostingTitle']", county=ad.county, max_steps=4, run=run)
 
             step = "form_title"
             logger.debug(f"step: {step}")
@@ -277,13 +331,19 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
                             f"    ✓ landed in {elapsed:.1f}s  (thumbs now: {after})"
                         )
                     else:
-                        logger.warning(
-                            f"    ✗ did NOT observe a new thumbnail after {elapsed:.1f}s  "
-                            f"(thumbs: {before} → {after}).  Either the upload failed OR "
-                            f"the thumbnail selector doesn't match CL's current DOM."
+                        run.warn(
+                            f"photo {i}/{len(ad.photos)} ({photo.name}) never rendered a "
+                            f"thumbnail after {elapsed:.1f}s (thumbs {before} → {after}) — "
+                            f"upload failed, or the thumbnail selector no longer matches CL"
                         )
-                        # Dump the page so we can pick the right selector.
-                        _dump_photo_page(page, account.name, f"slot{i}_no_thumb")
+                        # Dump the page so we can pick the right selector. Once
+                        # per run: five identical dumps of one broken selector
+                        # is five uploads that teach nothing new.
+                        if run.nonfatal_captures < MAX_NONFATAL_CAPTURES:
+                            run.nonfatal_captures += 1
+                            run.artifact_ids.extend(
+                                _dump_photo_page(page, account.name, f"slot{i}_no_thumb")
+                            )
                     if is_cover:
                         # Only burn the cover once we've actually seen it land on
                         # CL's servers. Prior behavior burned it after set_input_files
@@ -294,23 +354,28 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
                             mark_cover_used(photo)
                             logger.info(f"    cover consumed → moved to used/")
                         else:
-                            logger.error(
-                                f"    KEEPING cover claimed (not marking used): "
-                                f"upload did not confirm. File: {photo.name}"
+                            run.warn(
+                                f"cover {photo.name} kept claimed (not marked used): "
+                                f"its upload never confirmed, so the ad's thumbnail "
+                                f"slot is not the cover we intended"
                             )
                     sleep_jitter(0.8, 0.3)
                 final_thumbs = _count_uploaded_thumbs(page)
+                run.photos_confirmed = final_thumbs
                 logger.info(
                     f"[{account.name}] photo_upload done: expected {len(ad.photos)} "
                     f"thumbnail(s), CL shows {final_thumbs}"
                 )
                 if final_thumbs != len(ad.photos):
-                    logger.warning(
-                        f"  thumbnail count mismatch — CL may have rejected an upload "
-                        f"or the count selector missed some. Inspect the page."
+                    run.warn(
+                        f"thumbnail count mismatch: uploaded {len(ad.photos)}, "
+                        f"CL shows {final_thumbs} — an upload was rejected, or the "
+                        f"count selector missed some"
                     )
                 _log_thumbnail_order(page)
                 sleep_jitter(1.5)
+            else:
+                run.photos_confirmed = 0
             _click_text(page, "done with images")
 
             step = "preview"
@@ -322,7 +387,7 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
 
             if dry_run:
                 logger.warning(f"[{account.name}] DRY RUN — not clicking publish.")
-                return None
+                return run
 
             step = "publish"
             logger.debug(f"step: {step}")
@@ -339,14 +404,21 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             page.wait_for_load_state("domcontentloaded", timeout=60_000)
             sleep_jitter(2.0)
 
-            post_url = _extract_post_url(page)
+            run.url = _extract_post_url(page, run=run)
             mark_photos_used(ad.photos)
             mark_content_used(ad)
-            logger.success(f"[{account.name}] published: {post_url}")
-            return post_url
+            logger.success(f"[{account.name}] published: {run.url}")
+            if run.warnings:
+                logger.warning(
+                    f"[{account.name}] published WITH {len(run.warnings)} degradation(s) — "
+                    f"see the post's Diagnostics entry"
+                )
+            return run
         except Exception as e:
-            _dump_failure(page, account.name, step, e)
-            raise PosterFailure(step, e) from e
+            # Degradations observed before the failure travel with the exception;
+            # they are often the explanation for it.
+            run.artifact_ids.extend(_dump_failure(page, account.name, step, e))
+            raise PosterFailure(step, e, run=run) from e
 
 
 # ─── Photo upload helpers ─────────────────────────────────────────────────────
@@ -385,8 +457,12 @@ def _count_uploaded_thumbs(page: Page) -> int:
     return best
 
 
-def _dump_photo_page(page: Page, account_name: str, label: str) -> None:
-    """Save HTML + screenshot of the current photo-upload page for inspection."""
+def _dump_photo_page(page: Page, account_name: str, label: str) -> list[str]:
+    """Save HTML + screenshot of the current photo-upload page for inspection.
+
+    Same dual capture as `_dump_failure`: local for offline inspection, spooled
+    so it is readable from the dashboard. Returns the spooled artifact ids.
+    """
     from pathlib import Path
     FAILURES_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -400,6 +476,9 @@ def _dump_photo_page(page: Page, account_name: str, label: str) -> None:
         logger.info(f"    dumped photo page → {stem}.png / .html")
     except Exception as e:
         logger.warning(f"    html dump failed: {e}")
+    return artifacts.capture_page(
+        page, flow="post", label=f"photo_{label}", account=account_name
+    )
 
 
 def _wait_for_thumb_increment(page: Page, *, expected: int, timeout_s: float = 45) -> bool:
@@ -457,6 +536,7 @@ def _advance_until(
     expect_selector: str | None = None,
     county: str | None = None,
     max_steps: int = 5,
+    run: PostRun | None = None,
 ) -> None:
     """
     Click 'continue' through intermediate confirmation pages (area, subarea,
@@ -482,7 +562,7 @@ def _advance_until(
 
         # If this is a subarea page, pick the right county radio
         if page.locator("body.subarea").count() or page.locator("p.formnote >> text=choose the location").count():
-            _select_subarea(page, county)
+            _select_subarea(page, county, run=run)
 
         btn = page.locator("button[type='submit']").first
         if not btn.count():
@@ -492,10 +572,17 @@ def _advance_until(
         human_click(page, btn)
         page.wait_for_load_state("domcontentloaded")
         sleep_jitter(1.2)
-    logger.warning(f"  _advance_until exhausted {max_steps} steps without reaching target")
+    msg = (
+        f"navigation exhausted {max_steps} steps without reaching "
+        f"{expect_selector or expect_text!r} — Craigslist's page flow has changed"
+    )
+    if run is not None:
+        run.warn(msg)
+    else:
+        logger.warning(f"  {msg}")
 
 
-def _select_subarea(page: Page, county: str | None) -> None:
+def _select_subarea(page: Page, county: str | None, *, run: PostRun | None = None) -> None:
     """Pick the miami-dade / broward / palm-beach radio that matches `county`."""
     c = (county or "").lower()
     if "palm" in c:
@@ -505,9 +592,17 @@ def _select_subarea(page: Page, county: str | None) -> None:
     elif "miami" in c or "dade" in c:
         match = "miami"
     else:
-        # Default: pick the first radio so the form can proceed
+        # Default: pick the first radio so the form can proceed. This files the
+        # ad under a county nobody chose, so it is a degradation, not a detail.
         match = None
-        logger.warning(f"  subarea: no county match for {county!r}, picking first option")
+        msg = (
+            f"subarea: no county match for {county!r} — filed under the first "
+            f"option on the page, which may be the wrong county"
+        )
+        if run is not None:
+            run.warn(msg)
+        else:
+            logger.warning(f"  {msg}")
     if match:
         label = page.locator("label").filter(has_text=match).first
     else:
@@ -718,29 +813,18 @@ def _handle_billing(page: Page, account_name: str, max_steps: int = 4) -> None:
                 continue
 
         if not clicked:
-            # No known button on this page — dump for inspection
-            _dump_failure(
-                page,
-                account_name,
-                "billing_unknown_page",
-                RuntimeError(f"no billing button matched on {page.url}"),
-            )
+            # No dump here: post_ad's own handler captures the same page a
+            # moment later, and capturing twice uploads two copies of one
+            # screenshot. Raise with the URL so the artifact is identifiable.
             raise RuntimeError(
-                f"billing flow stuck — no matching button found. "
-                f"See logs/failures/ for screenshot of the page."
+                f"billing flow stuck — no matching button found on {page.url}"
             )
 
     if _on_billing_page(page):
-        _dump_failure(
-            page,
-            account_name,
-            "billing_too_many_steps",
-            RuntimeError("billing flow did not complete within max_steps"),
-        )
         raise RuntimeError("billing flow exceeded max_steps without completing")
 
 
-def _extract_post_url(page: Page) -> str | None:
+def _extract_post_url(page: Page, *, run: PostRun | None = None) -> str | None:
     # 1. Best case: confirmation page has a direct /d/ link to the live post.
     link = page.locator("a[href*='/d/']").first
     if link.count():
@@ -771,19 +855,30 @@ def _extract_post_url(page: Page) -> str | None:
                     return href
                 # Post may not be indexed yet, or could be ghosted already.
                 # Either way, the search URL still resolves the post live.
-                logger.warning(
-                    f"  PostingID={post_id} search page returned no /d/ link "
-                    f"(post not yet indexed, or ghosted). Saving search URL."
-                )
+                if run is not None:
+                    run.warn(
+                        f"PostingID={post_id} returned no /d/ link — post not yet "
+                        f"indexed, or already ghosted. Saved the search URL instead."
+                    )
                 return search_url
             except Exception as e:
-                logger.warning(
-                    f"  PostingID={post_id} resolution failed ({e!r}); "
-                    f"falling back to search URL."
-                )
+                if run is not None:
+                    run.warn(
+                        f"PostingID={post_id} could not be resolved to a /d/ URL "
+                        f"({e!r}); saved the search URL instead."
+                    )
                 return search_url
     except Exception as e:
         logger.warning(f"  PostingID extraction failed: {e}")
-    # 3. Last resort — return current URL (may be session-bound, not durable).
-    logger.warning(f"  no /d/ link and no PostingID found; falling back to page.url")
+    # 3. Last resort — the current URL. On the paid-category receipt page this
+    # is session-bound and 404s once the session ends, so the post is recorded
+    # under a URL that will not resolve later. Worth flagging loudly.
+    if run is not None:
+        run.warn(
+            "no /d/ link and no PostingID on the confirmation page — recorded "
+            "the raw page URL, which is probably session-bound and will 404. "
+            "This post may be unreachable from the dashboard."
+        )
+    else:
+        logger.warning("  no /d/ link and no PostingID found; falling back to page.url")
     return page.url

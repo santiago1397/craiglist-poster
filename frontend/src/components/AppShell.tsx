@@ -6,9 +6,12 @@
 // header keeps only what matters on a small screen: where you are, whether the
 // system is healthy, and a way out.
 //
-// The split is lg, not md. Six nav links plus the status pill and the theme
-// toggle measured 836px, so at exactly 768 the header overflowed again — the
-// original bug, moved rather than fixed.
+// The split is xl, not md and no longer lg. Six nav links plus the status pill
+// and the theme toggle measured 836px, so at exactly 768 the header overflowed
+// again — the original bug, moved rather than fixed. Adding Diagnostics makes
+// eight links, which measures past 1024 and would have moved it a second time.
+// Raising the breakpoint is the fix that scales; the drawer already holds every
+// link and is the better layout below a genuinely wide screen anyway.
 
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -25,6 +28,7 @@ import {
   ScrollText,
   SlidersHorizontal,
   Sparkles,
+  Stethoscope,
   Sun,
   X,
 } from "lucide-react";
@@ -40,6 +44,7 @@ const NAV = [
   { to: "/images", label: "Images", Icon: ImagesIcon },
   { to: "/prompts", label: "Prompts", Icon: Sparkles },
   { to: "/posts", label: "Posts", Icon: ScrollText },
+  { to: "/diagnostics", label: "Diagnostics", Icon: Stethoscope },
   { to: "/settings", label: "Settings", Icon: SlidersHorizontal },
 ];
 
@@ -105,16 +110,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Dialog.Root open={drawer} onOpenChange={setDrawer}>
             <Dialog.Trigger
               aria-label="Open navigation menu"
-              className="lg:hidden rounded p-2 -ml-1 text-fg-muted hover:text-fg hover:bg-surface-2"
+              className="xl:hidden rounded p-2 -ml-1 text-fg-muted hover:text-fg hover:bg-surface-2"
             >
               <Menu size={20} aria-hidden="true" />
             </Dialog.Trigger>
 
             <Dialog.Portal>
-              <Dialog.Overlay className="fixed inset-0 bg-black/60 z-40 lg:hidden" />
+              <Dialog.Overlay className="fixed inset-0 bg-black/60 z-40 xl:hidden" />
               <Dialog.Content
                 className={cn(
-                  "fixed z-50 inset-y-0 left-0 w-72 max-w-[85vw] lg:hidden",
+                  "fixed z-50 inset-y-0 left-0 w-72 max-w-[85vw] xl:hidden",
                   "bg-surface border-r border-border flex flex-col focus:outline-none",
                 )}
               >
@@ -171,7 +176,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="sm:hidden">CL</span>
           </Link>
 
-          <nav className="hidden lg:flex items-center gap-1">
+          <nav className="hidden xl:flex items-center gap-1">
             {NAV.map(({ to, label }) => (
               <Link
                 key={to}
@@ -191,16 +196,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
           <div className="ml-auto flex items-center gap-2 sm:gap-3 min-w-0">
             <StatusPill />
-            <div className="hidden lg:block">
+            <div className="hidden xl:block">
               <ThemeToggle />
             </div>
-            <span className="hidden xl:inline text-sm text-fg-muted truncate max-w-[14rem]">
+            <span className="hidden 2xl:inline text-sm text-fg-muted truncate max-w-[14rem]">
               {user.email}
             </span>
             <button
               onClick={logout}
               aria-label="Log out"
-              className="hidden lg:inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-sm text-fg-muted hover:bg-surface-2 hover:text-fg"
+              className="hidden xl:inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-sm text-fg-muted hover:bg-surface-2 hover:text-fg"
             >
               <LogOut size={16} aria-hidden="true" />
               <span className="sr-only">Log out</span>

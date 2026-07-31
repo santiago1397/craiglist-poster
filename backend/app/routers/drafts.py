@@ -89,8 +89,17 @@ def queue_health(accounts: str = Query(description="comma-separated")) -> dict:
         attention = c.execute(
             "SELECT COUNT(*) AS n FROM drafts WHERE status = 'needs_attention'"
         ).fetchone()["n"]
+        # Claims held longer than a posting run can take. The reaper parks these
+        # at the next claim, but that may be hours away — and a draft sitting in
+        # 'claimed' counts toward no depth, so the account reads as "queue
+        # empty" without anything explaining why.
+        stuck = [
+            d for d in queue_svc.stuck_claims(c)
+            if (d["held_minutes"] or 0) >= queue_svc.STALE_CLAIM_MINUTES
+        ]
     report["unreviewed"] = unreviewed
     report["needs_attention"] = attention
+    report["stuck_claims"] = len(stuck)
     return report
 
 

@@ -13,7 +13,16 @@ uv run python tests/test_guardrail_clamp.py   # compiled ceilings actually clamp
 uv run python tests/test_outbox_guard.py     # only unsent *posted* attempts block a claim
 uv run python tests/test_browser_lease.py    # two flows can't share one Chrome profile
 uv run python tests/test_edit_guards.py      # content hash, edit clamps, posting-slot guard
+uv run python tests/test_failure_reporting.py # every failure reaches the VPS debuggable
 ```
+
+`test_failure_reporting.py` covers the rules that decide whether a failure can
+be debugged at all: `failed_step` is never None, every step the poster can die
+on is classified pre- or post-upload, and a degraded post keeps
+`outcome='posted'` while still carrying its warnings. **Add a step to
+`poster.py` and this test fails until you classify it** in
+`PRE_UPLOAD_STEPS` — which is the point, because an unclassified step parks a
+draft that did not need parking. See [DIAGNOSTICS.md](../DIAGNOSTICS.md).
 
 `test_events_schema.py` covers the thing most likely to break silently: an
 outbox written by an older build must still validate after a schema change, or
