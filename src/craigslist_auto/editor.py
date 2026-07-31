@@ -2,16 +2,18 @@
 
 DESIGN_EDITS.md decisions 23, 26, 32, 33, 36.
 
-    !!  THE SELECTORS IN `SEL` BELOW ARE UNVERIFIED.  !!
+    !!  THE EDIT FORM'S SELECTORS ARE STILL UNVERIFIED.  !!
 
-    Nothing in this project has ever opened Craigslist's edit form. Every
-    selector here is inferred from the postings-page DOM that `stats.py`
-    documents plus the posting form in `poster.py`. Phase 0 of DESIGN_EDITS.md
-    is a manual spike against one throwaway post whose entire job is to replace
-    these with observed values.
+    The account-page selectors are now observed — see the OBSERVED block in
+    `SEL`, taken from a real page capture. Everything from the edit form itself
+    onward is still inferred from `poster.py`'s posting form, because no run has
+    got that far yet.
 
-    Until that spike is done, `edits_enabled` defaults FALSE on the server, so
-    this module cannot run against a live post by accident.
+    `edits_enabled` is TRUE on the server as of migration 0015, so this module
+    CAN reach a live posting. What keeps that safe is that failure is loud: the
+    diff step refuses the whole attempt before typing anything if a field it was
+    asked to change has no control, and every run records a per-selector census
+    on its step trail.
 
 The code is written so a wrong selector is loud and safe, never silent:
 every step is timed and recorded, a mismatch raises `EditFailure` carrying the
@@ -46,11 +48,30 @@ from .stats import CL_ACCOUNT_URL, LoginExpiredError
 # ---------------------------------------------------------------------------
 
 SEL = {
-    # Account postings page — these two ARE observed (stats.py:205-224).
+    # --- OBSERVED on the real account page (artifact 5de988ff, 2026-07-31) ---
     "posting_row": "tr.posting-row",
     "row_status_cell": "td.status",
-    # Everything below is inferred and must be confirmed by the spike.
-    "row_edit_button": "td.buttons a:has-text('edit'), td.buttons button:has-text('edit')",
+    # Each action is its own form, and the control is an <input type=submit>
+    # whose label lives in `value` — not a link and not a <button>:
+    #
+    #   <form action="https://post.craigslist.org/manage/<token>" method="POST"
+    #         class="manage edit">
+    #     <input type="hidden" name="action" value="edit">
+    #     <input type="hidden" name="crypt" value="...">
+    #     <input type="submit" name="go" value="edit" class="managebtn">
+    #   </form>
+    #
+    # The previous guess used `:has-text('edit')`, which can never match an
+    # input — its label is an attribute, not text. Note the POST and the
+    # per-posting `crypt`: the edit form cannot be reached by building a URL,
+    # the control has to be clicked.
+    "row_edit_button": (
+        "td.buttons form.manage.edit input[type='submit'], "
+        "td.buttons input.managebtn[value='edit']"
+    ),
+    # --- Everything below is still inferred; the spike has not reached the
+    # --- edit form itself. Craigslist's house style on the pages we have seen
+    # --- is `input[type=submit][name=go]`, so the submit selectors accept both.
     "edit_title": "input[name='PostingTitle']",
     "edit_body": "textarea[name='PostingBody']",
     "edit_postal": "input[name='postal']",
@@ -63,9 +84,15 @@ SEL = {
     "image_thumb": ".swatch, .thumb, li.thumb",
     "image_remove": "a:has-text('remove'), button:has-text('remove')",
     "file_input": "input[type='file']",
-    "images_done": "button:has-text('done with images'), a:has-text('done with images')",
+    "images_done": (
+        "button:has-text('done with images'), a:has-text('done with images'), "
+        "input[type='submit'][value*='done' i]"
+    ),
     # Confirmation that the edit landed.
-    "publish_button": "button[name='go'], button:has-text('publish')",
+    "publish_button": (
+        "button[name='go'], button:has-text('publish'), "
+        "input[type='submit'][name='go'], input[type='submit'][value*='publish' i]"
+    ),
 }
 
 # Steps that mutate nothing on Craigslist. Mirrors PRE_MUTATION_STEPS in
@@ -372,9 +399,27 @@ def hydrate_post(
                         page, flow="edit_hydrate", label="no_edit_button",
                         post_id=post_id, account=account.name,
                     ))
+                    # Craigslist drops the edit control from rows it will not
+                    # let you edit — expired, deleted, some paid categories. A
+                    # page-wide count separates that from a broken selector: if
+                    # no row anywhere has one, the selector is the problem.
+                    page_wide = _count(page, "row_edit_button")
+                    log.note("edit_control", f"row=0 page={page_wide}")
                     result.update({
                         "error_type": "not_editable",
-                        "error_message": "no edit control on this posting's row",
+                        "error_message": (
+                            "no edit control on this posting's row"
+                            + (
+                                f"; {page_wide} other posting(s) on the page do "
+                                f"have one, so Craigslist is not offering to edit "
+                                f"this ad — check whether it has expired or been "
+                                f"deleted"
+                                if page_wide
+                                else "; no posting on the page has one either, so "
+                                     "editor.SEL['row_edit_button'] no longer "
+                                     "matches Craigslist's markup"
+                            )
+                        ),
                         "editable": False,
                     })
                     return result
@@ -572,10 +617,18 @@ def reconcile_post(
                         page, flow="edit_reconcile", label="no_edit_button",
                         post_id=post_id, account=account.name,
                     ))
+                    page_wide = _count(page, "row_edit_button")
+                    log.note("edit_control", f"row=0 page={page_wide}")
                     return _result(
                         "failed_gone", failed_step="open_edit_form",
                         error_type="not_editable",
-                        error_message="posting has no edit control",
+                        error_message=(
+                            f"posting has no edit control ({page_wide} other "
+                            f"posting(s) on the page do)"
+                            if page_wide else
+                            "no posting on the page has an edit control — "
+                            "editor.SEL['row_edit_button'] no longer matches"
+                        ),
                     )
                 edit.first.click()
                 page.wait_for_load_state("domcontentloaded")
