@@ -120,6 +120,8 @@ def update_generation_settings(conn: psycopg.Connection, values: dict) -> dict:
         "enabled", "model", "api_base", "temperature",
         "system_prompt", "user_template", "tail_template",
         "photos_min", "photos_max", "imageless_rate",
+        "image_topup_enabled", "image_stack_floor", "image_stack_target",
+        "image_topup_batch",
     }
     patch = {k: v for k, v in values.items() if k in allowed and v is not None}
     if patch:

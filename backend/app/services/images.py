@@ -10,6 +10,29 @@ The rules that matter, from the design decisions:
   Craigslist has seen a photo under one account, it can never appear under
   another.
 * Slot 1 is the cover: the thumbnail, and the highest-leverage visual on the ad.
+
+Two stacks, not one
+-------------------
+`kind` used to be a label nothing enforced: it picked the generation prompt and
+then stopped mattering. `pick_for_draft` filtered on status, ownership and
+cooldown but never on kind, so a cover — phone number composited across its
+lower third — could be drawn into slot 4 of a post as an ordinary photo.
+
+It is now a hard partition. Slot 1 takes covers, slots 2+ take photos, and the
+two stacks are displayed and counted separately. `set_kind` is the escape hatch:
+a generated shot you want as a cover is one relabel away.
+
+Assignment is a reservation
+---------------------------
+`draft_images` is keyed `(draft_id, slot)` and has no uniqueness on `image_id`,
+and `pick_for_draft` never checked whether an image was already spoken for. With
+a queue 15 drafts deep per account, that handed the same photo to several queued
+drafts at once and nothing noticed until two of them published the same picture
+— which is the exact thing that gets an account ghosted.
+
+An image attached to a *live* draft is therefore excluded from selection. It is
+still offerable by hand, so a deliberate reuse stays possible; it just cannot
+happen by accident.
 """
 from __future__ import annotations
 
@@ -29,6 +52,50 @@ REUSE_COOLDOWN_DAYS = 30
 
 # Craigslist's real per-posting limit: one thumbnail plus 23 more.
 MAX_SLOTS = 24
+
+# Slot 1 is the cover; every other slot is a photo.
+COVER_SLOT = 1
+
+# Draft states in which an attachment still means something. A draft that
+# expired or already posted has no further claim on its images: the posted one's
+# images carry `used_at` instead, which is the stronger signal anyway.
+LIVE_DRAFT_STATUSES = ("queued", "claimed", "needs_attention")
+
+# Is this image spoken for? Written once and reused, because selection, display
+# and the picker must agree exactly — an image the grid calls "available" that
+# selection then skips is a bug report.
+#
+# Two holders, matching `detach`: a live draft, and a live posting's desired
+# image set. The second matters even though editing ships disabled — an image
+# staged for a live post is either already on Craigslist or about to be, so
+# handing it to a queued draft duplicates it just as surely.
+_RESERVED_SQL = """
+    (EXISTS (
+        SELECT 1 FROM draft_images di
+        JOIN drafts d ON d.id = di.draft_id
+        WHERE di.image_id = images.id AND d.status = ANY(%(live)s)
+     )
+     OR EXISTS (
+        SELECT 1 FROM post_desired_images pdi WHERE pdi.image_id = images.id
+     ))
+"""
+
+# The five buckets a stack is shown in. Mutually exclusive by construction:
+# `attach` requires 'approved', so a pending image can never be assigned or
+# published. Derived rather than stored — a bucket column would be a second
+# source of truth able to disagree with the attachment table.
+_BUCKET_SQL = f"""
+    CASE
+        WHEN status = 'pending'   THEN 'pending'
+        WHEN status = 'rejected'  THEN 'rejected'
+        WHEN status <> 'approved' THEN status
+        WHEN used_at IS NOT NULL  THEN 'published'
+        WHEN {_RESERVED_SQL}      THEN 'assigned'
+        ELSE 'available'
+    END
+"""
+
+BUCKETS = ("pending", "available", "assigned", "published", "rejected")
 
 DEFAULT_IMAGE_PROMPT = (
     "Professional photograph of a well-maintained {kind} on a single-family "
@@ -209,6 +276,49 @@ def store_upload(conn: psycopg.Connection, data: bytes, *, mime: str, kind: str 
     return _store(conn, data, source="uploaded", kind=kind, mime=mime, status="approved")
 
 
+# Serialises the stack top-up the same way TOPUP_LOCK_KEY serialises drafts, so
+# the loop and a manual run cannot both read a stale depth and double-generate.
+STACK_TOPUP_LOCK_KEY = 8_412_337_002
+
+
+def topup_stack(conn: psycopg.Connection, *, force: bool = False) -> dict:
+    """Refill the photo stack toward its target. Ships disabled.
+
+    24-image posts consume roughly 69 photos a day and need about a thousand
+    standing, which no amount of clicking Generate sustains. This is the job
+    that would do it — written, wired, and off by default, because it spends
+    money rendering prompts that are still being tuned. Turn it on under
+    Settings once the prompts are settled.
+
+    Photos only: covers stay on the pending shelf and stay yours to approve,
+    since they are the ones actually looked at. Generated photos land approved
+    and immediately usable, which is the trade this whole arrangement rests on.
+    """
+    if not conn.execute(
+        "SELECT pg_try_advisory_xact_lock(%s) AS ok", (STACK_TOPUP_LOCK_KEY,)
+    ).fetchone()["ok"]:
+        return {"skipped": "already running", "created": 0}
+
+    g = conn.execute("SELECT * FROM generation_settings LIMIT 1").fetchone()
+    if not g["image_topup_enabled"] and not force:
+        return {"skipped": "image top-up disabled", "created": 0}
+
+    health = stack_health(conn)
+    available = health["photos_available"]
+    if available >= g["image_stack_floor"] and not force:
+        return {"skipped": "above floor", "created": 0, "available": available}
+
+    want = min(
+        int(g["image_topup_batch"]),
+        max(0, int(g["image_stack_target"]) - available),
+    )
+    if want <= 0:
+        return {"skipped": "at target", "created": 0, "available": available}
+
+    logger.info(f"image stack at {available}, generating {want} photo(s)")
+    return generate_images(conn, count=want, kind="photo", status="approved")
+
+
 # ---------------------------------------------------------------------------
 # Shelf / pool
 # ---------------------------------------------------------------------------
@@ -217,13 +327,24 @@ def list_images(
     conn: psycopg.Connection,
     *,
     status: str | None = None,
+    bucket: str | None = None,
     account: str | None = None,
     kind: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict:
-    where, params = ["TRUE"], {"limit": limit, "offset": offset}
-    if status:
+    """List one stack. `bucket` supersedes `status` where both are given.
+
+    Every row carries its computed `bucket` and, when assigned, the draft
+    holding it — a card that says "reserved" without saying by what is a dead
+    end when you are trying to free an image up.
+    """
+    where = ["TRUE"]
+    params: dict = {"limit": limit, "offset": offset, "live": list(LIVE_DRAFT_STATUSES)}
+    if bucket:
+        where.append(f"({_BUCKET_SQL}) = %(bucket)s")
+        params["bucket"] = bucket
+    elif status:
         where.append("status = %(status)s")
         params["status"] = status
     if kind:
@@ -235,14 +356,49 @@ def list_images(
         params["account"] = account
     clause = " AND ".join(where)
     rows = conn.execute(
-        f"SELECT * FROM images WHERE {clause} ORDER BY created_at DESC "
-        f"LIMIT %(limit)s OFFSET %(offset)s",
+        f"""
+        SELECT images.*, ({_BUCKET_SQL}) AS bucket,
+               (SELECT di.draft_id FROM draft_images di
+                  JOIN drafts d ON d.id = di.draft_id
+                 WHERE di.image_id = images.id AND d.status = ANY(%(live)s)
+                 ORDER BY di.draft_id LIMIT 1) AS assigned_draft_id
+        FROM images WHERE {clause}
+        ORDER BY created_at DESC
+        LIMIT %(limit)s OFFSET %(offset)s
+        """,
         params,
     ).fetchall()
     total = conn.execute(
         f"SELECT COUNT(*) AS n FROM images WHERE {clause}", params
     ).fetchone()["n"]
     return {"images": [dict(r) for r in rows], "total": total}
+
+
+def bucket_counts(conn: psycopg.Connection, *, account: str | None = None) -> dict:
+    """Per-kind counts for every bucket, for the stack tabs.
+
+    Returns {"cover": {bucket: n}, "photo": {...}} with every bucket present at
+    zero rather than absent, so the tabs do not flicker in and out of existence.
+    """
+    where = ["TRUE"]
+    params: dict = {"live": list(LIVE_DRAFT_STATUSES)}
+    if account:
+        where.append("(owner_account IS NULL OR owner_account = %(account)s)")
+        params["account"] = account
+    rows = conn.execute(
+        f"""
+        SELECT kind, ({_BUCKET_SQL}) AS bucket, COUNT(*) AS n
+        FROM images WHERE {" AND ".join(where)}
+        GROUP BY 1, 2
+        """,
+        params,
+    ).fetchall()
+    out: dict[str, dict[str, int]] = {
+        k: {b: 0 for b in BUCKETS} for k in ("cover", "photo")
+    }
+    for r in rows:
+        out.setdefault(r["kind"], {b: 0 for b in BUCKETS})[r["bucket"]] = r["n"]
+    return out
 
 
 def set_status(conn: psycopg.Connection, image_id: int, status: str) -> dict | None:
@@ -253,6 +409,67 @@ def set_status(conn: psycopg.Connection, image_id: int, status: str) -> dict | N
         (status, image_id),
     ).fetchone()
     return dict(row) if row else None
+
+
+def set_kind(conn: psycopg.Connection, image_id: int, kind: str) -> dict | None:
+    """Move an image between the two stacks.
+
+    This is what makes the hard partition liveable: a generated shot that would
+    make a good thumbnail is one click from being a cover, rather than needing
+    to be regenerated under the cover prompt.
+
+    Refused while the image is attached to a live draft, because the slot it
+    occupies is validated against its kind — relabelling underneath an existing
+    attachment would leave a photo sitting in slot 1 with nothing to catch it.
+    """
+    if kind not in ("photo", "cover"):
+        raise ValueError(f"invalid kind: {kind}")
+    held = conn.execute(
+        """
+        SELECT di.draft_id FROM draft_images di
+        JOIN drafts d ON d.id = di.draft_id
+        WHERE di.image_id = %s AND d.status = ANY(%s)
+        LIMIT 1
+        """,
+        (image_id, list(LIVE_DRAFT_STATUSES)),
+    ).fetchone()
+    if held:
+        raise ValueError(
+            f"image is attached to draft {held['draft_id']}; detach it before "
+            f"changing its kind"
+        )
+    row = conn.execute(
+        "UPDATE images SET kind = %s, updated_at = NOW() WHERE id = %s RETURNING *",
+        (kind, image_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def kind_for_slot(slot: int) -> str:
+    return "cover" if slot == COVER_SLOT else "photo"
+
+
+def reserved_by(conn: psycopg.Connection, image_id: int) -> int | None:
+    """The live draft holding this image, if any."""
+    row = conn.execute(
+        """
+        SELECT di.draft_id FROM draft_images di
+        JOIN drafts d ON d.id = di.draft_id
+        WHERE di.image_id = %s AND d.status = ANY(%s)
+        ORDER BY di.draft_id LIMIT 1
+        """,
+        (image_id, list(LIVE_DRAFT_STATUSES)),
+    ).fetchone()
+    return row["draft_id"] if row else None
+
+
+def reserved_by_post(conn: psycopg.Connection, image_id: int) -> str | None:
+    """The live posting whose desired image set holds this image, if any."""
+    row = conn.execute(
+        "SELECT post_id FROM post_desired_images WHERE image_id = %s LIMIT 1",
+        (image_id,),
+    ).fetchone()
+    return row["post_id"] if row else None
 
 
 def delete_image(conn: psycopg.Connection, image_id: int) -> bool:
@@ -286,6 +503,66 @@ def stats(conn: psycopg.Connection) -> dict:
         "by_status": [dict(r) for r in rows],
         "spend_usd": float(spend or 0),
         "available": {r["account"]: r["n"] for r in by_account},
+        "buckets": bucket_counts(conn),
+        "stack_health": stack_health(conn),
+    }
+
+
+def stack_health(conn: psycopg.Connection) -> dict:
+    """How far the photo stack is from filling the queue it has to feed.
+
+    With refill on manual, being short is the normal state rather than an
+    error — so this exists to be shown continuously, not to raise an alarm once.
+    `short` is the number of slots that will simply go unfilled if every queued
+    draft were autofilled right now.
+    """
+    g = conn.execute(
+        "SELECT photos_max FROM generation_settings LIMIT 1"
+    ).fetchone()
+    per_draft = int((g or {}).get("photos_max") or 0)
+
+    queued = conn.execute(
+        "SELECT COUNT(*) AS n FROM drafts WHERE status = 'queued'"
+    ).fetchone()["n"]
+
+    # Slots already filled on queued drafts do not need feeding again.
+    filled = conn.execute(
+        """
+        SELECT COUNT(*) AS n FROM draft_images di
+        JOIN drafts d ON d.id = di.draft_id
+        WHERE d.status = 'queued' AND di.slot > %s
+        """,
+        (COVER_SLOT,),
+    ).fetchone()["n"]
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=REUSE_COOLDOWN_DAYS)
+    available = conn.execute(
+        f"""
+        SELECT COUNT(*) AS n FROM images
+        WHERE status = 'approved' AND kind = 'photo'
+          AND (used_at IS NULL OR used_at < %(cutoff)s)
+          AND NOT {_RESERVED_SQL}
+        """,
+        {"cutoff": cutoff, "live": list(LIVE_DRAFT_STATUSES)},
+    ).fetchone()["n"]
+
+    demand = max(0, queued * per_draft - filled)
+    covers = conn.execute(
+        f"""
+        SELECT COUNT(*) AS n FROM images
+        WHERE status = 'approved' AND kind = 'cover' AND used_at IS NULL
+          AND NOT {_RESERVED_SQL}
+        """,
+        {"live": list(LIVE_DRAFT_STATUSES)},
+    ).fetchone()["n"]
+
+    return {
+        "queued_drafts": queued,
+        "photos_per_draft": per_draft,
+        "photo_demand": demand,
+        "photos_available": available,
+        "photos_short": max(0, demand - available),
+        "covers_available": covers,
     }
 
 
@@ -293,7 +570,14 @@ def stats(conn: psycopg.Connection) -> dict:
 # Attachment — this is where an image becomes an account's forever
 # ---------------------------------------------------------------------------
 
-def attach(conn: psycopg.Connection, *, draft_id: int, image_id: int, slot: int) -> dict:
+def attach(
+    conn: psycopg.Connection,
+    *,
+    draft_id: int,
+    image_id: int,
+    slot: int,
+    allow_double_book: bool = False,
+) -> dict:
     if not (1 <= slot <= MAX_SLOTS):
         raise ValueError(f"slot must be 1-{MAX_SLOTS}")
     draft = conn.execute(
@@ -311,6 +595,32 @@ def attach(conn: psycopg.Connection, *, draft_id: int, image_id: int, slot: int)
             f"image belongs to {img['owner_account']} and cannot be reused by "
             f"{draft['account']}"
         )
+    # The partition. Slot 1 is the Craigslist thumbnail and the only place a
+    # cover belongs; a cover anywhere else publishes a phone number in the
+    # middle of the gallery, and a photo in slot 1 throws away the one visual
+    # that was designed to be seen.
+    want = kind_for_slot(slot)
+    if img["kind"] != want:
+        raise ValueError(
+            f"slot {slot} takes a {want}, but image {image_id} is a {img['kind']} — "
+            f"change its kind on the Images page first"
+        )
+    # Reservation. Bypassable on purpose: reusing one strong photo across two
+    # drafts is a legitimate thing to want, it just must never happen by
+    # accident (which is what the unguarded version did, every top-up run).
+    if not allow_double_book:
+        holder = reserved_by(conn, image_id)
+        if holder is not None and holder != draft_id:
+            raise ValueError(
+                f"image is already attached to draft {holder}; detach it there "
+                f"first, or confirm the reuse"
+            )
+        post_holder = reserved_by_post(conn, image_id)
+        if post_holder is not None:
+            raise ValueError(
+                f"image is staged on live posting {post_holder}; using it here "
+                f"would put the same picture on two listings"
+            )
 
     conn.execute(
         """
@@ -372,6 +682,33 @@ def mark_used(conn: psycopg.Connection, image_ids: list[int]) -> None:
         )
 
 
+def mark_confirmed_used(
+    conn: psycopg.Connection, *, draft_id: int, photos_confirmed: int | None
+) -> int:
+    """Retire the images a failed post already pushed to Craigslist.
+
+    `mark_used` only ever ran from `mark_posted`, so a draft that died at or
+    after `photo_upload` left its images with `used_at IS NULL` — the database
+    calling them fresh after Craigslist had already rendered thumbnails for
+    them. Reuse of a burned photo is precisely what gets a listing ghosted.
+
+    The desktop reports `photos_confirmed`: the number of thumbnails the site
+    actually rendered. Uploads happen in slot order, so those are the first N
+    attached. A missing count means we cannot tell, and the conservative
+    reading — retire everything on the draft — is the right one: retiring a
+    clean image early costs $0.0035, re-showing a burned one costs an account.
+
+    Returns how many were retired.
+    """
+    attached = images_for_draft(conn, draft_id)
+    if not attached:
+        return 0
+    take = len(attached) if photos_confirmed is None else max(0, photos_confirmed)
+    burned = [i["id"] for i in attached[:take] if i["used_at"] is None]
+    mark_used(conn, burned)
+    return len(burned)
+
+
 def roll_photo_count(
     rng: random.Random,
     *,
@@ -398,11 +735,21 @@ def roll_photo_count(
 def autoattach(
     conn: psycopg.Connection, *, draft_id: int, account: str, rng: random.Random | None = None
 ) -> list[dict]:
-    """Fill a freshly generated draft's image slots from the approved stack.
+    """Fill a freshly generated draft's photo slots from the approved stack.
 
-    Best-effort by design: images are optional, so an empty or exhausted stack
-    produces a text-only post rather than blocking the draft. Slot 1 prefers a
-    'cover' image because it becomes the Craigslist thumbnail.
+    **Photos only — the cover is yours.** Generation used to claim a cover per
+    draft, which meant a background loop spent the hand-curated stack across 45
+    queued drafts weeks before any of them published, and every "manual" cover
+    choice was really an edit of a machine's choice. Slot 1 is now left empty
+    and filled either by you in Review or, failing that, by `claim_next` at the
+    moment the post actually goes out.
+
+    A draft that rolls imageless takes nothing at all — no photos and no cover.
+    That variation is the only thing left distinguishing one post's image
+    profile from another's, so it survives the move to full 23-photo posts.
+
+    Best-effort otherwise: a short stack yields a thinner post, never a failed
+    draft. See `stack_health` for the shortfall this leaves behind.
     """
     rng = rng or random.Random()
     g = conn.execute(
@@ -416,60 +763,114 @@ def autoattach(
     )
     if want == 0:
         return []
+    return fill_photo_slots(conn, draft_id=draft_id, account=account, want=want, rng=rng)
 
-    chosen: list[dict] = []
-    covers = conn.execute(
-        """
-        SELECT * FROM images
-        WHERE status = 'approved' AND kind = 'cover' AND used_at IS NULL
-          AND (owner_account IS NULL OR owner_account = %s)
-        ORDER BY random() LIMIT 1
-        """,
-        (account,),
-    ).fetchall()
-    if covers:
-        chosen.append(dict(covers[0]))
 
-    remaining = want - len(chosen)
-    if remaining > 0:
-        for img in pick_for_draft(conn, account=account, count=remaining + 4, rng=rng):
-            if len(chosen) >= want:
-                break
-            if any(c["id"] == img["id"] for c in chosen):
-                continue
-            chosen.append(img)
+def fill_photo_slots(
+    conn: psycopg.Connection,
+    *,
+    draft_id: int,
+    account: str,
+    want: int,
+    rng: random.Random | None = None,
+) -> list[dict]:
+    """Fill up to `want` empty photo slots (2..MAX_SLOTS) on a draft.
 
+    Tops up rather than replaces: slots already holding an image are left
+    alone, so pressing Autofill on a draft you have hand-curated adds to your
+    choices instead of discarding them. The cover slot is never touched.
+    """
+    rng = rng or random.Random()
+    taken = {i["slot"] for i in images_for_draft(conn, draft_id)}
+    free = [s for s in range(COVER_SLOT + 1, MAX_SLOTS + 1) if s not in taken][:want]
+    if not free:
+        return []
+
+    # Over-fetch: ownership and the partition are enforced by `attach`, and a
+    # candidate can still be lost to a race, so asking for a few spare keeps a
+    # full request from coming up one short.
+    candidates = pick_for_draft(
+        conn, account=account, count=len(free) + 8, kind="photo", rng=rng
+    )
     attached: list[dict] = []
-    for slot, img in enumerate(chosen, start=1):
+    for slot, img in zip(free, candidates):
         try:
             attach(conn, draft_id=draft_id, image_id=img["id"], slot=slot)
             attached.append(img)
         except ValueError as e:
             logger.warning(f"could not attach image {img['id']} to draft {draft_id}: {e}")
-    if attached:
-        logger.info(f"attached {len(attached)}/{want} image(s) to draft {draft_id}")
+    if len(attached) < want:
+        logger.info(
+            f"draft {draft_id}: filled {len(attached)}/{want} photo slot(s) — "
+            f"the photo stack for {account} is short"
+        )
     return attached
 
 
+def attach_cover(
+    conn: psycopg.Connection,
+    *,
+    draft_id: int,
+    account: str,
+    rng: random.Random | None = None,
+) -> dict | None:
+    """Put a cover in slot 1 if it is empty. Returns the image, or None.
+
+    The backstop behind manual cover selection: `claim_next` calls this in the
+    moment it hands a draft out, so a draft you never got to still publishes
+    with a real thumbnail rather than promoting a roof photo into slot 1 —
+    which is what an empty slot 1 silently does, since the desktop uploads in
+    slot order and Craigslist thumbnails whatever arrives first.
+    """
+    rng = rng or random.Random()
+    if any(i["slot"] == COVER_SLOT for i in images_for_draft(conn, draft_id)):
+        return None
+    for img in pick_for_draft(conn, account=account, count=5, kind="cover", rng=rng):
+        try:
+            attach(conn, draft_id=draft_id, image_id=img["id"], slot=COVER_SLOT)
+            return img
+        except ValueError as e:
+            logger.warning(f"could not attach cover {img['id']} to draft {draft_id}: {e}")
+    return None
+
+
 def pick_for_draft(
-    conn: psycopg.Connection, *, account: str, count: int, rng: random.Random | None = None
+    conn: psycopg.Connection,
+    *,
+    account: str,
+    count: int,
+    kind: str = "photo",
+    rng: random.Random | None = None,
 ) -> list[dict]:
     """Choose approved images this account may use, respecting the cooldown.
 
     Prefers never-used images, then the longest-idle. Returns fewer than asked
     for — including none — rather than reusing something too recently published.
+
+    Filters on `kind` (defaulting to photos) and skips anything already
+    attached to a live draft. Without the first filter this handed covers out
+    as ordinary photos; without the second it handed the same photo to several
+    queued drafts at once.
     """
     rng = rng or random.Random()
     cutoff = datetime.now(timezone.utc) - timedelta(days=REUSE_COOLDOWN_DAYS)
     rows = conn.execute(
-        """
+        f"""
         SELECT * FROM images
         WHERE status = 'approved'
-          AND (owner_account IS NULL OR owner_account = %s)
-          AND (used_at IS NULL OR used_at < %s)
+          AND kind = %(kind)s
+          AND (owner_account IS NULL OR owner_account = %(account)s)
+          AND (used_at IS NULL OR used_at < %(cutoff)s)
+          AND NOT {_RESERVED_SQL}
         ORDER BY used_at NULLS FIRST, random()
-        LIMIT %s
+        LIMIT %(count)s
         """,
-        (account, cutoff, count),
+        {
+            "kind": kind,
+            "account": account,
+            "cutoff": cutoff,
+            "count": count,
+            "live": list(LIVE_DRAFT_STATUSES),
+        },
     ).fetchall()
     return [dict(r) for r in rows]

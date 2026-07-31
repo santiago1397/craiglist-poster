@@ -134,6 +134,65 @@ DASHBOARD (VPS)                      DESKTOP (Windows)
 22. **No cooling period.** Anything queued is claimable immediately, including
     drafts you have not read. Review is a triage surface, not a gate.
 
+### Two image stacks
+
+Settled in a second design interview. These supersede parts of 10-13.
+
+23. **Cover and photo are a hard partition, not a label.** Slot 1 accepts only
+    `kind='cover'`, slots 2-24 only `kind='photo'`, and `pick_for_draft` filters
+    on kind. Previously `kind` chose the generation prompt and then stopped
+    mattering, so a cover — phone number composited across it — could be drawn
+    into slot 4 as an ordinary photo. `set_kind` moves an image between stacks,
+    which is what makes the partition liveable.
+
+24. **Covers are chosen by hand; photos are not.** Generation attaches photos
+    only and leaves slot 1 empty. It used to claim a cover per draft, which
+    spent a curated stack across 45 queued drafts weeks before any published,
+    and made every "manual" choice really an edit of a machine's choice.
+
+25. **The cover has a claim-time backstop.** An empty slot 1 does not publish a
+    coverless ad — the desktop uploads in slot order and Craigslist thumbnails
+    whatever lands first — so `claim_next` attaches a cover in the moment it
+    hands the draft out, and files a `flow_error` saying it did. A draft with no
+    images at all is left alone: that is the imageless roll, not an oversight.
+
+26. **Assignment is a reservation.** An image attached to a live draft, or
+    staged on a live posting's desired set, is excluded from selection.
+    `draft_images` has no uniqueness on `image_id` and nothing checked, so
+    top-up handed the same photo to several queued drafts routinely. The picker
+    still offers reserved images, greyed and behind a confirm, because
+    deliberate reuse is legitimate — accidental reuse is what gets posts
+    ghosted.
+
+27. **Five buckets, derived not stored.** pending → available → assigned →
+    published → rejected, per kind, mutually exclusive because `attach`
+    requires `approved`. A bucket column would be a second source of truth able
+    to disagree with the attachment table.
+
+28. **Posts carry 23 photos.** `photos_min`/`photos_max` move to 23/23 rather
+    than becoming a constant, so the count stays dialable and `imageless_rate`
+    keeps working — roughly a tenth of drafts still take nothing at all, and
+    those need no cover either. That roll is the only variation left in the
+    image profile, which is the cost of uniform 24-image posts, accepted
+    knowingly.
+
+29. **A post-upload failure retires the images the site saw.** `mark_used` ran
+    only from `mark_posted`, so a run that uploaded four photos and died at
+    `publish` left all four looking fresh. Ingest now marks the first
+    `photos_confirmed` attached images used; a missing count retires all of
+    them, because retiring a clean image costs $0.0035 and re-showing a burned
+    one costs an account.
+
+30. **Short stacks are a state, not an error.** Drafts take what exists and
+    publish thinner. The shortfall is stated continuously on the Images page and
+    in Diagnostics rather than raised once, because with manual refill it is the
+    ordinary condition.
+
+31. **Automatic stack refill ships disabled.** 24-image posts need ~1,035
+    standing photos and ~69/day; only a background generator sustains that. It
+    exists behind `image_topup_enabled`, defaulting false, because it spends
+    money on prompts still being tuned. Same pattern as `edits_enabled`.
+
 ---
 
 ## Derived requirements

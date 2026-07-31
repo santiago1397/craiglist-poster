@@ -196,6 +196,10 @@ def _route_draft(conn: psycopg.Connection, ev: PostAttempt) -> None:
             draft_id=ev.draft_id,
             failed_step=ev.failed_step,
             failed_message=ev.error_message,
+            # How many thumbnails Craigslist actually rendered before the run
+            # died. Uploads go in slot order, so this identifies exactly which
+            # images are burned.
+            photos_confirmed=ev.photos_confirmed,
         )
         logger.info(
             f"draft {ev.draft_id} failed at step {ev.failed_step!r} -> {new_status}"

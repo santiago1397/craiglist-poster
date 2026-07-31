@@ -16,6 +16,7 @@ both walk away with the same draft.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -370,6 +371,7 @@ def claim_next(
         # what makes its local cache safe to reuse across runs.
         from . import images as images_svc
 
+        _backstop_cover(conn, draft)
         draft["images"] = [
             {"id": i["id"], "slot": i["slot"], "sha256": i["sha256"], "mime": i["mime"]}
             for i in images_svc.images_for_draft(conn, draft["id"])
@@ -378,6 +380,74 @@ def claim_next(
 
     # Every eligible account raced empty between the depth check and here.
     return {"draft": None, "eligibility": report}
+
+
+def _backstop_cover(conn: psycopg.Connection, draft: dict) -> None:
+    """Give a draft a thumbnail if you never chose one.
+
+    Covers are picked by hand, which means some drafts reach their posting slot
+    without one. An empty slot 1 does not publish a coverless ad — the desktop
+    uploads in slot order and Craigslist thumbnails whatever lands first — so
+    the real outcome is a random roof photo silently promoted into the most
+    valuable position on the listing.
+
+    Two rules make this safe to do automatically:
+
+    * A draft with **no images at all** is left alone. That is the deliberate
+      imageless roll, not an oversight, and giving it a cover would undo the
+      only variation left in the image profile.
+    * The substitution is **reported**. It files itself as a flow_error so it
+      surfaces in Diagnostics like anything else the machine decided on its
+      own — a cover you would not have picked is worth knowing about, even
+      though it is not a failure.
+    """
+    from . import images as images_svc
+
+    attached = images_svc.images_for_draft(conn, draft["id"])
+    if not attached:
+        return  # deliberately imageless
+    if any(i["slot"] == images_svc.COVER_SLOT for i in attached):
+        return
+
+    chosen = images_svc.attach_cover(
+        conn, draft_id=draft["id"], account=draft["account"]
+    )
+    event_id = f"cover-auto:{draft['id']}:{draft.get('attempts') or 0}"
+    if chosen is None:
+        message = (
+            f"Draft {draft['id']} was claimed with no cover and the cover stack "
+            f"is empty for {draft['account']}, so its first photo becomes the "
+            f"Craigslist thumbnail. Add covers on the Images page."
+        )
+    else:
+        message = (
+            f"No cover was chosen for draft {draft['id']}, so image "
+            f"{chosen['id']} was picked automatically at claim time. Pick "
+            f"covers in Review to control the thumbnail."
+        )
+    logger.info(message)
+    conn.execute(
+        """
+        INSERT INTO flow_errors (
+            event_id, ts, machine, flow, step, account,
+            error_type, error_message, context
+        )
+        VALUES (%s, NOW(), %s, 'post', 'cover_backstop', %s,
+                'cover_auto_chosen', %s, %s::jsonb)
+        ON CONFLICT (event_id) DO NOTHING
+        """,
+        (
+            event_id,
+            draft.get("claimed_by_machine"),
+            draft["account"],
+            message,
+            json.dumps({
+                "draft_id": draft["id"],
+                "image_id": chosen["id"] if chosen else None,
+                "cover_stack_empty": chosen is None,
+            }),
+        ),
+    )
 
 
 # The Windows scheduled task fires at these local hours on weekdays. Projecting
@@ -521,15 +591,33 @@ def release_or_park(
     draft_id: int,
     failed_step: str | None,
     failed_message: str | None,
+    photos_confirmed: int | None = None,
 ) -> str:
     """Route a failed claim per decision 16. Returns the new status.
 
     A missing or unrecognised step is treated as post-upload — parking a draft
     for review is recoverable, silently re-uploading images to Craigslist is
     not.
+
+    A post-upload failure also **retires the images the site already saw**.
+    Nothing did this before: `mark_used` ran only from `mark_posted`, so a run
+    that uploaded four photos and then died at `publish` left all four looking
+    unused, free to be handed to another draft and shown to Craigslist a second
+    time under the same account.
     """
     pre_upload = failed_step in PRE_UPLOAD_STEPS
     new_status = "queued" if pre_upload else "needs_attention"
+    if not pre_upload:
+        from . import images as images_svc
+
+        burned = images_svc.mark_confirmed_used(
+            conn, draft_id=draft_id, photos_confirmed=photos_confirmed
+        )
+        if burned:
+            logger.info(
+                f"draft {draft_id} failed at {failed_step!r} after uploading; "
+                f"retired {burned} image(s) Craigslist had already rendered"
+            )
     conn.execute(
         """
         UPDATE drafts

@@ -39,21 +39,53 @@ async def _topup_loop(interval_minutes: int) -> None:
         await asyncio.sleep(interval)
 
 
+async def _image_topup_loop(interval_minutes: int) -> None:
+    """Keep the photo stack deep enough to fill the queue.
+
+    Gated on `image_topup_enabled`, which ships false — the flag is read every
+    cycle rather than at startup, so turning it on in Settings takes effect
+    without a redeploy, and turning it off stops the spend immediately.
+    """
+    from .services import images as images_svc
+
+    interval = max(60, interval_minutes * 60)
+    # Offset from the draft loop's stagger so a restart doesn't fire both at
+    # once against the same model API.
+    await asyncio.sleep(50)
+    while True:
+        try:
+            def _run() -> dict:
+                with tx() as conn:
+                    return images_svc.topup_stack(conn)
+
+            result = await asyncio.to_thread(_run)
+            if result and result.get("created"):
+                logger.info(f"image top-up created {result['created']} photo(s)")
+        except Exception as e:  # never let the loop die
+            logger.warning(f"image top-up failed: {e!r}")
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("Starting up — initialising DB pool")
     init_pool()
     settings = get_settings()
-    task: asyncio.Task | None = None
+    tasks: list[asyncio.Task] = []
     if settings.generation_interval_minutes > 0:
-        task = asyncio.create_task(_topup_loop(settings.generation_interval_minutes))
+        tasks.append(asyncio.create_task(_topup_loop(settings.generation_interval_minutes)))
         logger.info(
             f"draft top-up loop every {settings.generation_interval_minutes}m"
+        )
+        # Same cadence, separate task: the image loop no-ops cheaply while
+        # image_topup_enabled is false, so it costs nothing to have running.
+        tasks.append(
+            asyncio.create_task(_image_topup_loop(settings.generation_interval_minutes))
         )
     try:
         yield
     finally:
-        if task is not None:
+        for task in tasks:
             task.cancel()
         logger.info("Shutting down — closing DB pool")
         close_pool()

@@ -349,6 +349,76 @@ def _stuck_claim_problems(conn: psycopg.Connection) -> list[dict]:
     return out
 
 
+def _image_stack_problems(conn: psycopg.Connection) -> list[dict]:
+    """The photo and cover stacks against what the queue actually needs.
+
+    Not a failure — with refill on manual this is the ordinary state, and it
+    resolves itself by you generating more. It belongs here anyway because
+    nothing else says it out loud: a short stack produces thin posts silently,
+    and an empty cover stack means the claim-time backstop has nothing to reach
+    for and a roof photo becomes the thumbnail.
+    """
+    from . import images as images_svc
+
+    h = images_svc.stack_health(conn)
+    now = datetime.now(timezone.utc)
+    out = []
+
+    if h["photos_short"] > 0:
+        out.append({
+            "id": "image_stack:photos_short",
+            "kind": "image_stack",
+            "severity": "warning",
+            "ts": now,
+            "machine": None,
+            "account": None,
+            "flow": "images",
+            "step": "stack_depth",
+            "title": (
+                f"Photo stack short by {h['photos_short']} — "
+                f"{h['queued_drafts']} queued draft(s) want {h['photo_demand']}, "
+                f"{h['photos_available']} available"
+            ),
+            "detail": None,
+            "explanation": (
+                "Drafts take whatever the stack can give and publish thinner "
+                "rather than waiting, so nothing is blocked. Generate or upload "
+                "more photos on the Images page, or turn on the background "
+                "refill under Settings once the image prompts are settled."
+            ),
+            "where": "/images",
+            "context": h,
+            "artifact_ids": [],
+            "acknowledged_at": None,
+        })
+
+    if h["covers_available"] == 0:
+        out.append({
+            "id": "image_stack:no_covers",
+            "kind": "image_stack",
+            "severity": "critical",
+            "ts": now,
+            "machine": None,
+            "account": None,
+            "flow": "images",
+            "step": "stack_depth",
+            "title": "Cover stack is empty",
+            "detail": None,
+            "explanation": (
+                "Covers are chosen by hand, and the claim-time backstop needs "
+                "one to fall back on. With none left, any draft you have not "
+                "given a cover publishes with an ordinary roof photo as its "
+                "Craigslist thumbnail — the highest-leverage visual on the ad, "
+                "spent on a picture nobody picked."
+            ),
+            "where": "/images",
+            "context": h,
+            "artifact_ids": [],
+            "acknowledged_at": None,
+        })
+    return out
+
+
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
 
 
@@ -369,6 +439,7 @@ def problems(
         *_failed_post_problems(conn, since=since, limit=limit),
         *_silent_machine_problems(conn),
         *_stuck_claim_problems(conn),
+        *_image_stack_problems(conn),
     ]
     items.sort(key=lambda p: (_SEVERITY_ORDER.get(p["severity"], 9), -p["ts"].timestamp()))
 
