@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { Circle, ExternalLink, EyeOff } from "lucide-react";
 import { api } from "../lib/api";
 import { formatDate, formatNumber, formatRate } from "../lib/format";
 import { cn } from "../lib/cn";
@@ -90,7 +91,7 @@ export default function PostsPage() {
             setPage(0);
           }}
           placeholder="Search title or post_id…"
-          className="lg:col-span-2 rounded bg-slate-900 border border-slate-800 px-3 py-1.5 text-sm"
+          className="lg:col-span-2 rounded bg-surface border border-border px-3 py-1.5 text-sm"
         />
         <select
           value={account}
@@ -98,7 +99,7 @@ export default function PostsPage() {
             setAccount(e.target.value);
             setPage(0);
           }}
-          className="rounded bg-slate-900 border border-slate-800 px-2 py-1.5 text-sm"
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
           <option value="">All accounts</option>
           {(accountsQ.data?.accounts || []).map((a) => (
@@ -113,7 +114,7 @@ export default function PostsPage() {
             setStatus(e.target.value);
             setPage(0);
           }}
-          className="rounded bg-slate-900 border border-slate-800 px-2 py-1.5 text-sm"
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
           <option value="">Any status</option>
           <option value="active">Active</option>
@@ -125,7 +126,7 @@ export default function PostsPage() {
             setGhost(e.target.value);
             setPage(0);
           }}
-          className="rounded bg-slate-900 border border-slate-800 px-2 py-1.5 text-sm"
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
           <option value="">Any ghost state</option>
           <option value="visible">Visible</option>
@@ -138,16 +139,89 @@ export default function PostsPage() {
             setSince(e.target.value);
             setPage(0);
           }}
-          className="rounded bg-slate-900 border border-slate-800 px-2 py-1.5 text-sm"
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
           <option value="">Last 90 days</option>
           <option value="all">All time</option>
         </select>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border border-slate-800">
+      {/* Below md the nine-column table becomes cards. It was in an
+          overflow-x-auto box, so it did not scroll the page — but swiping a
+          nine-column table sideways on a 390px screen is not usable either.
+          Sorting moves to a select, since there are no column headers to tap. */}
+      <div className="md:hidden flex items-center gap-2">
+        <label className="text-xs text-fg-muted" htmlFor="mobile-sort">
+          Sort by
+        </label>
+        <select
+          id="mobile-sort"
+          value={`${sort}:${sortDir}`}
+          onChange={(e) => {
+            const [k, dir] = e.target.value.split(":");
+            setSort(k);
+            setSortDir(dir as "asc" | "desc");
+            setPage(0);
+          }}
+          className="flex-1 rounded bg-surface border border-border px-2 py-1.5 text-sm"
+        >
+          <option value="posted_ts:desc">Newest first</option>
+          <option value="posted_ts:asc">Oldest first</option>
+          <option value="impressions:desc">Most impressions</option>
+          <option value="views:desc">Most views</option>
+          <option value="impressions_per_day:desc">Best impressions/day</option>
+          <option value="views_per_day:desc">Best views/day</option>
+        </select>
+      </div>
+
+      <ul className="md:hidden space-y-2">
+        {items.map((r) => (
+          <li key={r.post_id} className="rounded-lg border border-border bg-surface/40 p-3">
+            <div className="flex items-start justify-between gap-2">
+              <Link to={`/posts/${r.post_id}`} className="min-w-0 flex-1">
+                <p className="font-medium line-clamp-2">
+                  {r.title || <span className="text-fg-subtle">(no title)</span>}
+                </p>
+                <p className="text-xs text-fg-subtle mt-0.5">
+                  {r.account} · {formatDate(r.posted_ts)} · {r.post_id}
+                </p>
+              </Link>
+              <StatusChip status={r.status} ghosted={r.ghosted} />
+            </div>
+            <dl className="mt-2 grid grid-cols-4 gap-2 text-center">
+              {[
+                ["Impr", formatNumber(r.impressions)],
+                ["Views", formatNumber(r.views)],
+                ["Impr/d", formatRate(r.impressions_per_day)],
+                ["Views/d", formatRate(r.views_per_day)],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded bg-surface-2/60 py-1">
+                  <dt className="text-[11px] text-fg-subtle">{label}</dt>
+                  <dd className="text-sm tabular-nums">{value}</dd>
+                </div>
+              ))}
+            </dl>
+            {r.url && (
+              <a
+                href={r.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-flex items-center gap-1 text-xs text-info-fg hover:underline"
+              >
+                <ExternalLink size={12} aria-hidden="true" />
+                Open on Craigslist
+              </a>
+            )}
+          </li>
+        ))}
+        {items.length === 0 && !q.isLoading && (
+          <li className="text-center text-fg-subtle text-sm py-6">No posts match.</li>
+        )}
+      </ul>
+
+      <div className="hidden md:block overflow-x-auto rounded-lg border border-border">
         <table className="w-full text-sm">
-          <thead className="bg-slate-900 text-slate-300">
+          <thead className="bg-surface text-fg-muted">
             <tr>
               <th className="px-3 py-2 text-left">Account</th>
               <th className="px-3 py-2 text-left">Title</th>
@@ -162,19 +236,19 @@ export default function PostsPage() {
           </thead>
           <tbody>
             {items.map((r) => (
-              <tr key={r.post_id} className="border-t border-slate-800 hover:bg-slate-900/50">
-                <td className="px-3 py-2 text-slate-300">{r.account}</td>
+              <tr key={r.post_id} className="border-t border-border hover:bg-surface/50">
+                <td className="px-3 py-2 text-fg-muted">{r.account}</td>
                 <td className="px-3 py-2 max-w-xs">
                   <Link
                     to={`/posts/${r.post_id}`}
-                    className="text-slate-100 hover:underline block truncate"
+                    className="text-fg hover:underline block truncate"
                     title={r.title || ""}
                   >
-                    {r.title || <span className="text-slate-500">(no title)</span>}
+                    {r.title || <span className="text-fg-subtle">(no title)</span>}
                   </Link>
-                  <div className="text-xs text-slate-500">{r.post_id}</div>
+                  <div className="text-xs text-fg-subtle">{r.post_id}</div>
                 </td>
-                <td className="px-3 py-2 whitespace-nowrap text-slate-400">
+                <td className="px-3 py-2 whitespace-nowrap text-fg-muted">
                   {formatDate(r.posted_ts)}
                 </td>
                 <td className="px-3 py-2">
@@ -182,10 +256,10 @@ export default function PostsPage() {
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.impressions)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.views)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-400">
+                <td className="px-3 py-2 text-right tabular-nums text-fg-muted">
                   {formatRate(r.impressions_per_day)}
                 </td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-400">
+                <td className="px-3 py-2 text-right tabular-nums text-fg-muted">
                   {formatRate(r.views_per_day)}
                 </td>
                 <td className="px-3 py-2">
@@ -194,10 +268,13 @@ export default function PostsPage() {
                       href={r.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs text-blue-400 hover:underline"
+                      className="inline-flex text-info-fg hover:underline"
+                      // "↗" alone is announced as punctuation by a screen
+                      // reader and gives no hint of where it goes.
+                      aria-label={`Open "${r.title ?? r.post_id}" on Craigslist in a new tab`}
                       title="Open on Craigslist"
                     >
-                      ↗
+                      <ExternalLink size={14} aria-hidden="true" />
                     </a>
                   )}
                 </td>
@@ -205,7 +282,7 @@ export default function PostsPage() {
             ))}
             {items.length === 0 && !q.isLoading && (
               <tr>
-                <td colSpan={9} className="px-3 py-6 text-center text-slate-500">
+                <td colSpan={9} className="px-3 py-6 text-center text-fg-subtle">
                   No posts match.
                 </td>
               </tr>
@@ -214,7 +291,7 @@ export default function PostsPage() {
         </table>
       </div>
 
-      <div className="flex items-center justify-between text-sm text-slate-400">
+      <div className="flex items-center justify-between text-sm text-fg-muted">
         <div>
           {q.isLoading ? "Loading…" : `${formatNumber(total)} posts`}
         </div>
@@ -222,7 +299,7 @@ export default function PostsPage() {
           <button
             onClick={() => setPage(Math.max(0, page - 1))}
             disabled={page === 0}
-            className="px-2 py-1 rounded border border-slate-800 hover:bg-slate-900 disabled:opacity-40"
+            className="px-2 py-1 rounded border border-border hover:bg-surface disabled:opacity-40"
           >
             Prev
           </button>
@@ -232,7 +309,7 @@ export default function PostsPage() {
           <button
             onClick={() => setPage(Math.min(maxPage, page + 1))}
             disabled={page >= maxPage}
-            className="px-2 py-1 rounded border border-slate-800 hover:bg-slate-900 disabled:opacity-40"
+            className="px-2 py-1 rounded border border-border hover:bg-surface disabled:opacity-40"
           >
             Next
           </button>
@@ -260,7 +337,7 @@ function SortHeader({
     <th className="px-3 py-2 text-right">
       <button
         onClick={() => onClick(k)}
-        className={cn("inline-flex items-center gap-1 hover:text-white", active ? "text-white" : "")}
+        className={cn("inline-flex items-center gap-1 hover:text-fg", active ? "text-fg" : "")}
       >
         {label}
         {active && <span className="text-xs">{dir === "asc" ? "▲" : "▼"}</span>}
@@ -272,21 +349,28 @@ function SortHeader({
 function StatusChip({ status, ghosted }: { status: string | null; ghosted: boolean | null }) {
   if (ghosted === true) {
     return (
-      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-red-950 text-red-300 border border-red-800">
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-danger text-danger-fg border border-danger-border">
+        <EyeOff size={12} aria-hidden="true" />
         ghosted
       </span>
     );
   }
-  const active = status === "Active";
+  // Craigslist reports "active" lowercase and event ingest stores it verbatim,
+  // so the old `status === "Active"` never matched: every live post rendered in
+  // the grey "unknown" style instead of green.
+  const active = (status ?? "").toLowerCase() === "active";
   return (
     <span
       className={cn(
-        "inline-flex items-center px-1.5 py-0.5 rounded text-xs border",
+        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border",
         active
-          ? "bg-emerald-950 text-emerald-300 border-emerald-800"
-          : "bg-slate-800 text-slate-400 border-slate-700",
+          ? "bg-ok text-ok-fg border-ok-border"
+          : "bg-surface-2 text-fg-muted border-border-strong",
       )}
     >
+      {/* An icon as well as a colour: red-vs-green alone excludes the ~8% of
+          men with red-green colour blindness. */}
+      {active ? <Circle size={12} aria-hidden="true" /> : null}
       {status || "unknown"}
     </span>
   );

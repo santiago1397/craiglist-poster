@@ -133,23 +133,23 @@ export default function PromptsPage() {
 
   return (
     <div className="p-4 space-y-4">
-      <header className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-lg font-semibold">Prompt studio</h1>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <p className="text-xs text-fg-subtle mt-0.5">
             The prompt marked <strong>default</strong> is what automatic generation uses.
           </p>
         </div>
-        <a href="/images" className="text-sm px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800">
+        <a href="/images" className="text-sm px-3 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2">
           ← Images
         </a>
-      </header>
+      </div>
 
       {error && (
-        <div className="rounded border border-red-800 bg-red-950/50 px-3 py-2 text-sm text-red-200">{error}</div>
+        <div className="rounded border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>
       )}
       {note && (
-        <div className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300">{note}</div>
+        <div className="rounded border border-border-strong bg-surface px-3 py-2 text-sm text-fg-muted">{note}</div>
       )}
 
       <div className="flex gap-1 flex-wrap">
@@ -159,22 +159,22 @@ export default function PromptsPage() {
             onClick={() => { setPurpose(p.key); setTests([]); }}
             className={cn(
               "px-3 py-1.5 rounded text-sm",
-              purpose === p.key ? "bg-slate-800 text-white" : "text-slate-400 hover:bg-slate-800/60",
+              purpose === p.key ? "bg-surface-2 text-fg" : "text-fg-muted hover:bg-surface-2/60",
             )}
           >
             {p.label}
           </button>
         ))}
       </div>
-      <p className="text-xs text-slate-500 -mt-2">{current.hint}</p>
+      <p className="text-xs text-fg-subtle -mt-2">{current.hint}</p>
 
       <div className="grid gap-4 lg:grid-cols-[240px_1fr]">
         <aside className="space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-xs text-slate-400">Saved ({prompts.length})</span>
+            <span className="text-xs text-fg-muted">Saved ({prompts.length})</span>
             <button
               onClick={() => { setSelected(null); setName(""); setBody(""); }}
-              className="text-xs px-2 py-0.5 rounded border border-slate-700 text-slate-300 hover:bg-slate-800"
+              className="text-xs px-2 py-0.5 rounded border border-border-strong text-fg-muted hover:bg-surface-2"
             >
               + New
             </button>
@@ -187,13 +187,13 @@ export default function PromptsPage() {
                   className={cn(
                     "w-full text-left px-2 py-1.5 rounded text-sm border",
                     selected?.id === p.id
-                      ? "border-sky-600 bg-slate-800"
-                      : "border-slate-800 hover:bg-slate-800/60",
+                      ? "border-primary bg-surface-2"
+                      : "border-border hover:bg-surface-2/60",
                   )}
                 >
                   <span className="block truncate">{p.name}</span>
                   {p.is_default && (
-                    <span className="text-[10px] px-1 rounded bg-emerald-900/60 text-emerald-200">
+                    <span className="text-[10px] px-1 rounded bg-ok text-ok-fg">
                       default
                     </span>
                   )}
@@ -203,11 +203,11 @@ export default function PromptsPage() {
           </ul>
 
           {isImage(purpose) && (
-            <div className="pt-3 border-t border-slate-800 space-y-1.5">
-              <span className="text-xs text-slate-400">
+            <div className="pt-3 border-t border-border space-y-1.5">
+              <span className="text-xs text-fg-muted">
                 {"{kind}"} values ({kinds.length})
               </span>
-              <p className="text-[11px] text-slate-600">
+              <p className="text-[11px] text-fg-subtle">
                 One per line. Each image picks one at random — this is what stops
                 every photo looking like the same house.
               </p>
@@ -215,7 +215,7 @@ export default function PromptsPage() {
                 value={kindsDraft}
                 onChange={(e) => setKindsDraft(e.target.value)}
                 rows={7}
-                className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-xs font-mono"
+                className="w-full bg-bg border border-border-strong rounded px-2 py-1.5 text-xs font-mono"
               />
               <button
                 disabled={busy}
@@ -225,7 +225,7 @@ export default function PromptsPage() {
                     "Kinds saved",
                   )
                 }
-                className="w-full text-xs px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-40"
+                className="w-full text-xs px-2 py-1 rounded bg-surface-2 hover:bg-border-strong disabled:opacity-40"
               >
                 Save kinds
               </button>
@@ -238,13 +238,13 @@ export default function PromptsPage() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Prompt name, e.g. “sunny suburban roof”"
-            className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm"
+            className="w-full bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
           />
           {vars.length > 0 && (
-            <p className="text-[11px] text-slate-500">
+            <p className="text-[11px] text-fg-subtle">
               Variables:{" "}
               {vars.map((v) => (
-                <code key={v} className="mr-1.5 px-1 rounded bg-slate-800 text-slate-300">
+                <code key={v} className="mr-1.5 px-1 rounded bg-surface-2 text-fg-muted">
                   {`{${v}}`}
                 </code>
               ))}
@@ -255,7 +255,7 @@ export default function PromptsPage() {
             onChange={(e) => setBody(e.target.value)}
             rows={purpose === "keyword_tail" ? 18 : 10}
             placeholder="Write the prompt…"
-            className="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1.5 text-sm font-mono"
+            className="w-full bg-bg border border-border-strong rounded px-2 py-1.5 text-sm font-mono"
           />
 
           <div className="flex gap-2 flex-wrap items-center">
@@ -264,7 +264,7 @@ export default function PromptsPage() {
                 <button
                   disabled={busy || !dirty}
                   onClick={() => run(() => api.patch(`/prompts/${selected.id}`, { name, body }), "Saved")}
-                  className="text-sm px-3 py-1 rounded bg-sky-700 hover:bg-sky-600 disabled:opacity-40"
+                  className="text-sm px-3 py-1 rounded bg-primary hover:bg-primary-hover disabled:opacity-40"
                 >
                   {dirty ? "Save changes" : "Saved"}
                 </button>
@@ -272,7 +272,7 @@ export default function PromptsPage() {
                   <button
                     disabled={busy}
                     onClick={() => run(() => api.post(`/prompts/${selected.id}/default`), "Set as default")}
-                    className="text-sm px-3 py-1 rounded bg-emerald-800 hover:bg-emerald-700 disabled:opacity-40"
+                    className="text-sm px-3 py-1 rounded bg-ok-solid/90 hover:bg-ok-solid disabled:opacity-40"
                   >
                     Set as default
                   </button>
@@ -280,7 +280,7 @@ export default function PromptsPage() {
                 <button
                   disabled={busy}
                   onClick={() => run(() => api.del(`/prompts/${selected.id}`), "Deleted")}
-                  className="text-sm px-3 py-1 rounded border border-red-900 text-red-300 hover:bg-red-950/50 disabled:opacity-40"
+                  className="text-sm px-3 py-1 rounded border border-danger-border text-danger-fg hover:bg-danger disabled:opacity-40"
                 >
                   Delete
                 </button>
@@ -291,7 +291,7 @@ export default function PromptsPage() {
                 onClick={() =>
                   run(() => api.post("/prompts", { purpose, name, body }), "Prompt created")
                 }
-                className="text-sm px-3 py-1 rounded bg-sky-700 hover:bg-sky-600 disabled:opacity-40"
+                className="text-sm px-3 py-1 rounded bg-primary hover:bg-primary-hover disabled:opacity-40"
               >
                 Create prompt
               </button>
@@ -299,19 +299,19 @@ export default function PromptsPage() {
 
             {isImage(purpose) && (
               <>
-                <span className="ml-auto text-xs text-slate-500">test renders</span>
+                <span className="ml-auto text-xs text-fg-subtle">test renders</span>
                 <input
                   type="number"
                   min={1}
                   max={8}
                   value={count}
                   onChange={(e) => setCount(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
-                  className="w-14 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm"
+                  className="w-14 bg-bg border border-border-strong rounded px-2 py-1 text-sm"
                 />
                 <button
                   disabled={busy || !body.trim()}
                   onClick={() => void test()}
-                  className="text-sm px-3 py-1 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-40"
+                  className="text-sm px-3 py-1 rounded bg-accent hover:bg-accent-hover disabled:opacity-40"
                   title="Generate without touching the stack"
                 >
                   {busy ? "Rendering…" : "Test"}
@@ -321,8 +321,8 @@ export default function PromptsPage() {
           </div>
 
           {isImage(purpose) && tests.length > 0 && (
-            <div className="rounded border border-violet-900/60 bg-violet-950/20 p-3">
-              <p className="text-xs text-violet-200 mb-2">
+            <div className="rounded border border-accent-soft bg-accent-soft/40 p-3">
+              <p className="text-xs text-accent-soft-fg mb-2">
                 Test renders — not in your stack. Keep the ones worth having; the
                 rest are deleted when you leave this page.
               </p>
@@ -332,7 +332,7 @@ export default function PromptsPage() {
                     <img
                       src={`${IMG_BASE}/images/${t.id}/raw`}
                       alt=""
-                      className="w-full aspect-[4/3] object-cover rounded border border-slate-700"
+                      className="w-full aspect-[4/3] object-cover rounded border border-border-strong"
                     />
                     <button
                       disabled={busy || kept.has(t.id)}
@@ -345,8 +345,8 @@ export default function PromptsPage() {
                       className={cn(
                         "w-full text-xs px-2 py-1 rounded",
                         kept.has(t.id)
-                          ? "bg-emerald-900/50 text-emerald-300"
-                          : "bg-emerald-800 hover:bg-emerald-700",
+                          ? "bg-ok text-ok-fg"
+                          : "bg-ok-solid/90 hover:bg-ok-solid",
                       )}
                     >
                       {kept.has(t.id) ? "Kept ✓" : "Keep"}

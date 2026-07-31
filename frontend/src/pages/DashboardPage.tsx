@@ -38,8 +38,8 @@ export default function DashboardPage() {
     refetchInterval: 30_000,
   });
 
-  if (q.isLoading) return <div className="p-6 text-slate-400">Loading…</div>;
-  if (q.isError) return <div className="p-6 text-red-400">Failed to load dashboard.</div>;
+  if (q.isLoading) return <div className="p-6 text-fg-muted">Loading…</div>;
+  if (q.isError) return <div className="p-6 text-danger-fg">Failed to load dashboard.</div>;
 
   const accounts = q.data?.accounts ?? [];
 
@@ -51,7 +51,7 @@ export default function DashboardPage() {
           <AccountCard key={a.account} a={a} />
         ))}
         {accounts.length === 0 && (
-          <div className="text-slate-400">No account data yet. Waiting for the reporter to send heartbeats.</div>
+          <div className="text-fg-muted">No account data yet. Waiting for the reporter to send heartbeats.</div>
         )}
       </div>
     </div>
@@ -63,7 +63,7 @@ function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
     <span
       className={cn(
         "inline-flex items-center px-2 py-0.5 rounded text-xs font-medium",
-        ok ? "bg-emerald-950 text-emerald-300 border border-emerald-800" : "bg-red-950 text-red-300 border border-red-800",
+        ok ? "bg-ok text-ok-fg border border-ok-border" : "bg-danger text-danger-fg border border-danger-border",
       )}
     >
       {label}
@@ -72,7 +72,7 @@ function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
 }
 
 function OutcomeBadge({ outcome }: { outcome: string | null }) {
-  if (!outcome) return <span className="text-slate-500 text-xs">—</span>;
+  if (!outcome) return <span className="text-fg-subtle text-xs">—</span>;
   const ok = outcome === "posted" || outcome === "dry_run";
   return <StatusBadge ok={ok} label={outcome.replace(/_/g, " ")} />;
 }
@@ -80,14 +80,14 @@ function OutcomeBadge({ outcome }: { outcome: string | null }) {
 function AccountCard({ a }: { a: DashboardAccount }) {
   const eligible = a.eligible_now === true;
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 space-y-3">
+    <div className="rounded-lg border border-border bg-surface p-4 space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="font-semibold">{a.account}</h2>
         <StatusBadge ok={eligible} label={eligible ? "eligible" : "blocked"} />
       </div>
 
       {!eligible && a.block_reasons && a.block_reasons.length > 0 && (
-        <ul className="text-xs text-slate-400 space-y-0.5">
+        <ul className="text-xs text-fg-muted space-y-0.5">
           {a.block_reasons.map((r, i) => (
             <li key={i}>• {r}</li>
           ))}
@@ -95,24 +95,24 @@ function AccountCard({ a }: { a: DashboardAccount }) {
       )}
 
       <div className="text-sm">
-        <div className="text-slate-400 text-xs uppercase tracking-wide">Next eligible</div>
+        <div className="text-fg-muted text-xs uppercase tracking-wide">Next eligible</div>
         <div>
           {a.next_eligible_at ? (
             <>
               {formatDateTime(a.next_eligible_at)}{" "}
-              <span className="text-slate-500 text-xs">({formatRelative(a.next_eligible_at)})</span>
+              <span className="text-fg-subtle text-xs">({formatRelative(a.next_eligible_at)})</span>
             </>
           ) : (
-            <span className="text-slate-500">—</span>
+            <span className="text-fg-subtle">—</span>
           )}
         </div>
       </div>
 
       <div className="text-sm">
-        <div className="text-slate-400 text-xs uppercase tracking-wide">Last post</div>
+        <div className="text-fg-muted text-xs uppercase tracking-wide">Last post</div>
         {a.last_success_ts ? (
           <div className="space-y-0.5">
-            <div className="text-xs text-slate-500">
+            <div className="text-xs text-fg-subtle">
               {formatDateTime(a.last_success_ts)} ({formatRelative(a.last_success_ts)})
             </div>
             <div className="truncate">{a.last_success_title || "(no title)"}</div>
@@ -121,58 +121,58 @@ function AccountCard({ a }: { a: DashboardAccount }) {
                 href={a.last_success_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-xs text-blue-400 hover:underline break-all"
+                className="text-xs text-info-fg hover:underline break-all"
               >
                 {a.last_success_url}
               </a>
             )}
           </div>
         ) : (
-          <div className="text-slate-500">—</div>
+          <div className="text-fg-subtle">—</div>
         )}
       </div>
 
       <div className="text-sm">
-        <div className="text-slate-400 text-xs uppercase tracking-wide">Last attempt</div>
+        <div className="text-fg-muted text-xs uppercase tracking-wide">Last attempt</div>
         {a.last_attempt_ts ? (
           <div className="flex items-center gap-2">
             <OutcomeBadge outcome={a.last_attempt_outcome} />
-            <span className="text-xs text-slate-500">{formatRelative(a.last_attempt_ts)}</span>
+            <span className="text-xs text-fg-subtle">{formatRelative(a.last_attempt_ts)}</span>
             {a.last_attempt_error_type && (
-              <span className="text-xs text-red-400">— {a.last_attempt_error_type}</span>
+              <span className="text-xs text-danger-fg">— {a.last_attempt_error_type}</span>
             )}
           </div>
         ) : (
-          <div className="text-slate-500">—</div>
+          <div className="text-fg-subtle">—</div>
         )}
       </div>
 
       <div className="text-sm">
-        <div className="text-slate-400 text-xs uppercase tracking-wide">Photos</div>
+        <div className="text-fg-muted text-xs uppercase tracking-wide">Photos</div>
         <div>
           {a.photos_never_used !== null ? (
             <>
               <span className="font-medium">{formatNumber(a.photos_never_used)}</span> never-used /{" "}
               {formatNumber(a.photos_total)} total
-              <span className="text-slate-500 text-xs">
+              <span className="text-fg-subtle text-xs">
                 {" — "}{formatNumber(a.photos_eligible)} eligible now
               </span>
             </>
           ) : (
-            <span className="text-slate-500">— (waiting for photo-inventory)</span>
+            <span className="text-fg-subtle">— (waiting for photo-inventory)</span>
           )}
         </div>
-        <div className="text-xs text-slate-500 mt-0.5">
+        <div className="text-xs text-fg-subtle mt-0.5">
           covers: {formatNumber(a.covers_total)}
         </div>
       </div>
 
-      <div className="pt-2 border-t border-slate-800 text-xs text-slate-500 flex justify-between">
+      <div className="pt-2 border-t border-border text-xs text-fg-subtle flex justify-between">
         <span>
           {formatNumber(a.posts_last_24h_total)} in 24h / {formatNumber(a.posts_last_7d_this_account)} this week
         </span>
         {a.stats_sync_health && (
-          <span className={a.stats_sync_health.ok ? "text-emerald-500" : "text-red-400"}>
+          <span className={a.stats_sync_health.ok ? "text-ok-fg" : "text-danger-fg"}>
             stats-sync {a.stats_sync_health.ok ? "OK" : a.stats_sync_health.error_type || "failing"}
           </span>
         )}

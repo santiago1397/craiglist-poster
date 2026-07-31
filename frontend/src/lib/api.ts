@@ -14,6 +14,34 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Called once when the server rejects a request as unauthenticated.
+ *
+ * The session cookie lasts 30 days. When it expired with the tab open, every
+ * query started failing and you were left on a dead page full of error banners
+ * with no indication that the fix was simply logging in again. AuthProvider
+ * registers a handler that clears the user and sends you to /login.
+ *
+ * Suppressed while a login attempt is in flight — a wrong password is a 401
+ * that the form should report itself, not a session expiry.
+ */
+type UnauthorizedHandler = () => void;
+let onUnauthorized: UnauthorizedHandler | null = null;
+let suppressed = false;
+
+export function setUnauthorizedHandler(fn: UnauthorizedHandler | null): void {
+  onUnauthorized = fn;
+}
+
+export async function withoutSessionRedirect<T>(fn: () => Promise<T>): Promise<T> {
+  suppressed = true;
+  try {
+    return await fn();
+  } finally {
+    suppressed = false;
+  }
+}
+
 function buildUrl(path: string, searchParams?: Record<string, string | number | undefined | null>): string {
   // Concatenate BASE + path directly so BASE's own path (e.g. "/api") is
   // preserved. new URL(absolutePath, base) would discard base's path segment.
@@ -49,6 +77,7 @@ async function request<T>(
     }
   }
   if (!res.ok) {
+    if (res.status === 401 && !suppressed) onUnauthorized?.();
     const msg = (parsed && typeof parsed === "object" && "detail" in parsed
       ? String((parsed as any).detail)
       : `HTTP ${res.status}`);

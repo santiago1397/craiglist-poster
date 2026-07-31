@@ -4,9 +4,11 @@
 // APPROVED is the pool drafts actually draw from. Nothing reaches Craigslist
 // without passing through your eyes.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
 import { cn } from "../lib/cn";
+import { ConfirmDialog } from "../components/Modal";
 
 type Image = {
   id: number;
@@ -45,58 +47,49 @@ function mb(bytes: number): string {
 }
 
 export default function ImagesPage() {
-  const [images, setImages] = useState<Image[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
+  const qc = useQueryClient();
   const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("pending");
   const [count, setCount] = useState(4);
   // Cover vs photo matters: covers get text composited on and are drawn from a
   // separate prompt, so the distinction has to be made at upload and generate.
   const [kind, setKind] = useState<"photo" | "cover">("photo");
-  const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      const [list, s] = await Promise.all([
-        api.get<{ images: Image[] }>("/images", { status: tab, limit: 120 }),
-        api.get<Stats>("/images/stats"),
-      ]);
-      setImages(list.images);
-      setStats(s);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    }
-  }, [tab]);
+  const imagesQ = useQuery({
+    queryKey: ["images", tab],
+    queryFn: () => api.get<{ images: Image[] }>("/images", { status: tab, limit: 120 }),
+  });
+  const statsQ = useQuery({
+    queryKey: ["images", "stats"],
+    queryFn: () => api.get<Stats>("/images/stats"),
+  });
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const images = imagesQ.data?.images ?? [];
+  const stats = statsQ.data ?? null;
 
-  async function mutate(fn: () => Promise<unknown>) {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-      await load();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const refresh = () => qc.invalidateQueries({ queryKey: ["images"] });
 
-  async function generate() {
-    setBusy(true);
-    setError(null);
-    setNote(null);
-    try {
-      const r = await api.post<{ created: number; cost_usd: number; error: string | null }>(
-        "/images/generate",
-        { count, kind },
-      );
+  // Per-image pending state. A single page-wide `busy` flag used to grey out
+  // every button in the grid whenever one image was approved, with nothing to
+  // say which one you had acted on.
+  const setStatus = useMutation({
+    mutationFn: ({ id, status }: { id: number; status: string }) =>
+      api.patch(`/images/${id}`, { status }),
+    onSuccess: refresh,
+  });
+  const remove = useMutation({
+    mutationFn: (id: number) => api.del(`/images/${id}`),
+    onSuccess: refresh,
+  });
+
+  const generate = useMutation({
+    mutationFn: () =>
+      api.post<{ created: number; cost_usd: number; error: string | null }>("/images/generate", {
+        count,
+        kind,
+      }),
+    onSuccess: (r) => {
       // Generation reports provider trouble in the body rather than failing, so
       // surface both outcomes: what arrived, and what went wrong.
       setNote(
@@ -104,39 +97,58 @@ export default function ImagesPage() {
           (r.error ? ` · stopped early: ${r.error}` : ""),
       );
       setTab("pending");
-      await load();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
+      void refresh();
+    },
+  });
 
-  async function upload(files: FileList | null) {
-    if (!files?.length) return;
-    setBusy(true);
-    setError(null);
-    let added = 0;
-    const skipped: string[] = [];
-    for (const f of Array.from(files)) {
-      const form = new FormData();
-      form.append("file", f);
-      // kind was never being sent, so every upload became a photo and a cover
-      // could not be uploaded at all.
-      const res = await fetch(
-        `${BASE.replace(/\/+$/, "")}/images/upload?kind=${encodeURIComponent(kind)}`,
-        { method: "POST", credentials: "include", body: form },
+  const upload = useMutation({
+    mutationFn: async (files: File[]) => {
+      let added = 0;
+      const skipped: string[] = [];
+      for (const f of files) {
+        const form = new FormData();
+        form.append("file", f);
+        // kind was never being sent, so every upload became a photo and a cover
+        // could not be uploaded at all.
+        const res = await fetch(
+          `${BASE.replace(/\/+$/, "")}/images/upload?kind=${encodeURIComponent(kind)}`,
+          { method: "POST", credentials: "include", body: form },
+        );
+        if (res.ok) added++;
+        else
+          skipped.push(
+            `${f.name} (${res.status === 409 ? "already in stack" : `HTTP ${res.status}`})`,
+          );
+      }
+      return { added, skipped };
+    },
+    onSuccess: ({ added, skipped }) => {
+      setNote(
+        `Uploaded ${added} file${added === 1 ? "" : "s"}` +
+          (skipped.length ? ` · skipped ${skipped.join(", ")}` : ""),
       );
-      if (res.ok) added++;
-      else skipped.push(`${f.name} (${res.status === 409 ? "already in stack" : `HTTP ${res.status}`})`);
-    }
-    setNote(`Uploaded ${added} file${added === 1 ? "" : "s"}` +
-      (skipped.length ? ` · skipped ${skipped.join(", ")}` : ""));
-    if (fileRef.current) fileRef.current.value = "";
-    setTab("approved");
-    setBusy(false);
-    await load();
-  }
+      if (fileRef.current) fileRef.current.value = "";
+      setTab("approved");
+      void refresh();
+    },
+  });
+
+  const [deleting, setDeleting] = useState<Image | null>(null);
+
+  /** Only the image being acted on is disabled, not the whole grid. */
+  const pendingFor = (id: number) =>
+    (setStatus.isPending && setStatus.variables?.id === id) ||
+    (remove.isPending && remove.variables === id);
+
+  const busy = generate.isPending || upload.isPending;
+  const error =
+    (imagesQ.error ?? statsQ.error ?? setStatus.error ?? remove.error ?? generate.error ??
+      upload.error) || null;
+  const errorText = error
+    ? error instanceof ApiError
+      ? error.message
+      : String(error)
+    : null;
 
   const pendingCount = stats?.by_status
     .filter((r) => r.status === "pending")
@@ -144,7 +156,7 @@ export default function ImagesPage() {
 
   return (
     <div className="p-4 space-y-4">
-      <header className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <h1 className="text-lg font-semibold">Images</h1>
         <div className="flex items-center gap-2 flex-wrap">
           <input
@@ -152,13 +164,19 @@ export default function ImagesPage() {
             min={1}
             max={20}
             value={count}
-            onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-            className="w-16 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm"
+            // Number("abc") is NaN, and `NaN || 1` silently became 1 — you
+            // asked for something invalid and got a batch you did not choose.
+            onChange={(e) => {
+              const n = Number.parseInt(e.target.value, 10);
+              if (Number.isFinite(n)) setCount(Math.max(1, Math.min(20, n)));
+            }}
+            aria-label="How many images to generate (1-20)"
+            className="w-16 bg-bg border border-border-strong rounded px-2 py-1 text-sm"
           />
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as "photo" | "cover")}
-            className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm"
+            className="bg-bg border border-border-strong rounded px-2 py-1 text-sm"
             title="Covers get the phone number composited on and use their own prompt"
           >
             <option value="photo">photo</option>
@@ -166,58 +184,64 @@ export default function ImagesPage() {
           </select>
           <button
             disabled={busy}
-            onClick={() => void generate()}
-            className="text-sm px-3 py-1 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-40"
+            onClick={() => generate.mutate()}
+            className="text-sm px-3 py-1 rounded bg-accent text-accent-fg hover:bg-accent-hover disabled:opacity-40"
           >
-            {busy ? "Working…" : "Generate"}
+            {generate.isPending ? "Generating…" : "Generate"}
           </button>
           <input
             ref={fileRef}
             type="file"
             multiple
             accept="image/jpeg,image/png,image/webp"
-            onChange={(e) => void upload(e.target.files)}
+            onChange={(e) => {
+              const files = e.target.files ? Array.from(e.target.files) : [];
+              if (files.length) upload.mutate(files);
+            }}
             className="hidden"
             id="upload-input"
           />
           <label
             htmlFor="upload-input"
-            className="text-sm px-3 py-1 rounded bg-sky-700 hover:bg-sky-600 cursor-pointer"
+            className="text-sm px-3 py-1 rounded bg-primary text-primary-fg hover:bg-primary-hover cursor-pointer"
           >
-            Upload
+            {upload.isPending ? "Uploading…" : "Upload"}
           </label>
           <button
-            onClick={() => void load()}
-            className="text-sm px-2 py-1 rounded hover:bg-slate-800 text-slate-300"
+            onClick={() => void refresh()}
+            className="text-sm px-2 py-1 rounded hover:bg-surface-2 text-fg-muted"
           >
             Refresh
           </button>
         </div>
-      </header>
+      </div>
 
-      {error && (
-        <div className="rounded border border-red-800 bg-red-950/50 px-3 py-2 text-sm text-red-200">
-          {error}
+      {errorText && (
+        <div
+          role="alert"
+          className="rounded border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg"
+        >
+          {errorText}
         </div>
       )}
       {note && (
-        <div className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300">
+        <div className="rounded border border-border-strong bg-surface px-3 py-2 text-sm text-fg-muted">
           {note}
         </div>
       )}
 
       {stats && (
-        <section className="rounded border border-slate-800 bg-slate-900/50 p-3 text-sm">
-          <div className="flex gap-5 flex-wrap text-slate-400">
+        <section className="rounded border border-border bg-surface/50 p-3 text-sm">
+          <div className="flex gap-5 flex-wrap text-fg-muted">
             <span>
-              Total spend <strong className="text-slate-200">${stats.spend_usd.toFixed(4)}</strong>
+              Total spend <strong className="text-fg">${stats.spend_usd.toFixed(4)}</strong>
             </span>
             <span>
               Storage {stats.storage.files} files, {mb(stats.storage.bytes)}
             </span>
             {Object.entries(stats.available).map(([acct, n]) => (
               <span key={acct}>
-                {acct} <strong className="text-slate-200">{n}</strong> available
+                {acct} <strong className="text-fg">{n}</strong> available
               </span>
             ))}
           </div>
@@ -231,7 +255,7 @@ export default function ImagesPage() {
             onClick={() => setTab(t.key)}
             className={cn(
               "px-3 py-1.5 rounded text-sm",
-              tab === t.key ? "bg-slate-800 text-white" : "text-slate-400 hover:bg-slate-800/60",
+              tab === t.key ? "bg-surface-2 text-fg" : "text-fg-muted hover:bg-surface-2/60",
             )}
           >
             {t.label}
@@ -240,8 +264,21 @@ export default function ImagesPage() {
         ))}
       </div>
 
-      {images.length === 0 ? (
-        <p className="text-slate-500 text-sm py-10 text-center">
+      {imagesQ.isLoading ? (
+        // A skeleton rather than an empty page that pops into content.
+        <ul className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5" aria-hidden="true">
+          {Array.from({ length: 10 }).map((_, i) => (
+            <li key={i} className="rounded border border-border overflow-hidden">
+              <div className="w-full aspect-[4/3] bg-surface-2 animate-pulse" />
+              <div className="p-2 space-y-2">
+                <div className="h-3 w-2/3 bg-surface-2 rounded animate-pulse" />
+                <div className="h-6 w-full bg-surface-2 rounded animate-pulse" />
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : images.length === 0 ? (
+        <p className="text-fg-subtle text-sm py-10 text-center">
           {tab === "pending"
             ? "Nothing waiting for review. Generate some images to get started."
             : tab === "approved"
@@ -253,58 +290,62 @@ export default function ImagesPage() {
           {images.map((img) => (
             <li
               key={img.id}
-              className="rounded border border-slate-800 bg-slate-900/40 overflow-hidden"
+              className="rounded border border-border bg-surface/40 overflow-hidden"
             >
+              {/* /raw is the full file; a 120-image grid is ~40MB if it all
+                  loads. decoding="async" keeps decode off the main thread and
+                  the explicit box stops layout shift as each one arrives. */}
               <img
                 src={`${BASE.replace(/\/+$/, "")}/images/${img.id}/raw`}
-                alt={img.prompt ?? `image ${img.id}`}
+                alt={img.prompt ?? `Image ${img.id}`}
                 loading="lazy"
-                className="w-full aspect-[4/3] object-cover bg-slate-950"
+                decoding="async"
+                className="w-full aspect-[4/3] object-cover bg-surface-2"
               />
               <div className="p-2 space-y-1.5">
                 <div className="flex items-center gap-1 flex-wrap text-xs">
-                  <span className="text-slate-500">#{img.id}</span>
+                  <span className="text-fg-subtle">#{img.id}</span>
                   {img.owner_account && (
-                    <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                    <span className="px-1.5 py-0.5 rounded bg-surface-2 text-fg-muted">
                       {img.owner_account}
                     </span>
                   )}
                   {img.source === "uploaded" && (
-                    <span className="px-1.5 py-0.5 rounded bg-sky-900/60 text-sky-200">
+                    <span className="px-1.5 py-0.5 rounded bg-info text-info-fg">
                       uploaded
                     </span>
                   )}
                   {img.used_at && (
-                    <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
+                    <span className="px-1.5 py-0.5 rounded bg-surface-2 text-fg-muted">
                       published
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] text-slate-500">{mb(img.bytes_size)}</p>
+                <p className="text-[11px] text-fg-subtle">{mb(img.bytes_size)}</p>
                 <div className="flex gap-1">
                   {img.status !== "approved" && (
                     <button
-                      disabled={busy}
-                      onClick={() => mutate(() => api.patch(`/images/${img.id}`, { status: "approved" }))}
-                      className="flex-1 text-xs px-2 py-1 rounded bg-emerald-800 hover:bg-emerald-700 disabled:opacity-40"
+                      disabled={pendingFor(img.id)}
+                      onClick={() => setStatus.mutate({ id: img.id, status: "approved" })}
+                      className="flex-1 text-xs px-2 py-1 rounded bg-ok-solid/90 text-on-solid hover:bg-ok-solid disabled:opacity-40"
                     >
                       Approve
                     </button>
                   )}
                   {img.status === "pending" && (
                     <button
-                      disabled={busy}
-                      onClick={() => mutate(() => api.patch(`/images/${img.id}`, { status: "rejected" }))}
-                      className="flex-1 text-xs px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                      disabled={pendingFor(img.id)}
+                      onClick={() => setStatus.mutate({ id: img.id, status: "rejected" })}
+                      className="flex-1 text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
                     >
                       Reject
                     </button>
                   )}
                   {img.status !== "pending" && (
                     <button
-                      disabled={busy}
-                      onClick={() => mutate(() => api.del(`/images/${img.id}`))}
-                      className="flex-1 text-xs px-2 py-1 rounded border border-red-900 text-red-300 hover:bg-red-950/50 disabled:opacity-40"
+                      disabled={pendingFor(img.id)}
+                      onClick={() => setDeleting(img)}
+                      className="flex-1 text-xs px-2 py-1 rounded border border-danger-border text-danger-fg hover:bg-danger disabled:opacity-40"
                     >
                       Delete
                     </button>
@@ -315,6 +356,31 @@ export default function ImagesPage() {
           ))}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={deleting !== null}
+        onOpenChange={(o) => !o && setDeleting(null)}
+        title={`Delete image #${deleting?.id}?`}
+        body={
+          <>
+            {deleting?.used_at ? (
+              <span className="block text-warn-fg">
+                This image has already been published to Craigslist. Deleting it
+                removes the record of what went out.
+              </span>
+            ) : (
+              <span className="block">The file is removed from storage permanently.</span>
+            )}
+            <span className="block mt-1">This cannot be undone.</span>
+          </>
+        }
+        busy={remove.isPending}
+        onConfirm={() => {
+          const id = deleting?.id;
+          setDeleting(null);
+          if (id !== undefined) remove.mutate(id);
+        }}
+      />
     </div>
   );
 }
