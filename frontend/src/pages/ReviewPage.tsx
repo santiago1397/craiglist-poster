@@ -28,6 +28,7 @@ type Draft = {
   postal_code: string;
   geographic_area: string | null;
   phone_number: string;
+  license_number: string;
   not_before: string | null;
   expires_at: string | null;
   failed_step: string | null;
@@ -422,6 +423,8 @@ export default function ReviewPage() {
       {editing && (
         <EditDialog
           draft={editing}
+          accounts={accounts}
+          locations={locations}
           onClose={() => setEditing(null)}
           onSave={async (patch) => {
             await mutate(() => api.patch(`/drafts/${editing.id}`, patch));
@@ -997,10 +1000,11 @@ function DraftRow(props: {
               </span>
             )}
           </div>
-          {/* City first, title second. Generated titles are near-identical —
-              20 drafts collapse onto ~3 distinct titles when the model is
-              unavailable — so leading with the title means every row looks the
-              same. The city is what actually tells them apart. */}
+          {/* The ad's own title leads, with the location after it in brackets.
+              Leading with the city was a workaround for generated titles being
+              near-identical — but it meant the row never showed you the thing
+              that actually publishes. The location still has to be here:
+              without it, drafts that share a title are indistinguishable. */}
           <p className="mt-1 font-medium flex items-baseline gap-1.5">
             <ChevronRight
               size={14}
@@ -1010,12 +1014,14 @@ function DraftRow(props: {
                 open && "rotate-90",
               )}
             />
-            <span>{d.city || "(no city)"}</span>
-            {d.postal_code && (
-              <span className="text-xs font-normal text-fg-subtle">{d.postal_code}</span>
-            )}
+            <span className="line-clamp-2">
+              {d.title || "(no title)"}
+              <span className="font-normal text-fg-muted">
+                {" "}
+                ({[d.city || "no city", d.postal_code].filter(Boolean).join(" ")})
+              </span>
+            </span>
           </p>
-          <p className="text-sm text-fg-muted mt-0.5 line-clamp-2">{d.title}</p>
           <p className="text-xs text-fg-subtle mt-0.5">
             created {fmt(d.created_at)}
             {d.attempts > 1 ? ` · ${d.attempts} attempts` : ""}
@@ -1566,14 +1572,50 @@ function Action(props: {
   );
 }
 
+// Editing shows the same fields as creating. It used to expose only title,
+// area and body — so a draft's account, county, city, zip, phone and licence
+// were visible nowhere you could change them, and "where is this going to
+// post?" had no answer short of reading the collapsed summary row. The PATCH
+// endpoint accepted all of them the whole time; only the form was missing.
 function EditDialog(props: {
   draft: Draft;
+  accounts: string[];
+  locations: LocationRef | null;
   onClose: () => void;
   onSave: (patch: Record<string, unknown>) => Promise<void>;
 }) {
   const d = props.draft;
+  const L = props.locations;
   const [title, setTitle] = useState(d.title);
   const [geo, setGeo] = useState(d.geographic_area ?? d.city);
+  const [where, setWhere] = useState({
+    account: d.account,
+    county: d.county ?? "",
+    city: d.city ?? "",
+    postal_code: d.postal_code ?? "",
+    phone_number: d.phone_number ?? "",
+    license_number: d.license_number ?? "",
+  });
+  const setW = (k: keyof typeof where) => (e: { target: { value: string } }) =>
+    setWhere({ ...where, [k]: e.target.value });
+
+  const county = L?.counties.find((c) => c.name === where.county) ?? null;
+
+  // Same cascade as the create form: changing county invalidates the city and
+  // zip rather than leaving a Broward city filed under Palm Beach.
+  const onCounty = (name: string) =>
+    setWhere({ ...where, county: name, city: "", postal_code: "" });
+  const onCity = (city: string) => {
+    const hit = L?.counties.find((c) => c.name === where.county)?.cities.find((c) => c.city === city);
+    setWhere({ ...where, city, postal_code: hit?.zip ?? where.postal_code });
+    // Only reseed the free-text box while it is still just mirroring the city;
+    // a widened area like "Davie, Plantation" is yours and must survive.
+    setGeo((g) => (!g.trim() || g === where.city ? city : g));
+  };
+
+  // An existing draft may name a county the reference data no longer lists, and
+  // silently blanking it on open would rewrite the draft on the next save.
+  const countyMissing = Boolean(where.county && L && !county);
 
   // The generator assembles body as `head + "\n\n" + tail`, so when the stored
   // head is a prefix of the body the split is exact and needs no guessing. When
@@ -1595,7 +1637,13 @@ function EditDialog(props: {
   const dirty =
     title !== props.draft.title ||
     body !== props.draft.body ||
-    geo !== (props.draft.geographic_area ?? props.draft.city);
+    geo !== (props.draft.geographic_area ?? props.draft.city) ||
+    where.account !== props.draft.account ||
+    where.county !== (props.draft.county ?? "") ||
+    where.city !== (props.draft.city ?? "") ||
+    where.postal_code !== (props.draft.postal_code ?? "") ||
+    where.phone_number !== (props.draft.phone_number ?? "") ||
+    where.license_number !== (props.draft.license_number ?? "");
 
   return (
     <Modal
@@ -1623,6 +1671,7 @@ function EditDialog(props: {
                 body,
                 body_head: splittable ? head : head.split("\n\n.")[0].slice(0, 2000),
                 geographic_area: geo,
+                ...where,
                 reviewed: true,
               })
             }
@@ -1634,7 +1683,108 @@ function EditDialog(props: {
       }
     >
       <>
-          <TitleField value={title} onChange={setTitle} />
+          {/* Where it posts, in the same shape and order as the create form. */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {props.accounts.length > 0 ? (
+              <label className="block">
+                <span className="text-xs text-fg-muted">Account</span>
+                <select
+                  value={where.account}
+                  onChange={setW("account")}
+                  className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+                >
+                  {/* An account absent from the reported list still has to be
+                      selectable, or opening this dialog would silently move the
+                      draft to a different one on save. */}
+                  {(props.accounts.includes(where.account)
+                    ? props.accounts
+                    : [where.account, ...props.accounts]
+                  ).map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <Field label="Account" value={where.account} onChange={setW("account")} />
+            )}
+
+            <label className="block">
+              <span className="text-xs text-fg-muted">County</span>
+              <select
+                value={where.county}
+                onChange={(e) => onCounty(e.target.value)}
+                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+              >
+                <option value="">Select…</option>
+                {countyMissing && (
+                  <option value={where.county}>{where.county} (not in reference data)</option>
+                )}
+                {L?.counties.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name}
+                    {c.subarea_supported ? "" : "  (not routable)"}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="text-xs text-fg-muted">
+                City {county ? `(${county.cities.length})` : ""}
+              </span>
+              <select
+                value={where.city}
+                onChange={(e) => onCity(e.target.value)}
+                disabled={!county && !countyMissing}
+                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm disabled:opacity-40"
+              >
+                <option value="">{county ? "Select…" : "Pick a county first"}</option>
+                {/* Likewise for a city the county no longer lists. */}
+                {where.city && !county?.cities.some((c) => c.city === where.city) && (
+                  <option value={where.city}>{where.city}</option>
+                )}
+                {county?.cities.map((c) => (
+                  <option key={c.city} value={c.city}>
+                    {c.city}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <Field label="Zip" value={where.postal_code} onChange={setW("postal_code")} />
+
+            <label className="block">
+              <span className="text-xs text-fg-muted">Phone</span>
+              <select
+                value={where.phone_number}
+                onChange={setW("phone_number")}
+                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+              >
+                {(L?.phone_numbers ?? []).includes(where.phone_number) ? null : (
+                  <option value={where.phone_number}>{where.phone_number || "—"}</option>
+                )}
+                {L?.phone_numbers.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <Field label="License" value={where.license_number} onChange={setW("license_number")} />
+          </div>
+
+          {county && !county.subarea_supported && (
+            <p className="text-xs text-warn-fg border border-warn-border bg-warn/60 rounded px-2 py-1.5">
+              The poster cannot map <strong>{county.name}</strong> to a Craigslist
+              subarea — it will fall back to the first option on the form and file
+              the ad under the wrong area. Use a different county until that is
+              fixed.
+            </p>
+          )}
+
           <label className="block">
             <span className="text-xs text-fg-muted">
               City or neighborhood — goes in Craigslist's free-text area box.
@@ -1648,6 +1798,7 @@ function EditDialog(props: {
               className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
             />
           </label>
+          <TitleField value={title} onChange={setTitle} />
           <label className="block">
             <span className="text-xs text-fg-muted">
               {splittable
