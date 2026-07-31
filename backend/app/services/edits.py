@@ -357,16 +357,27 @@ def record_content(conn: psycopg.Connection, ev) -> bool:
     if current["hydrated_at"] is not None and ev.ts <= current["hydrated_at"]:
         return False
 
+    # The step trail and the artifacts are kept whether the read succeeded or
+    # not — a failed hydration is precisely when you need the selector census
+    # and the screenshot of the page Craigslist actually served.
+    steps = json.dumps([s.model_dump(mode="json") for s in ev.steps])
+    artifacts = json.dumps(list(ev.artifact_ids or []))
+
     if not ev.ok:
         conn.execute(
             """
             UPDATE posts
             SET hydrate_requested_at = NULL,
                 hydrate_error = %s,
+                hydrate_steps = %s::jsonb,
+                hydrate_artifact_ids = %s::jsonb,
                 updated_at = NOW()
             WHERE post_id = %s
             """,
-            (f"{ev.error_type}: {(ev.error_message or '')[:400]}", ev.post_id),
+            (
+                f"{ev.error_type}: {(ev.error_message or '')[:400]}",
+                steps, artifacts, ev.post_id,
+            ),
         )
         return True
 
@@ -392,6 +403,8 @@ def record_content(conn: psycopg.Connection, ev) -> bool:
             hydrated_at     = %s,
             hydrate_requested_at = NULL,
             hydrate_error   = NULL,
+            hydrate_steps   = %s::jsonb,
+            hydrate_artifact_ids = %s::jsonb,
             updated_at      = NOW()
         WHERE post_id = %s
         """,
@@ -399,7 +412,8 @@ def record_content(conn: psycopg.Connection, ev) -> bool:
             ev.title, ev.body, ev.county, ev.city, ev.service_offered,
             ev.postal_code, ev.license_number, ev.phone_number,
             json.dumps([i.model_dump(mode="json") for i in ev.images]),
-            ev.content_hash, ev.live_status, ev.editable, ev.ts, ev.post_id,
+            ev.content_hash, ev.live_status, ev.editable, ev.ts,
+            steps, artifacts, ev.post_id,
         ),
     )
     return True

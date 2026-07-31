@@ -10,11 +10,61 @@
 import { useState } from "react";
 import { cn } from "../../lib/cn";
 import { formatDateTime } from "../../lib/format";
-import type { EditAttempt } from "../../lib/edits";
+import type { EditAttempt, EditStep } from "../../lib/edits";
 
 const ARTIFACT_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
 
 const GOOD_OUTCOMES = ["applied", "no_change", "dry_run"];
+
+/** The per-step breadcrumb, shared by a hydration and a reconcile attempt. */
+export function StepTrail({ steps }: { steps: EditStep[] }) {
+  if (steps.length === 0) return null;
+  return (
+    <ol className="mt-2 space-y-0.5 font-mono text-[11px]">
+      {steps.map((s, i) => (
+        <li key={`${s.name}-${i}`} className={s.ok ? "text-fg-muted" : "text-danger-fg"}>
+          <span className="inline-block w-10">{s.ok ? "ok" : "FAIL"}</span>
+          <span className="inline-block min-w-40">{s.name}</span>
+          <span className="inline-block w-14 text-right tabular-nums">
+            {s.duration_seconds != null ? `${s.duration_seconds.toFixed(2)}s` : ""}
+          </span>
+          {s.note && (
+            <span
+              className={cn(
+                "ml-2 whitespace-pre-wrap break-all",
+                // The selector census lands here. It is the first thing worth
+                // reading when a read or an edit fails, so it is not dimmed
+                // like an ordinary note.
+                s.name === "selectors" ? "text-fg" : "text-fg-subtle",
+              )}
+            >
+              {s.note}
+            </span>
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+export function ArtifactLinks({ ids }: { ids: string[] }) {
+  if (ids.length === 0) return null;
+  return (
+    <div className="mt-2 flex gap-2 flex-wrap">
+      {ids.map((id) => (
+        <a
+          key={id}
+          href={`${ARTIFACT_BASE}/artifacts/${id}`}
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs px-1.5 py-0.5 rounded border border-border-strong text-fg-muted hover:bg-surface-2"
+        >
+          artifact {id.slice(0, 8)}
+        </a>
+      ))}
+    </div>
+  );
+}
 
 export function PostEditHistory({ attempts }: { attempts: EditAttempt[] }) {
   const [open, setOpen] = useState(false);
@@ -69,51 +119,9 @@ export function PostEditHistory({ attempts }: { attempts: EditAttempt[] }) {
                   </p>
                 )}
 
-                {a.steps && a.steps.length > 0 && (
-                  <ol className="mt-2 space-y-0.5 font-mono text-[11px]">
-                    {a.steps.map((s, i) => (
-                      <li
-                        key={`${s.name}-${i}`}
-                        className={s.ok ? "text-fg-muted" : "text-danger-fg"}
-                      >
-                        <span className="inline-block w-10">{s.ok ? "ok" : "FAIL"}</span>
-                        <span className="inline-block min-w-40">{s.name}</span>
-                        <span className="inline-block w-14 text-right tabular-nums">
-                          {s.duration_seconds != null ? `${s.duration_seconds.toFixed(2)}s` : ""}
-                        </span>
-                        {s.note && (
-                          <span
-                            className={cn(
-                              "ml-2 whitespace-pre-wrap break-all",
-                              // The selector census lands here. It is the first
-                              // thing worth reading when an edit fails, so it is
-                              // not dimmed like an ordinary note.
-                              s.name === "selectors" ? "text-fg" : "text-fg-subtle",
-                            )}
-                          >
-                            {s.note}
-                          </span>
-                        )}
-                      </li>
-                    ))}
-                  </ol>
-                )}
+                {a.steps && <StepTrail steps={a.steps} />}
 
-                {a.artifact_ids && a.artifact_ids.length > 0 && (
-                  <div className="mt-2 flex gap-2 flex-wrap">
-                    {a.artifact_ids.map((id) => (
-                      <a
-                        key={id}
-                        href={`${ARTIFACT_BASE}/artifacts/${id}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs px-1.5 py-0.5 rounded border border-border-strong text-fg-muted hover:bg-surface-2"
-                      >
-                        artifact {id.slice(0, 8)}
-                      </a>
-                    ))}
-                  </div>
-                )}
+                <ArtifactLinks ids={a.artifact_ids ?? []} />
               </li>
             );
           })}

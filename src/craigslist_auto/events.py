@@ -236,6 +236,19 @@ class FlowError(_EventBase):
 # clobbering a change you never saw.
 # ---------------------------------------------------------------------------
 
+class EditStep(BaseModel):
+    """One breadcrumb in a hydrate or reconcile walk.
+
+    Carries the selector census, which is the first thing worth reading when
+    an edit or a hydration fails against a form nobody has observed.
+    """
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    ok: bool
+    duration_seconds: float | None = None
+    note: str | None = None
+
+
 class PostImage(BaseModel):
     """One image as it appears on the live posting, in slot order."""
     model_config = ConfigDict(extra="forbid")
@@ -273,6 +286,12 @@ class PostContent(_EventBase):
     content_hash: str | None = None
     # Whether CL still shows this posting as editable at all.
     editable: bool = True
+
+    # The walk that produced this read, including the selector census. Hydration
+    # is the first thing anyone runs against the edit form, so its evidence has
+    # to reach the dashboard — it used to stay in logs/run.log on the posting
+    # machine, which is exactly the machine you are not sitting at.
+    steps: list[EditStep] = Field(default_factory=list)
     live_status: str | None = None       # "active" | "expired" | "deleted" | ...
 
     artifact_ids: list[str] = Field(default_factory=list)
@@ -302,15 +321,6 @@ EditOutcome = Literal[
     "failed_other",
     "degraded_live",          # decision 32 — mutated and could not recover
 ]
-
-
-class EditStep(BaseModel):
-    """One breadcrumb in the reconcile walk."""
-    model_config = ConfigDict(extra="forbid")
-    name: str
-    ok: bool
-    duration_seconds: float | None = None
-    note: str | None = None
 
 
 class PostEditAttempt(_EventBase):

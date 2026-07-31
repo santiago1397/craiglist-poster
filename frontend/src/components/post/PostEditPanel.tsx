@@ -19,6 +19,7 @@ import { formatDateTime } from "../../lib/format";
 import { Modal } from "../Modal";
 import { PostingForm } from "../posting/PostingForm";
 import { SlotPicker, postTarget } from "../images/SlotPicker";
+import { ArtifactLinks, StepTrail } from "./PostEditHistory";
 import {
   effectiveBodyLength,
   postingDirty,
@@ -134,6 +135,21 @@ export function PostEditPanel(props: {
 
       {p.hydrate_error && (
         <p className="text-xs text-danger-fg">Load failed: {p.hydrate_error}</p>
+      )}
+
+      {/* What the last read of the form actually saw. Craigslist's edit form is
+          DOM this project inferred rather than observed, so the selector census
+          is the first thing worth reading — whether the read succeeded or not.
+          A count of 2 is as wrong as a count of 0: the fill helpers take
+          `.first`. */}
+      {!!(p.hydrate_steps?.length || p.hydrate_artifact_ids?.length) && (
+        <details className="rounded border border-border bg-bg/40 p-2">
+          <summary className="cursor-pointer text-xs text-fg-muted">
+            What the last load saw
+          </summary>
+          <StepTrail steps={p.hydrate_steps ?? []} />
+          <ArtifactLinks ids={p.hydrate_artifact_ids ?? []} />
+        </details>
       )}
 
       {loading && (
