@@ -1,0 +1,8 @@
+node_modules/
+dist/
+
+# Emitted by `tsc -b`. tsconfig.node.json is a composite project, so it writes
+# these next to vite.config.ts on every build.
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

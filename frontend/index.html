@@ -4,9 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex,nofollow" />
+    <meta name="color-scheme" content="light dark" />
     <title>Craigslist Dashboard</title>
+    <script>
+      // Runs before first paint so the correct theme is on <html> immediately.
+      // Without this the page renders light, then flips to dark once React
+      // mounts — a visible flash on every load.
+      (function () {
+        try {
+          var t = localStorage.getItem("cl-theme");
+          var dark =
+            t === "dark" ||
+            (t !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {
+          // Storage unavailable — leave the default (light) in place.
+        }
+      })();
+    </script>
   </head>
-  <body class="bg-slate-950 text-slate-100">
+  <body class="bg-bg text-fg">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

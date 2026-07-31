@@ -12,7 +12,7 @@ import { cn } from "./lib/cn";
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   const location = useLocation();
-  if (loading) return <div className="p-8 text-slate-400">Loading…</div>;
+  if (loading) return <div className="p-8 text-fg-muted">Loading…</div>;
   if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
   return <>{children}</>;
 }
@@ -25,17 +25,17 @@ function NavBar() {
     <Link
       to={to}
       className={cn(
-        "px-3 py-1.5 rounded text-sm hover:bg-slate-800",
+        "px-3 py-1.5 rounded text-sm hover:bg-surface-2",
         location.pathname === to || (to !== "/" && location.pathname.startsWith(to))
-          ? "bg-slate-800 text-white"
-          : "text-slate-300",
+          ? "bg-surface-2 text-fg"
+          : "text-fg-muted",
       )}
     >
       {label}
     </Link>
   );
   return (
-    <nav className="flex items-center justify-between px-4 py-2 border-b border-slate-800 bg-slate-900">
+    <nav className="flex items-center justify-between px-4 py-2 border-b border-border bg-surface">
       <div className="flex items-center gap-2">
         <span className="font-semibold mr-4">CL Automation</span>
         {link("/", "Dashboard")}
@@ -44,9 +44,9 @@ function NavBar() {
         {link("/prompts", "Prompts")}
         {link("/posts", "Posts")}
       </div>
-      <div className="flex items-center gap-3 text-sm text-slate-400">
+      <div className="flex items-center gap-3 text-sm text-fg-muted">
         <span>{user.email}</span>
-        <button onClick={logout} className="px-2 py-1 rounded hover:bg-slate-800">
+        <button onClick={logout} className="px-2 py-1 rounded hover:bg-surface-2">
           Log out
         </button>
       </div>

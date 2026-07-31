@@ -90,7 +90,7 @@ export default function PostsPage() {
             setPage(0);
           }}
           placeholder="Search title or post_id…"
-          className="lg:col-span-2 rounded bg-slate-900 border border-slate-800 px-3 py-1.5 text-sm"
+          className="lg:col-span-2 rounded bg-surface border border-border px-3 py-1.5 text-sm"
         />
         <select
           value={account}
@@ -98,7 +98,7 @@ export default function PostsPage() {
             setAccount(e.target.value);
             setPage(0);
           }}
-          className="rounded bg-slate-900 border border-slate-800 px-2 py-1.5 text-sm"
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
           <option value="">All accounts</option>
           {(accountsQ.data?.accounts || []).map((a) => (
@@ -113,7 +113,7 @@ export default function PostsPage() {
             setStatus(e.target.value);
             setPage(0);
           }}
-          className="rounded bg-slate-900 border border-slate-800 px-2 py-1.5 text-sm"
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
           <option value="">Any status</option>
           <option value="active">Active</option>
@@ -125,7 +125,7 @@ export default function PostsPage() {
             setGhost(e.target.value);
             setPage(0);
           }}
-          className="rounded bg-slate-900 border border-slate-800 px-2 py-1.5 text-sm"
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
           <option value="">Any ghost state</option>
           <option value="visible">Visible</option>
@@ -138,16 +138,16 @@ export default function PostsPage() {
             setSince(e.target.value);
             setPage(0);
           }}
-          className="rounded bg-slate-900 border border-slate-800 px-2 py-1.5 text-sm"
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
           <option value="">Last 90 days</option>
           <option value="all">All time</option>
         </select>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border border-slate-800">
+      <div className="overflow-x-auto rounded-lg border border-border">
         <table className="w-full text-sm">
-          <thead className="bg-slate-900 text-slate-300">
+          <thead className="bg-surface text-fg-muted">
             <tr>
               <th className="px-3 py-2 text-left">Account</th>
               <th className="px-3 py-2 text-left">Title</th>
@@ -162,19 +162,19 @@ export default function PostsPage() {
           </thead>
           <tbody>
             {items.map((r) => (
-              <tr key={r.post_id} className="border-t border-slate-800 hover:bg-slate-900/50">
-                <td className="px-3 py-2 text-slate-300">{r.account}</td>
+              <tr key={r.post_id} className="border-t border-border hover:bg-surface/50">
+                <td className="px-3 py-2 text-fg-muted">{r.account}</td>
                 <td className="px-3 py-2 max-w-xs">
                   <Link
                     to={`/posts/${r.post_id}`}
-                    className="text-slate-100 hover:underline block truncate"
+                    className="text-fg hover:underline block truncate"
                     title={r.title || ""}
                   >
-                    {r.title || <span className="text-slate-500">(no title)</span>}
+                    {r.title || <span className="text-fg-subtle">(no title)</span>}
                   </Link>
-                  <div className="text-xs text-slate-500">{r.post_id}</div>
+                  <div className="text-xs text-fg-subtle">{r.post_id}</div>
                 </td>
-                <td className="px-3 py-2 whitespace-nowrap text-slate-400">
+                <td className="px-3 py-2 whitespace-nowrap text-fg-muted">
                   {formatDate(r.posted_ts)}
                 </td>
                 <td className="px-3 py-2">
@@ -182,10 +182,10 @@ export default function PostsPage() {
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.impressions)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.views)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-400">
+                <td className="px-3 py-2 text-right tabular-nums text-fg-muted">
                   {formatRate(r.impressions_per_day)}
                 </td>
-                <td className="px-3 py-2 text-right tabular-nums text-slate-400">
+                <td className="px-3 py-2 text-right tabular-nums text-fg-muted">
                   {formatRate(r.views_per_day)}
                 </td>
                 <td className="px-3 py-2">
@@ -194,7 +194,7 @@ export default function PostsPage() {
                       href={r.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs text-blue-400 hover:underline"
+                      className="text-xs text-info-fg hover:underline"
                       title="Open on Craigslist"
                     >
                       ↗
@@ -205,7 +205,7 @@ export default function PostsPage() {
             ))}
             {items.length === 0 && !q.isLoading && (
               <tr>
-                <td colSpan={9} className="px-3 py-6 text-center text-slate-500">
+                <td colSpan={9} className="px-3 py-6 text-center text-fg-subtle">
                   No posts match.
                 </td>
               </tr>
@@ -214,7 +214,7 @@ export default function PostsPage() {
         </table>
       </div>
 
-      <div className="flex items-center justify-between text-sm text-slate-400">
+      <div className="flex items-center justify-between text-sm text-fg-muted">
         <div>
           {q.isLoading ? "Loading…" : `${formatNumber(total)} posts`}
         </div>
@@ -222,7 +222,7 @@ export default function PostsPage() {
           <button
             onClick={() => setPage(Math.max(0, page - 1))}
             disabled={page === 0}
-            className="px-2 py-1 rounded border border-slate-800 hover:bg-slate-900 disabled:opacity-40"
+            className="px-2 py-1 rounded border border-border hover:bg-surface disabled:opacity-40"
           >
             Prev
           </button>
@@ -232,7 +232,7 @@ export default function PostsPage() {
           <button
             onClick={() => setPage(Math.min(maxPage, page + 1))}
             disabled={page >= maxPage}
-            className="px-2 py-1 rounded border border-slate-800 hover:bg-slate-900 disabled:opacity-40"
+            className="px-2 py-1 rounded border border-border hover:bg-surface disabled:opacity-40"
           >
             Next
           </button>
@@ -260,7 +260,7 @@ function SortHeader({
     <th className="px-3 py-2 text-right">
       <button
         onClick={() => onClick(k)}
-        className={cn("inline-flex items-center gap-1 hover:text-white", active ? "text-white" : "")}
+        className={cn("inline-flex items-center gap-1 hover:text-fg", active ? "text-fg" : "")}
       >
         {label}
         {active && <span className="text-xs">{dir === "asc" ? "▲" : "▼"}</span>}
@@ -272,7 +272,7 @@ function SortHeader({
 function StatusChip({ status, ghosted }: { status: string | null; ghosted: boolean | null }) {
   if (ghosted === true) {
     return (
-      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-red-950 text-red-300 border border-red-800">
+      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-danger text-danger-fg border border-danger-border">
         ghosted
       </span>
     );
@@ -283,8 +283,8 @@ function StatusChip({ status, ghosted }: { status: string | null; ghosted: boole
       className={cn(
         "inline-flex items-center px-1.5 py-0.5 rounded text-xs border",
         active
-          ? "bg-emerald-950 text-emerald-300 border-emerald-800"
-          : "bg-slate-800 text-slate-400 border-slate-700",
+          ? "bg-ok text-ok-fg border-ok-border"
+          : "bg-surface-2 text-fg-muted border-border-strong",
       )}
     >
       {status || "unknown"}

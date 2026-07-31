@@ -153,12 +153,12 @@ export default function ImagesPage() {
             max={20}
             value={count}
             onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-            className="w-16 bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm"
+            className="w-16 bg-bg border border-border-strong rounded px-2 py-1 text-sm"
           />
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as "photo" | "cover")}
-            className="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm"
+            className="bg-bg border border-border-strong rounded px-2 py-1 text-sm"
             title="Covers get the phone number composited on and use their own prompt"
           >
             <option value="photo">photo</option>
@@ -167,7 +167,7 @@ export default function ImagesPage() {
           <button
             disabled={busy}
             onClick={() => void generate()}
-            className="text-sm px-3 py-1 rounded bg-violet-700 hover:bg-violet-600 disabled:opacity-40"
+            className="text-sm px-3 py-1 rounded bg-accent hover:bg-accent-hover disabled:opacity-40"
           >
             {busy ? "Working…" : "Generate"}
           </button>
@@ -182,13 +182,13 @@ export default function ImagesPage() {
           />
           <label
             htmlFor="upload-input"
-            className="text-sm px-3 py-1 rounded bg-sky-700 hover:bg-sky-600 cursor-pointer"
+            className="text-sm px-3 py-1 rounded bg-primary hover:bg-primary-hover cursor-pointer"
           >
             Upload
           </label>
           <button
             onClick={() => void load()}
-            className="text-sm px-2 py-1 rounded hover:bg-slate-800 text-slate-300"
+            className="text-sm px-2 py-1 rounded hover:bg-surface-2 text-fg-muted"
           >
             Refresh
           </button>
@@ -196,28 +196,28 @@ export default function ImagesPage() {
       </header>
 
       {error && (
-        <div className="rounded border border-red-800 bg-red-950/50 px-3 py-2 text-sm text-red-200">
+        <div className="rounded border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
           {error}
         </div>
       )}
       {note && (
-        <div className="rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300">
+        <div className="rounded border border-border-strong bg-surface px-3 py-2 text-sm text-fg-muted">
           {note}
         </div>
       )}
 
       {stats && (
-        <section className="rounded border border-slate-800 bg-slate-900/50 p-3 text-sm">
-          <div className="flex gap-5 flex-wrap text-slate-400">
+        <section className="rounded border border-border bg-surface/50 p-3 text-sm">
+          <div className="flex gap-5 flex-wrap text-fg-muted">
             <span>
-              Total spend <strong className="text-slate-200">${stats.spend_usd.toFixed(4)}</strong>
+              Total spend <strong className="text-fg">${stats.spend_usd.toFixed(4)}</strong>
             </span>
             <span>
               Storage {stats.storage.files} files, {mb(stats.storage.bytes)}
             </span>
             {Object.entries(stats.available).map(([acct, n]) => (
               <span key={acct}>
-                {acct} <strong className="text-slate-200">{n}</strong> available
+                {acct} <strong className="text-fg">{n}</strong> available
               </span>
             ))}
           </div>
@@ -231,7 +231,7 @@ export default function ImagesPage() {
             onClick={() => setTab(t.key)}
             className={cn(
               "px-3 py-1.5 rounded text-sm",
-              tab === t.key ? "bg-slate-800 text-white" : "text-slate-400 hover:bg-slate-800/60",
+              tab === t.key ? "bg-surface-2 text-fg" : "text-fg-muted hover:bg-surface-2/60",
             )}
           >
             {t.label}
@@ -241,7 +241,7 @@ export default function ImagesPage() {
       </div>
 
       {images.length === 0 ? (
-        <p className="text-slate-500 text-sm py-10 text-center">
+        <p className="text-fg-subtle text-sm py-10 text-center">
           {tab === "pending"
             ? "Nothing waiting for review. Generate some images to get started."
             : tab === "approved"
@@ -253,40 +253,40 @@ export default function ImagesPage() {
           {images.map((img) => (
             <li
               key={img.id}
-              className="rounded border border-slate-800 bg-slate-900/40 overflow-hidden"
+              className="rounded border border-border bg-surface/40 overflow-hidden"
             >
               <img
                 src={`${BASE.replace(/\/+$/, "")}/images/${img.id}/raw`}
                 alt={img.prompt ?? `image ${img.id}`}
                 loading="lazy"
-                className="w-full aspect-[4/3] object-cover bg-slate-950"
+                className="w-full aspect-[4/3] object-cover bg-bg"
               />
               <div className="p-2 space-y-1.5">
                 <div className="flex items-center gap-1 flex-wrap text-xs">
-                  <span className="text-slate-500">#{img.id}</span>
+                  <span className="text-fg-subtle">#{img.id}</span>
                   {img.owner_account && (
-                    <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                    <span className="px-1.5 py-0.5 rounded bg-surface-2 text-fg-muted">
                       {img.owner_account}
                     </span>
                   )}
                   {img.source === "uploaded" && (
-                    <span className="px-1.5 py-0.5 rounded bg-sky-900/60 text-sky-200">
+                    <span className="px-1.5 py-0.5 rounded bg-info text-info-fg">
                       uploaded
                     </span>
                   )}
                   {img.used_at && (
-                    <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
+                    <span className="px-1.5 py-0.5 rounded bg-surface-2 text-fg-muted">
                       published
                     </span>
                   )}
                 </div>
-                <p className="text-[11px] text-slate-500">{mb(img.bytes_size)}</p>
+                <p className="text-[11px] text-fg-subtle">{mb(img.bytes_size)}</p>
                 <div className="flex gap-1">
                   {img.status !== "approved" && (
                     <button
                       disabled={busy}
                       onClick={() => mutate(() => api.patch(`/images/${img.id}`, { status: "approved" }))}
-                      className="flex-1 text-xs px-2 py-1 rounded bg-emerald-800 hover:bg-emerald-700 disabled:opacity-40"
+                      className="flex-1 text-xs px-2 py-1 rounded bg-ok-solid/90 hover:bg-ok-solid disabled:opacity-40"
                     >
                       Approve
                     </button>
@@ -295,7 +295,7 @@ export default function ImagesPage() {
                     <button
                       disabled={busy}
                       onClick={() => mutate(() => api.patch(`/images/${img.id}`, { status: "rejected" }))}
-                      className="flex-1 text-xs px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+                      className="flex-1 text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
                     >
                       Reject
                     </button>
@@ -304,7 +304,7 @@ export default function ImagesPage() {
                     <button
                       disabled={busy}
                       onClick={() => mutate(() => api.del(`/images/${img.id}`))}
-                      className="flex-1 text-xs px-2 py-1 rounded border border-red-900 text-red-300 hover:bg-red-950/50 disabled:opacity-40"
+                      className="flex-1 text-xs px-2 py-1 rounded border border-danger-border text-danger-fg hover:bg-danger disabled:opacity-40"
                     >
                       Delete
                     </button>

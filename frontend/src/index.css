@@ -2,11 +2,146 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root {
+/*
+ * Semantic colour tokens.
+ *
+ * Components name intent (`surface`, `fg-muted`, `danger`) rather than a shade
+ * (`slate-900`, `red-300`). Two reasons: the same meaning was previously drawn
+ * three different ways — a ghosted post used red-950/red-300/red-800 while a
+ * parked draft used amber-900/amber-200 — and hardcoded shades make a second
+ * theme a rewrite instead of a variable swap.
+ *
+ * Values are space-separated RGB channels so Tailwind's <alpha-value> works:
+ * `bg-surface/50` compiles to rgb(var(--surface) / 0.5).
+ *
+ * :root is light. .dark overrides. The class is set before first paint by the
+ * inline script in index.html, so there is no flash of the wrong theme.
+ */
+
+:root {
+  color-scheme: light;
+
+  --bg: 248 250 252;            /* slate-50  — page */
+  --surface: 255 255 255;       /* white     — cards, dialogs */
+  --surface-2: 241 245 249;     /* slate-100 — inputs, hover, raised */
+  --border: 226 232 240;        /* slate-200 */
+  --border-strong: 203 213 225; /* slate-300 */
+
+  --fg: 15 23 42;               /* slate-900 — primary text */
+  --fg-muted: 71 85 105;        /* slate-600 — secondary, 7.4:1 on surface */
+  --fg-subtle: 100 116 139;     /* slate-500 — tertiary, 4.8:1 on surface */
+
+  --primary: 2 132 199;         /* sky-600 */
+  --primary-hover: 3 105 161;   /* sky-700 */
+  --primary-fg: 255 255 255;
+
+  --accent: 124 58 237;         /* violet-600 */
+  --accent-hover: 109 40 217;   /* violet-700 */
+  --accent-fg: 255 255 255;
+  --accent-soft: 243 232 255;   /* violet-100 */
+  --accent-soft-fg: 91 33 182;  /* violet-800 */
+
+  /* Informational chips — "unreviewed", external links. */
+  --info: 240 249 255;          /* sky-50 */
+  --info-fg: 3 105 161;         /* sky-700 */
+  --info-border: 125 211 252;   /* sky-300 */
+
+  --ok: 236 253 245;            /* emerald-50 */
+  --ok-fg: 4 120 87;            /* emerald-700 */
+  --ok-border: 110 231 183;     /* emerald-300 */
+  --ok-solid: 5 150 105;        /* emerald-600 */
+
+  --warn: 255 251 235;          /* amber-50 */
+  --warn-fg: 146 64 14;         /* amber-800 */
+  --warn-border: 252 211 77;    /* amber-300 */
+  --warn-solid: 217 119 6;      /* amber-600 */
+
+  --danger: 254 242 242;        /* red-50 */
+  --danger-fg: 185 28 28;       /* red-700 */
+  --danger-border: 252 165 165; /* red-300 */
+  --danger-solid: 220 38 38;    /* red-600 */
+
+  /* Text that sits on any *-solid fill, in both themes. */
+  --on-solid: 255 255 255;
+
+  --ring: 2 132 199;            /* sky-600 */
+}
+
+.dark {
+  color-scheme: dark;
+
+  --bg: 2 6 23;                 /* slate-950 */
+  --surface: 15 23 42;          /* slate-900 */
+  --surface-2: 30 41 59;        /* slate-800 */
+  --border: 30 41 59;           /* slate-800 */
+  --border-strong: 51 65 85;    /* slate-700 */
+
+  --fg: 241 245 249;            /* slate-100 */
+  --fg-muted: 148 163 184;      /* slate-400 */
+  /* Deliberately slate-400, not slate-500. slate-500 on slate-950 measures
+     4.25:1 — below the 4.5:1 AA floor — and it was carrying nearly all
+     secondary text: dates, cities, counts. slate-400 measures 7.9:1. */
+  --fg-subtle: 148 163 184;     /* slate-400 */
+
+  --primary: 3 105 161;         /* sky-700 */
+  --primary-hover: 2 132 199;   /* sky-600 */
+  --primary-fg: 241 245 249;
+
+  --accent: 109 40 217;         /* violet-700 */
+  --accent-hover: 124 58 237;   /* violet-600 */
+  --accent-fg: 241 245 249;
+  --accent-soft: 46 16 101;     /* violet-950 */
+  --accent-soft-fg: 221 214 254;/* violet-200 */
+
+  --info: 8 47 73;              /* sky-950 */
+  --info-fg: 186 230 253;       /* sky-200 */
+  --info-border: 7 89 133;      /* sky-800 */
+
+  --ok: 2 44 34;                /* emerald-950 */
+  --ok-fg: 110 231 183;         /* emerald-300 */
+  --ok-border: 6 95 70;         /* emerald-800 */
+  --ok-solid: 4 120 87;         /* emerald-700 */
+
+  --warn: 69 26 3;              /* amber-950 */
+  --warn-fg: 253 230 138;       /* amber-200 */
+  --warn-border: 146 64 14;     /* amber-800 */
+  --warn-solid: 180 83 9;       /* amber-700 */
+
+  --danger: 69 10 10;           /* red-950 */
+  --danger-fg: 252 165 165;     /* red-300 */
+  --danger-border: 153 27 27;   /* red-800 */
+  --danger-solid: 185 28 28;    /* red-700 */
+
+  --on-solid: 255 255 255;
+
+  --ring: 56 189 248;           /* sky-400 — needs to carry on a dark bg */
+}
+
+html,
+body,
+#root {
   height: 100%;
 }
 
 body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-feature-settings: "cv02", "cv03", "cv04";
+}
+
+@layer base {
+  /*
+   * One focus ring for every interactive element. There was no focus styling
+   * at all before, so keyboard users had no idea where they were. :focus-visible
+   * keeps it off mouse clicks.
+   */
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid rgb(var(--ring));
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  /* Long ad bodies and keyword tails must never widen the page. */
+  :where(p, pre, td, h1, h2, h3) {
+    overflow-wrap: anywhere;
+  }
 }
