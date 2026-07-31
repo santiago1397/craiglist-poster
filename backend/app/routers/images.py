@@ -203,6 +203,46 @@ def delete_image(image_id: int) -> None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
 
 
+@router.get("/{image_id}/thumb")
+def thumb(image_id: int, request: Request) -> FileResponse:
+    """A downscaled copy, for grids.
+
+    The Images page renders up to 120 tiles a few hundred pixels wide. Serving
+    `/raw` into those meant ~94MB of full-resolution JPEG per page view, since
+    the stored files average 772KB. This is the same picture at 480px, around
+    25KB, rendered once and cached on the volume.
+
+    Falls back to the original if Pillow cannot read the file — a grid with
+    heavy images beats a grid with broken ones.
+    """
+    if not _authorised(request):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    with conn() as c:
+        row = c.execute(
+            "SELECT storage_path, mime, sha256 FROM images WHERE id = %s", (image_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
+
+    path = storage.get_or_make_thumb(row["storage_path"])
+    media_type = "image/jpeg"
+    if path is None:
+        path = storage.open_path(row["storage_path"])
+        media_type = row["mime"]
+        if not path.exists():
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="Image row exists but its bytes are missing from storage",
+            )
+    return FileResponse(
+        path,
+        media_type=media_type,
+        # Derived from content-addressed bytes, so this can never go stale.
+        headers={"Cache-Control": "public, max-age=31536000, immutable",
+                 "ETag": f"{row['sha256']}-t480"},
+    )
+
+
 @router.get("/{image_id}/raw")
 def raw(image_id: int, request: Request) -> FileResponse:
     """Serve the bytes. Readable by the dashboard (cookie) or the poster

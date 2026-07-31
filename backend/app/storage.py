@@ -64,18 +64,88 @@ def open_path(rel: str) -> Path:
 
 
 def delete(rel: str) -> bool:
+    ok = False
     try:
         open_path(rel).unlink()
-        return True
+        ok = True
     except (FileNotFoundError, ValueError):
-        return False
+        pass
+    # Derived files are worthless without their source, and leaving them behind
+    # would keep bytes on the volume that nothing can ever serve again.
+    for width in THUMB_WIDTHS:
+        try:
+            thumb_path(rel, width).unlink()
+        except (FileNotFoundError, ValueError):
+            pass
+    return ok
+
+
+# ---------------------------------------------------------------------------
+# Thumbnails
+#
+# `/raw` serves the stored file, which is what Craigslist needs and what the
+# desktop downloads. Putting that same file behind a 5-column grid meant a
+# 120-image page pulled ~94MB of full-resolution JPEG to render tiles a couple
+# of hundred pixels wide. These are derived, cached next to the original, and
+# rebuilt on demand — deleting the whole `thumbs/` tree is always safe.
+# ---------------------------------------------------------------------------
+
+THUMB_WIDTHS = (480,)
+THUMB_QUALITY = 78
+
+
+def thumb_path(rel: str, width: int) -> Path:
+    """Where the derived thumbnail for a stored blob lives."""
+    base = root().resolve()
+    stem = Path(rel).stem
+    p = (base / "thumbs" / f"{width}" / rel.split("/")[0] / f"{stem}.jpg").resolve()
+    if not p.is_relative_to(base):
+        raise ValueError(f"path escapes the storage root: {rel!r}")
+    return p
+
+
+def get_or_make_thumb(rel: str, width: int = 480) -> Path | None:
+    """Return a cached thumbnail, rendering it once if it does not exist.
+
+    Returns None when the source bytes are missing, so the caller can answer
+    410 rather than 500. Any Pillow failure also returns None — a thumbnail is
+    an optimisation, and falling back to the original beats a broken grid.
+    """
+    src = open_path(rel)
+    if not src.exists():
+        return None
+    dest = thumb_path(rel, width)
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+
+    from PIL import Image
+
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            im.thumbnail((width, width * 4), Image.LANCZOS)
+            tmp = dest.with_suffix(".part")
+            im.save(tmp, format="JPEG", quality=THUMB_QUALITY, optimize=True)
+            tmp.replace(dest)
+    except Exception:
+        return None
+    return dest
 
 
 def usage() -> dict:
-    """Total bytes and file count, for the dashboard."""
+    """Total bytes and file count, for the dashboard.
+
+    Thumbnails are excluded: they are a rebuildable cache, and counting them
+    would make the stack look like it is using storage it does not need.
+    """
     total = count = 0
+    thumbs = (root() / "thumbs").resolve()
     for p in root().rglob("*"):
-        if p.is_file() and not p.name.endswith(".part"):
-            total += p.stat().st_size
-            count += 1
+        if not p.is_file() or p.name.endswith(".part"):
+            continue
+        if p.resolve().is_relative_to(thumbs):
+            continue
+        total += p.stat().st_size
+        count += 1
     return {"files": count, "bytes": total}

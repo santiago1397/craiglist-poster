@@ -80,6 +80,9 @@ const EMPTY_COPY: Record<Bucket, { cover: string; photo: string }> = {
 
 const BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
+// How many tiles to fetch at a time.
+const PAGE = 40;
+
 function mb(bytes: number): string {
   return bytes > 1024 * 1024
     ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -94,9 +97,16 @@ export default function ImagesPage() {
   const [note, setNote] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Load a page at a time rather than the whole bucket. Even at ~25KB a
+  // thumbnail, 120 tiles is 120 requests and 120 decodes before the page
+  // settles; 40 fills the screen and the rest arrives when asked for.
+  const [limit, setLimit] = useState(PAGE);
   const imagesQ = useQuery({
-    queryKey: ["images", kind, bucket],
-    queryFn: () => api.get<{ images: Image[] }>("/images", { kind, bucket, limit: 120 }),
+    queryKey: ["images", kind, bucket, limit],
+    queryFn: () => api.get<{ images: Image[]; total: number }>("/images", { kind, bucket, limit }),
+    // Keep the current tiles on screen while a longer page is fetched, so
+    // "Load more" extends the grid instead of blanking it.
+    placeholderData: (prev) => prev,
   });
   const statsQ = useQuery({
     queryKey: ["images", "stats"],
@@ -104,6 +114,7 @@ export default function ImagesPage() {
   });
 
   const images = imagesQ.data?.images ?? [];
+  const total = imagesQ.data?.total ?? 0;
   const stats = statsQ.data ?? null;
   const health = stats?.stack_health ?? null;
   const counts = stats?.buckets?.[kind] ?? null;
@@ -201,7 +212,9 @@ export default function ImagesPage() {
             {(["cover", "photo"] as Kind[]).map((k) => (
               <button
                 key={k}
-                onClick={() => setKind(k)}
+                // Reset the page whenever the view changes, or switching tabs
+                // would fetch however many tiles the previous one had grown to.
+                onClick={() => { setKind(k); setLimit(PAGE); }}
                 className={cn(
                   "px-3 py-1 text-sm capitalize",
                   kind === k ? "bg-accent text-accent-fg" : "text-fg-muted hover:bg-surface-2",
@@ -320,7 +333,7 @@ export default function ImagesPage() {
         {BUCKETS.map((b) => (
           <button
             key={b.key}
-            onClick={() => setBucket(b.key)}
+            onClick={() => { setBucket(b.key); setLimit(PAGE); }}
             className={cn(
               "px-3 py-1.5 rounded text-sm",
               bucket === b.key ? "bg-surface-2 text-fg" : "text-fg-muted hover:bg-surface-2/60",
@@ -356,14 +369,17 @@ export default function ImagesPage() {
               key={img.id}
               className="rounded border border-border bg-surface/40 overflow-hidden"
             >
-              {/* /raw is the full file; a 120-image grid is ~40MB if it all
-                  loads. decoding="async" keeps decode off the main thread and
-                  the explicit box stops layout shift as each one arrives. */}
+              {/* /thumb, not /raw. The stored files average 772KB, so a full
+                  bucket of originals was ~94MB to render tiles this size —
+                  loading="lazy" only defers them, it does not shrink them.
+                  Explicit dimensions stop layout shift as each one arrives. */}
               <img
-                src={`${BASE.replace(/\/+$/, "")}/images/${img.id}/raw`}
+                src={`${BASE.replace(/\/+$/, "")}/images/${img.id}/thumb`}
                 alt={img.prompt ?? `Image ${img.id}`}
                 loading="lazy"
                 decoding="async"
+                width={480}
+                height={360}
                 className="w-full aspect-[4/3] object-cover bg-surface-2"
               />
               <div className="p-2 space-y-1.5">
@@ -442,6 +458,23 @@ export default function ImagesPage() {
             </li>
           ))}
         </ul>
+      )}
+
+      {images.length > 0 && (
+        <div className="flex items-center justify-center gap-3 pt-1">
+          <span className="text-xs text-fg-subtle">
+            Showing {images.length} of {total}
+          </span>
+          {images.length < total && (
+            <button
+              disabled={imagesQ.isFetching}
+              onClick={() => setLimit((n) => n + PAGE)}
+              className="text-sm px-3 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
+            >
+              {imagesQ.isFetching ? "Loading…" : `Load ${Math.min(PAGE, total - images.length)} more`}
+            </button>
+          )}
+        </div>
       )}
 
       <ConfirmDialog

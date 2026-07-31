@@ -1208,13 +1208,12 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
         <ul className="flex gap-2 flex-wrap">
           {attached.map((a) => (
             <li key={a.id} className="relative">
-              {/* There is no thumbnail route — /raw serves the full file, and
-                  generated images run 300-550KB. A draft at the 24-slot limit
-                  was therefore ~10MB of full-resolution downloads the moment
-                  you expanded its row, on whatever connection you were on.
-                  Lazy + async decode means only what you actually scroll to. */}
+              {/* /thumb. Stored files average ~772KB, so a draft at the
+                  24-slot limit was ~18MB of full-resolution downloads the
+                  moment you expanded its row, on whatever connection you were
+                  on. Lazy + async decode means only what you scroll to. */}
               <img
-                src={`${IMG_BASE}/images/${a.id}/raw`}
+                src={`${IMG_BASE}/images/${a.id}/thumb`}
                 alt={a.slot === 1 ? "Cover image (Craigslist thumbnail)" : `Image in slot ${a.slot}`}
                 loading="lazy"
                 decoding="async"
@@ -1301,7 +1300,7 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
                       }
                     >
                       <img
-                        src={`${IMG_BASE}/images/${p.id}/raw`}
+                        src={`${IMG_BASE}/images/${p.id}/thumb`}
                         alt={`Image ${p.id}${held !== null ? `, reserved` : ""}`}
                         loading="lazy"
                         decoding="async"
@@ -1409,9 +1408,13 @@ function PreviewDialog(props: { draft: Draft; onClose: () => void }) {
                 <div className="flex gap-1 mt-1 flex-wrap">
                   {images.map((img, i) => (
                     <button key={img.id} onClick={() => setActive(i)}>
+                      {/* Filmstrip only — the main image above stays /raw,
+                          since this modal is where you check what publishes. */}
                       <img
-                        src={`${IMG_BASE}/images/${img.id}/raw`}
+                        src={`${IMG_BASE}/images/${img.id}/thumb`}
                         alt=""
+                        loading="lazy"
+                        decoding="async"
                         className={cn(
                           "h-12 w-16 object-cover border-2",
                           i === active ? "border-blue-600" : "border-transparent",
