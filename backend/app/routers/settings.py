@@ -29,6 +29,16 @@ class GuardrailUpdate(BaseModel):
     queue_depth_floor: int | None = Field(default=None, ge=0, le=500)
     queue_depth_target: int | None = Field(default=None, ge=1, le=1000)
 
+    # Editing (DESIGN_EDITS.md decision 30). Bounds here are a first line of
+    # defence; the desktop clamps again to ceilings compiled into config.py.
+    edits_enabled: bool | None = None
+    min_hours_between_edits_same_post: int | None = Field(default=None, ge=1, le=720)
+    max_edits_per_account_per_day: int | None = Field(default=None, ge=0, le=20)
+    max_edits_per_post_lifetime: int | None = Field(default=None, ge=1, le=50)
+    edit_window_start_hour: int | None = Field(default=None, ge=0, le=23)
+    edit_window_end_hour: int | None = Field(default=None, ge=1, le=24)
+    edits_paused_reason: str | None = Field(default=None, max_length=200)
+
 
 class TokenCreate(BaseModel):
     machine: str
@@ -91,6 +101,11 @@ def put_guardrails(body: GuardrailUpdate) -> dict:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="queue_depth_floor cannot exceed queue_depth_target",
+            )
+        if merged["edit_window_start_hour"] >= merged["edit_window_end_hour"]:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="edit_window_start_hour must be before edit_window_end_hour",
             )
         return queue_svc.update_guardrails(c, patch)
 

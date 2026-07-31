@@ -18,9 +18,12 @@ from ..schemas.events import (
     GhostCheck,
     PhotoInventory,
     PostAttempt,
+    PostContent,
+    PostEditAttempt,
     SchedulerConfig,
     SnapshotTaken,
 )
+from . import edits as edits_svc
 from . import queue as queue_svc
 
 
@@ -49,6 +52,10 @@ def ingest_events(conn: psycopg.Connection, events: list[AnyEvent]) -> dict:
             inserted = _insert_scheduler_config(conn, ev)
         elif isinstance(ev, FlowError):
             inserted = _insert_flow_error(conn, ev)
+        elif isinstance(ev, PostContent):
+            inserted = _insert_post_content(conn, ev)
+        elif isinstance(ev, PostEditAttempt):
+            inserted = _insert_post_edit_attempt(conn, ev)
         else:  # pragma: no cover — pydantic union guarantees exhaustiveness
             logger.warning(f"Unknown event_type: {et}")
             inserted = False
@@ -262,6 +269,46 @@ def _insert_flow_error(conn: psycopg.Connection, ev: FlowError) -> bool:
         ),
     )
     return _did_insert(cur)
+
+
+def _insert_post_content(conn: psycopg.Connection, ev: PostContent) -> bool:
+    """Store a hydration result (decision 23).
+
+    There is no event-log table for this one: hydration is a full overwrite of
+    the post's content columns, so the post row *is* the state. `record_content`
+    guards on the timestamp, which is what makes a replayed or out-of-order
+    delivery safe — an older read must never regress a newer one.
+    """
+    return edits_svc.record_content(conn, ev)
+
+
+def _insert_post_edit_attempt(conn: psycopg.Connection, ev: PostEditAttempt) -> bool:
+    cur = conn.execute(
+        """
+        INSERT INTO post_edit_attempts (
+            event_id, ts, machine, account, post_id, outcome, duration_seconds,
+            desired_rev, applied_rev, steps, failed_step, error_type,
+            error_message, images_live_count, images_desired_count, artifact_ids
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s::jsonb)
+        ON CONFLICT (event_id) DO NOTHING
+        """,
+        (
+            ev.event_id, ev.ts, ev.machine, ev.account, ev.post_id, ev.outcome,
+            ev.duration_seconds, ev.desired_rev, ev.applied_rev,
+            json.dumps([s.model_dump(mode="json") for s in ev.steps]),
+            ev.failed_step, ev.error_type, ev.error_message,
+            ev.images_live_count, ev.images_desired_count,
+            json.dumps(ev.artifact_ids),
+        ),
+    )
+    inserted = _did_insert(cur)
+
+    # Advance the desired state only on first receipt. A replayed failure must
+    # not park an edit that has since been applied or re-queued by hand.
+    if inserted:
+        edits_svc.apply_attempt(conn, ev)
+    return inserted
 
 
 def _insert_scheduler_config(conn: psycopg.Connection, ev: SchedulerConfig) -> bool:

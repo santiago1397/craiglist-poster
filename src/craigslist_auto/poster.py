@@ -63,31 +63,53 @@ TIMEZONE_ID = "America/New_York"  # South Florida
 
 
 @contextmanager
-def launch_account(account: Account, headless: bool = False):
+def launch_account(
+    account: Account,
+    headless: bool = False,
+    *,
+    flow: str = "post",
+    lease_blocking: bool = True,
+    lease_timeout: float = 900.0,
+):
     """
     Launch a persistent context bound to this account's profile.
     Profile persists cookies, localStorage, IndexedDB → CL sees a stable browser.
+
+    Acquiring the machine-wide browser lease is part of launching, not something
+    callers opt into (DESIGN_EDITS.md decision 27). `launch_persistent_context`
+    takes an exclusive OS lock on the profile directory, so two flows starting at
+    once means a refused launch or a corrupted profile. Doing it here means a new
+    flow cannot forget.
+
+    `flow` names the holder for diagnostics; `lease_blocking=False` makes the
+    caller skip rather than queue, which is what the edit worker wants — an edit
+    can always wait for the next poll, a post cannot.
     """
+    from . import lease  # local import: keeps `config`-only importers cheap
+
     account.profile_dir.mkdir(parents=True, exist_ok=True)
     # Deterministic viewport per account so fingerprint doesn't shift between runs
     vp = VIEWPORTS[hash(account.name) % len(VIEWPORTS)]
-    with sync_playwright() as p:
-        context: BrowserContext = p.chromium.launch_persistent_context(
-            user_data_dir=str(account.profile_dir),
-            channel="chrome",  # use real Chrome (patchright recommends this)
-            headless=headless,
-            viewport=vp,
-            locale=LOCALE,
-            timezone_id=TIMEZONE_ID,
-            no_viewport=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
-        try:
-            yield context
-        finally:
-            context.close()
+    with lease.acquire(
+        flow, account=account.name, blocking=lease_blocking, timeout=lease_timeout
+    ):
+        with sync_playwright() as p:
+            context: BrowserContext = p.chromium.launch_persistent_context(
+                user_data_dir=str(account.profile_dir),
+                channel="chrome",  # use real Chrome (patchright recommends this)
+                headless=headless,
+                viewport=vp,
+                locale=LOCALE,
+                timezone_id=TIMEZONE_ID,
+                no_viewport=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            try:
+                yield context
+            finally:
+                context.close()
 
 
 def is_logged_in(page: Page) -> bool:

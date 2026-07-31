@@ -16,6 +16,7 @@ from .accounts import record_post
 from .config import ACCOUNTS, ACCOUNTS_BY_NAME, EXCEL_PATH, LOGS_DIR, clamp_guardrails
 from .ghost_check import check_all_recent
 from .poster import PosterFailure, launch_account, post_ad
+from . import artifacts as artifacts_mod
 from . import content as content_mod
 from . import queue_client
 from . import stats as stats_mod
@@ -24,6 +25,10 @@ from .events import PostAttempt
 from .stats import extract_post_id
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
+
+# How often the reporter daemon checks for edit work. Short because hydration is
+# on demand (DESIGN_EDITS decision 24) and you are watching for it in the UI.
+EDIT_POLL_SECONDS = 15
 
 
 def _setup_logging(verbose: bool = False):
@@ -151,6 +156,19 @@ def status():
         f"Outbox: {outbox['pending']} pending, {outbox['sent']} sent"
         f"{'  (reporter not configured)' if not outbox['configured'] else ''}"
     )
+
+    spooled = artifacts_mod.pending_count()
+    if spooled:
+        typer.echo(f"Artifacts: {spooled} awaiting upload")
+
+    # Whoever holds the browser explains why anything else is idle right now.
+    from .lease import current_holder
+    holder = current_holder()
+    if holder:
+        typer.echo(
+            f"Browser: in use by {holder['flow']}"
+            f"{' (' + holder['account'] + ')' if holder.get('account') else ''}"
+        )
 
     health = stats_mod.health_report()
     if health:
@@ -661,8 +679,141 @@ def reporter_daemon(
     sync_thread = threading.Thread(target=_sync_loop, name="cl-queue-sync", daemon=True)
     sync_thread.start()
 
+    def _edit_loop():
+        """Poll for edit work and do it (DESIGN_EDITS.md decision 29).
+
+        Its own thread on a ~15s beat, separate from the 120s queue sync: with
+        on-demand hydration you sit watching a spinner in the dashboard, so the
+        latency is user-visible in a way the queue prefetch never was.
+
+        The browser lease is taken non-blocking inside the worker, so a posting
+        run in progress simply makes this skip and try again.
+        """
+        from . import edit_worker
+
+        bound = [a.name for a in ACCOUNTS if a.allowed_machine == machine]
+        if not bound:
+            logger.info("edit worker idle: no accounts bound to this machine")
+            return
+        while not stop.is_set():
+            try:
+                edit_worker.run_once(machine, bound)
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning(f"edit worker raised: {e}")
+                reporter_mod.report_flow_error("edit_worker", e)
+            try:
+                artifacts_mod.flush_once()
+            except Exception as e:  # pragma: no cover
+                logger.warning(f"artifact flush raised: {e}")
+            if stop.wait(EDIT_POLL_SECONDS):
+                return
+
+    edit_thread = threading.Thread(target=_edit_loop, name="cl-edit-worker", daemon=True)
+    edit_thread.start()
+
     # Flusher runs on the main thread; blocks until stop is set.
     reporter_mod.flush_forever(stop_event=stop)
+
+
+@app.command("edit")
+def edit(
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Rehearse: open the form, diff against desired, type nothing. "
+             "Safe on live posts.",
+    ),
+    headless: bool = typer.Option(False, help="Run browser headless (NOT recommended)"),
+    reconciles: int = typer.Option(1, help="Max reconciles this pass"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Run one pass of pending edit work (hydrate + reconcile).
+
+    The reporter daemon does this every 15s on its own; this is the manual
+    handle for verifying it in production.
+
+    `--dry-run` is deliberately read-only, unlike `cl post --dry-run`:
+    Craigslist commits image operations when a file is selected, so a
+    fill-then-abandon rehearsal could strip a live posting of its images
+    (DESIGN_EDITS.md decision 36).
+    """
+    from . import edit_worker
+
+    _setup_logging(verbose=verbose)
+    machine = _machine_name()
+    bound = [a.name for a in ACCOUNTS if a.allowed_machine == machine]
+    if not bound:
+        typer.echo(f"No accounts are bound to this machine ({machine}).")
+        raise typer.Exit(1)
+
+    if dry_run:
+        typer.echo("DRY RUN — nothing will be typed or uploaded.")
+
+    summary = edit_worker.run_once(
+        machine, bound, dry_run=dry_run, headless=headless, max_reconciles=reconciles,
+    )
+    typer.echo(
+        f"hydrated={summary['hydrated']}  reconciled={summary['reconciled']}  "
+        f"skipped={summary['skipped']}  failed={summary['failed']}"
+    )
+    for r in summary["results"]:
+        detail = r.get("outcome") or ("ok" if r.get("ok") else "failed")
+        typer.echo(f"  {r['kind']:9s} {r['post_id']:12s} {detail}")
+    if not summary["results"]:
+        typer.echo("Nothing to do. Load or edit a post in the dashboard first.")
+
+    # Push evidence up now so a manual run is immediately inspectable.
+    sent = artifacts_mod.flush_once(limit=20)
+    if sent:
+        typer.echo(f"Uploaded {sent} artifact(s) to the dashboard.")
+
+
+@app.command("edit-canary")
+def edit_canary(
+    post_id: str = typer.Argument(..., help="Post id to really edit"),
+    headless: bool = typer.Option(False, help="Run browser headless"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Perform ONE real end-to-end edit against a disposable post.
+
+    Read-only rehearsal proves the plan; this proves the write actually lands
+    (DESIGN_EDITS.md decision 37). Refuses any post not listed in the
+    CL_CANARY_POSTS environment variable, so it cannot be aimed at a live
+    earning posting by a typo.
+    """
+    from . import edit_worker
+
+    _setup_logging(verbose=verbose)
+    machine = _machine_name()
+    allowlist = [
+        p.strip() for p in os.environ.get("CL_CANARY_POSTS", "").split(",") if p.strip()
+    ]
+    if not allowlist:
+        typer.echo(
+            "CL_CANARY_POSTS is not set. Set it to a comma-separated list of "
+            "post ids you are willing to have really edited."
+        )
+        raise typer.Exit(2)
+
+    typer.echo(f"CANARY — really editing post {post_id}. This writes to Craigslist.")
+    try:
+        result = edit_worker.run_canary(
+            machine, post_id, allowlist=allowlist, headless=headless
+        )
+    except (ValueError, RuntimeError) as e:
+        typer.echo(f"Refused: {e}")
+        raise typer.Exit(2)
+
+    typer.echo(f"Outcome: {result['outcome']}")
+    for s in result.get("steps", []):
+        mark = "ok " if s["ok"] else "FAIL"
+        secs = f"{s['duration_seconds']:.1f}s" if s.get("duration_seconds") else "-"
+        typer.echo(f"  [{mark}] {s['name']:20s} {secs:>7s}  {s.get('note') or ''}")
+    if result.get("error_message"):
+        typer.echo(f"Error at {result.get('failed_step')}: {result['error_message']}")
+    if result["outcome"] == "degraded_live":
+        typer.echo("")
+        typer.echo("!! THIS POST IS LIVE AND DEGRADED. Check the dashboard now.")
+        raise typer.Exit(3)
 
 
 @app.command("photo-inventory")

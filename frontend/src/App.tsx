@@ -6,6 +6,7 @@ import DashboardPage from "./pages/DashboardPage";
 import PostsPage from "./pages/PostsPage";
 import PostDetailPage from "./pages/PostDetailPage";
 import ReviewPage from "./pages/ReviewPage";
+import EditsPage from "./pages/EditsPage";
 import ImagesPage from "./pages/ImagesPage";
 import PromptsPage from "./pages/PromptsPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -37,6 +38,14 @@ export default function App() {
             element={
               <Protected>
                 <ReviewPage />
+              </Protected>
+            }
+          />
+          <Route
+            path="/edits"
+            element={
+              <Protected>
+                <EditsPage />
               </Protected>
             }
           />

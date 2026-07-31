@@ -131,8 +131,49 @@ def fetch_draft_images(draft: dict) -> list[Path]:
     return out
 
 
+def fetch_post_images(desired: dict) -> list[Path]:
+    """Download the desired image set for a claimed edit, in slot order.
+
+    Unlike `fetch_draft_images`, a missing image is fatal to the caller rather
+    than skippable: the reconcile replaces the live image set wholesale
+    (DESIGN_EDITS decision 33), so publishing a partial set would silently
+    delete images from a live posting.
+    """
+    out: list[Path] = []
+    for img in sorted(desired.get("images") or [], key=lambda i: i["slot"]):
+        out.append(fetch_image(img["id"], img["sha256"], img.get("mime", "image/jpeg")))
+    return out
+
+
 def eligibility(accounts: list[str]) -> dict:
     return _request("GET", "/eligibility", params={"accounts": ",".join(accounts)})
+
+
+# ---------------------------------------------------------------------------
+# Post editing (DESIGN_EDITS.md)
+# ---------------------------------------------------------------------------
+
+def edits_pending(accounts: list[str], limit: int = 10) -> dict:
+    """Hydration requests and reconcile candidates for this machine.
+
+    Polled every ~15s by the reporter daemon (decision 29).
+    """
+    return _request(
+        "GET", "/edits/pending",
+        params={"accounts": ",".join(accounts), "limit": limit},
+    )
+
+
+def claim_edit(post_id: str) -> dict | None:
+    """Atomically take one post's desired state, or None if someone beat us."""
+    data = _request("POST", "/edits/claim", json={"post_id": post_id})
+    desired = data.get("desired")
+    if desired:
+        logger.info(
+            f"claimed edit for post {desired['post_id']} "
+            f"(rev {desired['desired_rev']}, account {desired['account']})"
+        )
+    return desired
 
 
 def claim(accounts: list[str], *, outbox_pending: int = 0) -> dict | None:

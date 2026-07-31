@@ -204,6 +204,127 @@ class FlowError(_EventBase):
 
 
 # ---------------------------------------------------------------------------
+# 8. post_content — the result of hydrating a live posting's edit form
+#    (DESIGN_EDITS decision 23).
+#
+# The VPS has never stored what a post says: `posts` carries only
+# post_id/account/title/url/posted_ts. Editing requires the real current text,
+# and for the 24 postings that predate the queue there is no draft to fall back
+# on. So the desktop opens the actual CL edit form, reads it, and ships it here.
+#
+# `content_hash` is what decision 26's optimistic concurrency compares against:
+# it is recomputed at apply time and a mismatch parks the edit instead of
+# clobbering a change you never saw.
+# ---------------------------------------------------------------------------
+
+class PostImage(BaseModel):
+    """One image as it appears on the live posting, in slot order."""
+    model_config = ConfigDict(extra="forbid")
+    slot: int
+    url: str | None = None
+    # sha256 of the bytes when we sourced the image ourselves. Images already on
+    # CL when we hydrated have no local bytes, so this is None for them.
+    sha256: str | None = None
+
+
+class PostContent(_EventBase):
+    event_type: Literal["post_content"] = "post_content"
+    machine: str
+    account: str
+    post_id: str
+
+    # None means hydration failed; error_* carries why. A failed hydration is
+    # still reported so the dashboard can stop showing a spinner forever.
+    ok: bool = True
+    error_type: str | None = None
+    error_message: str | None = None
+
+    title: str | None = None
+    body: str | None = None
+    county: str | None = None
+    city: str | None = None
+    service_offered: str | None = None
+    postal_code: str | None = None
+    license_number: str | None = None
+    phone_number: str | None = None
+
+    images: list[PostImage] = Field(default_factory=list)
+
+    # Stable hash over the normalised editable fields — see editor.content_hash.
+    content_hash: str | None = None
+    # Whether CL still shows this posting as editable at all.
+    editable: bool = True
+    live_status: str | None = None       # "active" | "expired" | "deleted" | ...
+
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# 9. post_edit_attempt — every reconcile of a live posting, success or failure
+#    (DESIGN_EDITS decision 35).
+#
+# Mirrors PostAttempt's shape deliberately: one structured row per attempt with
+# a `failed_step` that drives routing. Adds `steps` because an edit acts on
+# something already live, so "how far did it get" is the difference between a
+# harmless retry and a post sitting there with no images (decision 32).
+# ---------------------------------------------------------------------------
+
+EditOutcome = Literal[
+    "applied",
+    "no_change",              # desired already matched live; nothing typed
+    "dry_run",
+    "skipped_not_eligible",
+    "skipped_lease_held",     # another browser flow had the profile
+    "failed_stale",           # decision 26 — live content moved under us
+    "failed_gone",            # post expired/deleted on CL
+    "failed_login",
+    "failed_form",
+    "failed_images",
+    "failed_other",
+    "degraded_live",          # decision 32 — mutated and could not recover
+]
+
+
+class EditStep(BaseModel):
+    """One breadcrumb in the reconcile walk."""
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    ok: bool
+    duration_seconds: float | None = None
+    note: str | None = None
+
+
+class PostEditAttempt(_EventBase):
+    event_type: Literal["post_edit_attempt"] = "post_edit_attempt"
+    machine: str
+    account: str
+    post_id: str
+
+    outcome: EditOutcome
+    duration_seconds: float | None = None
+
+    # Which revision of the desired state this attempt was reconciling. Ingest
+    # only advances live_rev when the attempt actually applied, so a stale or
+    # failed attempt never marks the post as up to date.
+    desired_rev: int | None = None
+    applied_rev: int | None = None
+
+    # Full-flow breadcrumb: every step entered, whether it completed, how long.
+    steps: list[EditStep] = Field(default_factory=list)
+
+    failed_step: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
+
+    # Set when outcome == "degraded_live": what state the live post was left in.
+    images_live_count: int | None = None
+    images_desired_count: int | None = None
+
+    # Screenshots / HTML dumps spooled for upload (decision 35).
+    artifact_ids: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
 # Envelope + discriminated union
 # ---------------------------------------------------------------------------
 
@@ -216,6 +337,8 @@ AnyEvent = Annotated[
         GhostCheck,
         SchedulerConfig,
         FlowError,
+        PostContent,
+        PostEditAttempt,
     ],
     Field(discriminator="event_type"),
 ]
@@ -244,6 +367,11 @@ __all__ = [
     "GhostCheck",
     "SchedulerConfig",
     "FlowError",
+    "PostContent",
+    "PostEditAttempt",
+    "PostImage",
+    "EditStep",
     "StatsSyncHealth",
     "PostOutcome",
+    "EditOutcome",
 ]

@@ -70,6 +70,14 @@ def update_guardrails(conn: psycopg.Connection, values: dict) -> dict:
         "post_weekdays_only",
         "queue_depth_floor",
         "queue_depth_target",
+        # Editing (DESIGN_EDITS.md decision 30)
+        "edits_enabled",
+        "min_hours_between_edits_same_post",
+        "max_edits_per_account_per_day",
+        "max_edits_per_post_lifetime",
+        "edit_window_start_hour",
+        "edit_window_end_hour",
+        "edits_paused_reason",
     }
     patch = {k: v for k, v in values.items() if k in allowed and v is not None}
     if not patch:
