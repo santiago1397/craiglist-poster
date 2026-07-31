@@ -8,6 +8,7 @@ import PostDetailPage from "./pages/PostDetailPage";
 import ReviewPage from "./pages/ReviewPage";
 import ImagesPage from "./pages/ImagesPage";
 import PromptsPage from "./pages/PromptsPage";
+import SettingsPage from "./pages/SettingsPage";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -68,6 +69,14 @@ export default function App() {
             element={
               <Protected>
                 <PostDetailPage />
+              </Protected>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <Protected>
+                <SettingsPage />
               </Protected>
             }
           />

@@ -18,6 +18,7 @@ import {
   Monitor,
   Moon,
   ScrollText,
+  SlidersHorizontal,
   Sparkles,
   Sun,
   X,
@@ -33,6 +34,7 @@ const NAV = [
   { to: "/images", label: "Images", Icon: ImagesIcon },
   { to: "/prompts", label: "Prompts", Icon: Sparkles },
   { to: "/posts", label: "Posts", Icon: ScrollText },
+  { to: "/settings", label: "Settings", Icon: SlidersHorizontal },
 ];
 
 function isActive(pathname: string, to: string): boolean {
