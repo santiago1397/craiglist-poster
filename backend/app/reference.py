@@ -84,7 +84,9 @@ def subarea_supported(county: str) -> bool:
     return any(s in c for s in _ROUTABLE_SUBSTRINGS)
 
 
-# All three rotate across the workbook, roughly evenly.
+# Seeds for migration 0013 and the fallback when the table cannot be read. The
+# live list is `contact_numbers`, managed under Settings — a phone number
+# changes when a campaign changes, which is no reason to redeploy.
 PHONE_NUMBERS = ["(954) 634-7370", "(954) 634-7420", "(954) 634-7360"]
 
 # Constant across all 100 rows.
@@ -92,8 +94,23 @@ LICENSE_NUMBER = "CCC1334317"
 SERVICE_OFFERED = "skilled trade services"
 
 
-def as_payload() -> dict:
-    """Shape the composer consumes."""
+def as_payload(conn=None) -> dict:
+    """Shape the composer consumes.
+
+    Locations stay in code — they constrain the composer to counties the poster
+    can actually route, and a wrong one silently files the ad under the wrong
+    subarea. Phone numbers do not have that property, so they come from the
+    database when a connection is available.
+    """
+    phones = list(PHONE_NUMBERS)
+    if conn is not None:
+        from .services import contacts
+
+        active = contacts.active_numbers(conn)
+        # An empty list means every number was retired, which is a real state
+        # and must not silently resurrect the compiled-in ones.
+        phones = active
+
     return {
         "counties": [
             {
@@ -103,7 +120,7 @@ def as_payload() -> dict:
             }
             for county, cities in LOCATIONS.items()
         ],
-        "phone_numbers": PHONE_NUMBERS,
+        "phone_numbers": phones,
         "license_number": LICENSE_NUMBER,
         "service_offered": SERVICE_OFFERED,
     }
