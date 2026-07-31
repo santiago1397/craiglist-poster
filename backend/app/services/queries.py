@@ -160,8 +160,18 @@ _BASE_CTES = """
     active_life AS (
         SELECT post_id, MAX(snapshot_date) AS last_active_date
         FROM snapshots
-        WHERE status = 'Active'
+        WHERE lower(status) = 'active'
         GROUP BY post_id
+    ),
+    -- When each account's active tab was last scraped successfully. This is
+    -- what makes "still live" answerable: the sync only ever writes rows for
+    -- posts it *saw*, so a post whose newest snapshot predates its account's
+    -- newest sync was absent from the tab by then — it ended.
+    account_sync AS (
+        SELECT p.account, MAX(s.snapshot_date) AS last_sync_date
+        FROM snapshots s
+        JOIN posts p ON p.post_id = s.post_id
+        GROUP BY p.account
     ),
     latest_ghost AS (
         SELECT DISTINCT ON (post_id) post_id, ghosted, ts AS ghost_ts
@@ -175,6 +185,7 @@ _BASE_CTES = """
             p.title,
             p.url,
             p.posted_ts,
+            p.source,
             s.snapshot_date,
             s.status,
             s.impressions,
@@ -185,6 +196,20 @@ _BASE_CTES = """
             s.expires_in_days,
             g.ghosted,
             g.ghost_ts,
+            asy.last_sync_date,
+            (CURRENT_DATE - asy.last_sync_date) AS sync_age_days,
+            -- Derived, not stored: 'live' | 'ended' | 'unknown'.
+            --
+            -- Craigslist's own status string is matched case-insensitively —
+            -- ingest stores it verbatim and it has arrived as both 'Active'
+            -- and 'active', so an equality test silently classified live posts
+            -- as dead depending on when they were scraped.
+            CASE
+                WHEN s.snapshot_date IS NULL THEN 'unknown'
+                WHEN lower(s.status) <> 'active' THEN 'ended'
+                WHEN s.snapshot_date < asy.last_sync_date THEN 'ended'
+                ELSE 'live'
+            END AS liveness,
             GREATEST(1,
                 COALESCE(al.last_active_date, s.snapshot_date, CURRENT_DATE)
                 - p.posted_ts::date
@@ -192,6 +217,7 @@ _BASE_CTES = """
         FROM posts p
         LEFT JOIN latest_snapshot s ON s.post_id = p.post_id
         LEFT JOIN active_life al ON al.post_id = p.post_id
+        LEFT JOIN account_sync asy ON asy.account = p.account
         LEFT JOIN latest_ghost g ON g.post_id = p.post_id
     ),
     base_rated AS (
@@ -202,6 +228,11 @@ _BASE_CTES = """
         FROM base
     )
 """
+
+# How many days a sync can lag before "live" stops meaning anything. The
+# scrape runs daily at 06:00, so two days covers one missed run plus slack;
+# past that the page says "as of <date>" instead of claiming a post is up.
+STALE_SYNC_DAYS = 2
 
 
 def _build_where(
@@ -235,10 +266,16 @@ def _build_where(
         params.append(f"%{search}%")
         params.append(f"%{search}%")
 
+    # Filters on the derived `liveness`, not on Craigslist's raw status string.
+    # The old `status = 'Active'` was case-sensitive against a column ingest
+    # stores verbatim, so "Active" matched nothing and "Inactive" matched every
+    # row — the two filters were exactly backwards from what they claimed.
     if status_filter == "active":
-        where.append("status = 'Active'")
+        where.append("liveness = 'live'")
     elif status_filter == "inactive":
-        where.append("status IS DISTINCT FROM 'Active'")
+        where.append("liveness = 'ended'")
+    elif status_filter == "unknown":
+        where.append("liveness = 'unknown'")
 
     if ghost_filter == "visible":
         where.append("ghosted = FALSE")
@@ -298,7 +335,69 @@ def posts_page(
         [*params, limit, offset],
     ).fetchall()
 
-    return {"total": total, "limit": limit, "offset": offset, "items": list(rows)}
+    # Counts ignore the liveness filter itself, so the tallies stay put while
+    # you click between them instead of collapsing to the one you selected.
+    count_where_sql, count_params = _build_where(
+        account=account,
+        status_filter=None,
+        ghost_filter=ghost_filter,
+        since=since,
+        search=search,
+        exclude_young_posts=exclude_young,
+    )
+    tallies = conn.execute(
+        f"""
+        {_BASE_CTES}
+        SELECT liveness, COUNT(*) AS n FROM base_rated {count_where_sql}
+        GROUP BY liveness
+        """,
+        count_params,
+    ).fetchall()
+
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": list(rows),
+        "counts": {r["liveness"]: r["n"] for r in tallies},
+        "sync": sync_freshness(conn, account=account),
+    }
+
+
+def sync_freshness(conn: psycopg.Connection, *, account: str | None = None) -> dict:
+    """When each account's active tab was last scraped, and whether that is recent.
+
+    Without this the Posts page cannot tell "this post is up" from "nobody has
+    checked since the 5th". Both render as a green badge otherwise, and the
+    second one is a lie that gets more convincing the longer the scrape stays
+    broken.
+    """
+    rows = conn.execute(
+        """
+        SELECT p.account,
+               MAX(s.snapshot_date) AS last_sync_date,
+               (CURRENT_DATE - MAX(s.snapshot_date)) AS age_days
+        FROM snapshots s
+        JOIN posts p ON p.post_id = s.post_id
+        GROUP BY p.account
+        ORDER BY p.account
+        """
+    ).fetchall()
+    accounts = [
+        {
+            "account": r["account"],
+            "last_sync_date": r["last_sync_date"],
+            "age_days": r["age_days"],
+            "stale": (r["age_days"] or 0) > STALE_SYNC_DAYS,
+        }
+        for r in rows
+        if account is None or r["account"] == account
+    ]
+    return {
+        "accounts": accounts,
+        "stale": any(a["stale"] for a in accounts) if accounts else True,
+        "stale_after_days": STALE_SYNC_DAYS,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +406,7 @@ def posts_page(
 
 def post_detail(conn: psycopg.Connection, post_id: str) -> dict | None:
     post = conn.execute(
-        "SELECT * FROM posts WHERE post_id = %s",
+        f"{_BASE_CTES} SELECT * FROM base_rated WHERE post_id = %s",
         (post_id,),
     ).fetchone()
     if not post:
@@ -335,4 +434,9 @@ def post_detail(conn: psycopg.Connection, post_id: str) -> dict | None:
         (post_id,),
     ).fetchall()
 
-    return {"post": post, "snapshots": list(snapshots), "ghost_history": list(ghost_history)}
+    return {
+        "post": post,
+        "snapshots": list(snapshots),
+        "ghost_history": list(ghost_history),
+        "sync": sync_freshness(conn, account=post["account"]),
+    }

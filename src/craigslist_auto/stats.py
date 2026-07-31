@@ -426,8 +426,18 @@ def _upsert_snapshots(conn: sqlite3.Connection, account: Account, rows: list[dic
         )
 
 
-def _freeze_missing_posts(conn: sqlite3.Connection, account: Account, seen_ids: set[str], snapshot_date: str) -> int:
-    """Posts that were active yesterday but not today → mark gone_from_active."""
+def _freeze_missing_posts(
+    conn: sqlite3.Connection, account: Account, seen_ids: set[str], snapshot_date: str
+) -> list[dict]:
+    """Posts that were active yesterday but not today → mark gone_from_active.
+
+    Returns the frozen rows in the same shape `_scrape_current_page` produces,
+    so the caller can ship them to the dashboard alongside the live ones. They
+    used to be written to local sqlite and counted, and that was all: the only
+    record that a post had ended lived on this machine, and the VPS went on
+    showing its last 'Active' snapshot indefinitely. An ad that expired weeks
+    ago is not distinguishable from one still earning unless this leaves here.
+    """
     # Yesterday's active posts for this account
     yesterday = (date.fromisoformat(snapshot_date) - timedelta(days=1)).isoformat()
     rows = conn.execute(
@@ -443,7 +453,7 @@ def _freeze_missing_posts(conn: sqlite3.Connection, account: Account, seen_ids: 
     ).fetchall()
 
     ts_utc = _now_utc_iso()
-    frozen = 0
+    frozen: list[dict] = []
     for row in rows:
         pid = row["post_id"]
         if pid in seen_ids:
@@ -451,16 +461,19 @@ def _freeze_missing_posts(conn: sqlite3.Connection, account: Account, seen_ids: 
         # Carry forward the last known counters and mark gone.
         last = conn.execute(
             """
-            SELECT impressions, views, shares, favorites, area, category, autorepost, freshness_note
-            FROM snapshots
-            WHERE post_id = ?
-            ORDER BY snapshot_date DESC LIMIT 1
+            SELECT s.impressions, s.views, s.shares, s.favorites, s.area,
+                   s.category, s.autorepost, s.freshness_note,
+                   p.title, p.url, p.posted_ts
+            FROM snapshots s
+            JOIN posts p ON p.post_id = s.post_id
+            WHERE s.post_id = ?
+            ORDER BY s.snapshot_date DESC LIMIT 1
             """,
             (pid,),
         ).fetchone()
         if not last:
             continue
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO snapshots(
                 post_id, snapshot_date, snapshot_ts_utc, status,
@@ -475,7 +488,28 @@ def _freeze_missing_posts(conn: sqlite3.Connection, account: Account, seen_ids: 
                 last["area"], last["category"], last["autorepost"], last["freshness_note"],
             ),
         )
-        frozen += 1
+        # Only report what this run actually froze. A second sync on the same
+        # day hits the ON CONFLICT and must stay silent — emitting regardless
+        # would file a fresh event_id for an ending already reported, and the
+        # outbox would carry one duplicate per re-run.
+        if not cur.rowcount:
+            continue
+        frozen.append({
+            "post_id": pid,
+            "status": "gone_from_active",
+            "title": last["title"],
+            "url": last["url"],
+            "posted_ts": last["posted_ts"],
+            "area": last["area"],
+            "category": last["category"],
+            "autorepost": last["autorepost"],
+            "expires_in_days": None,
+            "impressions": last["impressions"],
+            "views": last["views"],
+            "shares": last["shares"],
+            "favorites": last["favorites"],
+            "freshness_note": last["freshness_note"],
+        })
     return frozen
 
 
@@ -517,10 +551,13 @@ def sync_all(headless: bool = False, only_account: str | None = None) -> dict:
                 frozen = _freeze_missing_posts(conn, account, seen, snapshot_date)
             _record_health(account.name, ok=True)
             summary["accounts"][account.name] = {
-                "ok": True, "rows": len(rows), "frozen": frozen,
+                "ok": True, "rows": len(rows), "frozen": len(frozen),
             }
-            logger.info(f"[{account.name}] committed {len(rows)} rows, froze {frozen}")
-            _emit_snapshot_events(account, rows, snapshot_date)
+            logger.info(
+                f"[{account.name}] committed {len(rows)} rows, froze {len(frozen)}"
+            )
+            # Frozen rows ship too — an ended post is a result, not an absence.
+            _emit_snapshot_events(account, rows + frozen, snapshot_date)
         except Exception as e:
             logger.exception(f"[{account.name}] DB write failed: {e}")
             _record_health(account.name, ok=False, error_type="db_error", message=repr(e))
