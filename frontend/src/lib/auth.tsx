@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { api, ApiError } from "./api";
+import { api, ApiError, setUnauthorizedHandler, withoutSessionRedirect } from "./api";
 
 type User = { email: string };
 
@@ -38,10 +38,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const login = async (email: string, password: string) => {
-    const u = await api.post<User>("/auth/login", { email, password });
-    setUser(u);
-  };
+  // A 401 from any request means the session is gone. Drop the user so the
+  // router sends us to /login instead of leaving a dead page behind.
+  useEffect(() => {
+    setUnauthorizedHandler(() => setUser(null));
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  const login = async (email: string, password: string) =>
+    // A rejected password is a 401 the form reports itself; it must not be
+    // mistaken for an expired session.
+    withoutSessionRedirect(async () => {
+      const u = await api.post<User>("/auth/login", { email, password });
+      setUser(u);
+    });
 
   const logout = async () => {
     await api.post("/auth/logout");

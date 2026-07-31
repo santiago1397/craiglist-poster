@@ -23,10 +23,16 @@ export default function LoginPage() {
     try {
       await login(email, password);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 429) {
-        setError("Too many attempts. Wait a minute and try again.");
+      // Only a 401 actually means the credentials were wrong. Reporting a 404,
+      // a 500 or an unreachable API as "Invalid credentials" sends you off
+      // retyping a correct password while the real fault is the server or the
+      // proxy in front of it.
+      if (e instanceof ApiError) {
+        if (e.status === 429) setError("Too many attempts. Wait a minute and try again.");
+        else if (e.status === 401) setError("Invalid credentials.");
+        else setError(`Could not reach the server (HTTP ${e.status}). Try again shortly.`);
       } else {
-        setError("Invalid credentials.");
+        setError("Could not reach the server. Check your connection and try again.");
       }
     } finally {
       setSubmitting(false);

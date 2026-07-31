@@ -152,7 +152,13 @@ export default function ImagesPage() {
             min={1}
             max={20}
             value={count}
-            onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+            // Number("abc") is NaN, and `NaN || 1` silently became 1 — you
+            // asked for something invalid and got a batch you did not choose.
+            onChange={(e) => {
+              const n = Number.parseInt(e.target.value, 10);
+              if (Number.isFinite(n)) setCount(Math.max(1, Math.min(20, n)));
+            }}
+            aria-label="How many images to generate (1-20)"
             className="w-16 bg-bg border border-border-strong rounded px-2 py-1 text-sm"
           />
           <select
@@ -255,11 +261,15 @@ export default function ImagesPage() {
               key={img.id}
               className="rounded border border-border bg-surface/40 overflow-hidden"
             >
+              {/* /raw is the full file; a 120-image grid is ~40MB if it all
+                  loads. decoding="async" keeps decode off the main thread and
+                  the explicit box stops layout shift as each one arrives. */}
               <img
                 src={`${BASE.replace(/\/+$/, "")}/images/${img.id}/raw`}
-                alt={img.prompt ?? `image ${img.id}`}
+                alt={img.prompt ?? `Image ${img.id}`}
                 loading="lazy"
-                className="w-full aspect-[4/3] object-cover bg-bg"
+                decoding="async"
+                className="w-full aspect-[4/3] object-cover bg-surface-2"
               />
               <div className="p-2 space-y-1.5">
                 <div className="flex items-center gap-1 flex-wrap text-xs">

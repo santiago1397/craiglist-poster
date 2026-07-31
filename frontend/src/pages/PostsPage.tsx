@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
+import { Circle, ExternalLink, EyeOff } from "lucide-react";
 import { api } from "../lib/api";
 import { formatDate, formatNumber, formatRate } from "../lib/format";
 import { cn } from "../lib/cn";
@@ -194,10 +195,13 @@ export default function PostsPage() {
                       href={r.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs text-info-fg hover:underline"
+                      className="inline-flex text-info-fg hover:underline"
+                      // "↗" alone is announced as punctuation by a screen
+                      // reader and gives no hint of where it goes.
+                      aria-label={`Open "${r.title ?? r.post_id}" on Craigslist in a new tab`}
                       title="Open on Craigslist"
                     >
-                      ↗
+                      <ExternalLink size={14} aria-hidden="true" />
                     </a>
                   )}
                 </td>
@@ -272,21 +276,28 @@ function SortHeader({
 function StatusChip({ status, ghosted }: { status: string | null; ghosted: boolean | null }) {
   if (ghosted === true) {
     return (
-      <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-danger text-danger-fg border border-danger-border">
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-danger text-danger-fg border border-danger-border">
+        <EyeOff size={12} aria-hidden="true" />
         ghosted
       </span>
     );
   }
-  const active = status === "Active";
+  // Craigslist reports "active" lowercase and event ingest stores it verbatim,
+  // so the old `status === "Active"` never matched: every live post rendered in
+  // the grey "unknown" style instead of green.
+  const active = (status ?? "").toLowerCase() === "active";
   return (
     <span
       className={cn(
-        "inline-flex items-center px-1.5 py-0.5 rounded text-xs border",
+        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border",
         active
           ? "bg-ok text-ok-fg border-ok-border"
           : "bg-surface-2 text-fg-muted border-border-strong",
       )}
     >
+      {/* An icon as well as a colour: red-vs-green alone excludes the ~8% of
+          men with red-green colour blindness. */}
+      {active ? <Circle size={12} aria-hidden="true" /> : null}
       {status || "unknown"}
     </span>
   );

@@ -19,6 +19,7 @@ generation_settings.tail_template and appended to whatever the model writes.
 from __future__ import annotations
 
 import argparse
+import html
 import re
 import sys
 import zipfile
@@ -33,14 +34,20 @@ TAIL_RE = re.compile(r"\n[ \t]*\.[ \t]*\n")
 
 
 def _unescape(s: str) -> str:
-    return (
-        s.replace("&#10;", "\n")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", '"')
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
-    )
+    """Decode every XML character reference, not just a hand-picked few.
+
+    The previous version handled `&#10;` and five named entities and nothing
+    else. The workbook writes every accented character as a numeric reference —
+    `&#225; &#233; &#237; &#241; &#243; &#250; &#191;` — so the whole Spanish
+    half of each ad was imported literally: `pr&#243;xima`, `espa&#241;ol`,
+    `Ll&#225;menos`. Those strings went into seed_ads, into every fallback
+    draft built from them, and would have published to Craigslist verbatim.
+
+    `html.unescape` covers numeric, hex and named references in one pass and
+    resolves `&amp;` last, so `&amp;#243;` stays literal rather than being
+    double-decoded.
+    """
+    return html.unescape(s)
 
 
 def _cells(row_xml: str) -> dict[str, str]:

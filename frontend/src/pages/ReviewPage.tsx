@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../lib/api";
 import { cn } from "../lib/cn";
 import { ConfirmDialog, Modal, RawModal } from "../components/Modal";
+import { formatDate, formatDateTime, formatDayLabel, formatTime } from "../lib/format";
 
 type Draft = {
   id: number;
@@ -102,12 +103,13 @@ const MAX_IMAGE_SLOTS = 24;
 
 const IMG_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
 
-function fmt(ts: string | null): string {
-  if (!ts) return "—";
-  return new Date(ts).toLocaleString(undefined, {
-    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
-  });
-}
+// Every other page renders timestamps in America/New_York with an explicit "ET"
+// suffix (lib/format). This page used to format in the browser's own timezone
+// with no label, so the same draft showed one time here and another on the
+// dashboard — and a delegate in a different timezone would be quietly misled
+// about when things post. The guardrail windows are evaluated in ET server
+// side, so ET is the only honest thing to show.
+const fmt = formatDateTime;
 
 export default function ReviewPage() {
   const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -525,7 +527,7 @@ function CreateDialog(props: {
               className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
             />
           </label>
-          <Field label="Title" value={f.title} onChange={set("title")} />
+          <TitleField value={f.title} onChange={(v) => setF({ ...f, title: v })} />
           <label className="block">
             <span className="text-xs text-fg-muted">
               Body — paste the full posting text, keyword tail included
@@ -555,6 +557,52 @@ function Field(props: {
         onChange={props.onChange}
         className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
       />
+    </label>
+  );
+}
+
+// Craigslist truncates posting titles around 70 characters. Nothing warned you,
+// so an over-long title silently lost its ending — usually the city or the
+// call to action, which is the part doing the work.
+const TITLE_LIMIT = 70;
+
+function TitleField({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const over = value.length > TITLE_LIMIT;
+  return (
+    <label className="block">
+      <span className="flex items-baseline justify-between gap-2">
+        <span className="text-xs text-fg-muted">Title</span>
+        <span className={cn("text-xs tabular-nums", over ? "text-warn-fg" : "text-fg-subtle")}>
+          {value.length}/{TITLE_LIMIT}
+        </span>
+      </span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-describedby="title-limit-hint"
+        className={cn(
+          "w-full mt-1 bg-bg border rounded px-2 py-1.5 text-sm",
+          over ? "border-warn-border" : "border-border-strong",
+        )}
+      />
+      {/* A soft warning, not a maxLength: hard-truncating a pasted title would
+          throw away characters without saying so. */}
+      <span
+        id="title-limit-hint"
+        className={cn("text-xs mt-1 block", over ? "text-warn-fg" : "sr-only")}
+      >
+        {over
+          ? `Craigslist shows about ${TITLE_LIMIT} characters — the last ${
+              value.length - TITLE_LIMIT
+            } may be cut off.`
+          : `Craigslist shows about ${TITLE_LIMIT} characters.`}
+      </span>
     </label>
   );
 }
@@ -714,9 +762,9 @@ function Calendar({ entries }: { entries: ScheduleEntry[] }) {
   const [open, setOpen] = useState(false);
   const days = new Map<string, ScheduleEntry[]>();
   for (const e of entries) {
-    const key = new Date(e.at).toLocaleDateString(undefined, {
-      weekday: "short", month: "short", day: "numeric",
-    });
+    // Group by ET day, not the viewer's — a 5pm ET fire is the next calendar
+    // day west of UTC, which would split one posting day across two rows.
+    const key = formatDayLabel(e.at);
     days.set(key, [...(days.get(key) ?? []), e]);
   }
   const shown = open ? [...days] : [...days].slice(0, 3);
@@ -728,9 +776,7 @@ function Calendar({ entries }: { entries: ScheduleEntry[] }) {
         <div>
           <span className="text-sm text-fg-muted">Projected schedule</span>
           <span className="text-xs text-fg-subtle ml-2">
-            {entries.length} drafts · clears {new Date(last.at).toLocaleDateString(undefined, {
-              month: "short", day: "numeric",
-            })}
+            {entries.length} drafts · clears {formatDate(last.at)}
           </span>
         </div>
         <button
@@ -751,10 +797,8 @@ function Calendar({ entries }: { entries: ScheduleEntry[] }) {
             <div className="flex-1 min-w-0 space-y-0.5">
               {list.map((e) => (
                 <div key={e.draft_id} className="flex gap-2 min-w-0">
-                  <span className="text-fg-subtle w-14 sm:w-16 shrink-0">
-                    {new Date(e.at).toLocaleTimeString(undefined, {
-                      hour: "numeric", minute: "2-digit",
-                    })}
+                  <span className="text-fg-subtle w-16 sm:w-20 shrink-0">
+                    {formatTime(e.at)}
                   </span>
                   <span className="text-fg-muted w-16 sm:w-20 shrink-0">{e.account}</span>
                   <span className="text-fg-muted truncate min-w-0">{e.title}</span>
@@ -967,10 +1011,19 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
         <ul className="flex gap-2 flex-wrap">
           {attached.map((a) => (
             <li key={a.id} className="relative">
+              {/* There is no thumbnail route — /raw serves the full file, and
+                  generated images run 300-550KB. A draft at the 24-slot limit
+                  was therefore ~10MB of full-resolution downloads the moment
+                  you expanded its row, on whatever connection you were on.
+                  Lazy + async decode means only what you actually scroll to. */}
               <img
                 src={`${IMG_BASE}/images/${a.id}/raw`}
-                alt={`slot ${a.slot}`}
-                className="h-20 w-28 object-cover rounded border border-border-strong"
+                alt={a.slot === 1 ? "Cover image (Craigslist thumbnail)" : `Image in slot ${a.slot}`}
+                loading="lazy"
+                decoding="async"
+                width={112}
+                height={80}
+                className="h-20 w-28 object-cover rounded border border-border-strong bg-surface-2"
               />
               <span className="absolute top-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-white">
                 {a.slot === 1 ? "cover" : a.slot}
@@ -1023,8 +1076,12 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
                   >
                     <img
                       src={`${IMG_BASE}/images/${p.id}/raw`}
-                      alt={`image ${p.id}`}
-                      className="h-16 w-24 object-cover rounded border border-border-strong hover:border-ring"
+                      alt={`Image ${p.id}${p.kind === "cover" ? ", cover" : ""}`}
+                      loading="lazy"
+                      decoding="async"
+                      width={96}
+                      height={64}
+                      className="h-16 w-24 object-cover rounded border border-border-strong bg-surface-2 hover:border-ring"
                     />
                     {p.kind === "cover" && (
                       <span className="absolute bottom-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-warn-fg">
@@ -1227,14 +1284,7 @@ function EditDialog(props: {
       }
     >
       <>
-          <label className="block">
-            <span className="text-xs text-fg-muted">Title</span>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-            />
-          </label>
+          <TitleField value={title} onChange={setTitle} />
           <label className="block">
             <span className="text-xs text-fg-muted">
               City or neighborhood — goes in Craigslist's free-text area box.

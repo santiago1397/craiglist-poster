@@ -25,6 +25,32 @@ export function formatDateTime(iso: string | null | undefined): string {
   return dtf.format(d) + " ET";
 }
 
+// Calendar helpers. The projected schedule replays the 9am/1pm/5pm task fires,
+// which the server evaluates in ET — rendering them in the viewer's timezone
+// would show times the scheduler will never fire at.
+const dtfDayLabel = new Intl.DateTimeFormat("en-US", {
+  timeZone: ET,
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+});
+
+const dtfTime = new Intl.DateTimeFormat("en-US", {
+  timeZone: ET,
+  hour: "numeric",
+  minute: "2-digit",
+});
+
+/** "Fri, Jul 31" in ET. Also the grouping key for the calendar. */
+export function formatDayLabel(iso: string): string {
+  return dtfDayLabel.format(new Date(iso));
+}
+
+/** "9:00 AM" in ET. */
+export function formatTime(iso: string): string {
+  return dtfTime.format(new Date(iso));
+}
+
 export function formatDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
