@@ -5,10 +5,12 @@
 // post whether or not they have been read (decision 22), so this page's job is
 // to make it easy to catch one before it goes rather than to hold it back.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
 import { cn } from "../lib/cn";
+import { ChevronRight } from "lucide-react";
 import { ConfirmDialog, Modal, RawModal } from "../components/Modal";
 import { formatDate, formatDateTime, formatDayLabel, formatTime } from "../lib/format";
 
@@ -114,11 +116,20 @@ const fmt = formatDateTime;
 
 export default function ReviewPage() {
   const qc = useQueryClient();
-  const [filter, setFilter] = useState<FilterKey>("needs_attention");
+
+  // The tab lives in the URL so it survives a reload and can be linked. It was
+  // component state, so refreshing always dumped you back on the default tab.
+  const [search, setSearch] = useSearchParams();
+  const urlTab = search.get("tab");
+  const filter: FilterKey =
+    FILTERS.some((f) => f.key === urlTab) ? (urlTab as FilterKey) : "needs_attention";
+  const setFilter = (k: FilterKey) =>
+    setSearch(k === "needs_attention" ? {} : { tab: k }, { replace: true });
   const [editing, setEditing] = useState<Draft | null>(null);
   const [creating, setCreating] = useState(false);
   const [previewing, setPreviewing] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState<Draft | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const params = useMemo(() => {
     switch (filter) {
@@ -175,6 +186,20 @@ export default function ReviewPage() {
       api.get<{ schedule: ScheduleEntry[] }>("/drafts/schedule", { accounts: acctKey }),
     enabled: accounts.length > 0,
   });
+
+  // Land on a tab that has work. "Needs attention" is empty whenever things
+  // are healthy — which is most of the time — so the normal landing state used
+  // to be the word "Nothing here." while 20 unreviewed drafts sat one tab over.
+  // Only runs when the URL did not ask for a specific tab, and only once.
+  const autoPicked = useRef(false);
+  useEffect(() => {
+    if (autoPicked.current || urlTab || !healthQ.data) return;
+    autoPicked.current = true;
+    if (healthQ.data.needs_attention > 0) return; // already the default
+    if (healthQ.data.unreviewed > 0) setFilter("unreviewed");
+    else setFilter("queued");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [healthQ.data, urlTab]);
 
   const drafts = draftsQ.data?.drafts ?? [];
   const posting = postingQ.data ?? null;
@@ -251,6 +276,11 @@ export default function ReviewPage() {
         </div>
       )}
 
+      {/* The kill switch stays always visible — a system that has silently
+          stopped posting is the expensive failure here. Everything else that
+          used to stack above the list is behind a disclosure: four sections ran
+          ~640px before the first draft, which on a phone is several screens of
+          scrolling to reach the thing you came for. */}
       {posting && (
         <PostingSwitch
           state={posting}
@@ -266,13 +296,45 @@ export default function ReviewPage() {
         />
       )}
 
-      {generation && <GenerationStatus g={generation} />}
+      {(health || generation || schedule.length > 0) && (
+        <details className="rounded border border-border bg-surface/50 group" open={detailsOpen}>
+          <summary
+            onClick={(e) => {
+              e.preventDefault();
+              setDetailsOpen((v) => !v);
+            }}
+            className="cursor-pointer list-none p-3 flex items-center gap-2 text-sm"
+          >
+            <ChevronRight
+              size={16}
+              aria-hidden="true"
+              className={cn("shrink-0 transition-transform", detailsOpen && "rotate-90")}
+            />
+            <span className="text-fg-muted">Queue health and schedule</span>
+            <span className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
+              {health && (
+                <span>
+                  {Object.values(health.accounts).reduce((a, x) => a + x.queue_depth, 0)} queued
+                </span>
+              )}
+              {schedule.length > 0 && <span>clears {formatDate(schedule[schedule.length - 1].at)}</span>}
+              {generation && !generation.api_key_configured && (
+                <span className="text-warn-fg">workbook copy</span>
+              )}
+              {health && health.global_blocks.length > 0 && (
+                <span className="text-warn-fg">{health.global_blocks[0]}</span>
+              )}
+            </span>
+          </summary>
+          <div className="p-3 pt-0 space-y-3">
+            {generation && <GenerationStatus g={generation} />}
+            {health && <QueueHealth health={health} accounts={accounts} />}
+            {schedule.length > 0 && <Calendar entries={schedule} />}
+          </div>
+        </details>
+      )}
 
-      {health && <QueueHealth health={health} accounts={accounts} />}
-
-      {schedule.length > 0 && <Calendar entries={schedule} />}
-
-      <div className="flex gap-1">
+      <div className="flex gap-1 flex-wrap">
         {FILTERS.map((f) => (
           <button
             key={f.key}
@@ -883,14 +945,15 @@ function DraftRow(props: {
       )}
     >
       <div className="flex items-start justify-between gap-3">
-        {/* The whole left side toggles the preview — clicking a draft to read
-            it is the obvious gesture, and Edit is a deliberate second step. */}
-        <div
-          className="min-w-0 cursor-pointer flex-1"
+        {/* The whole left side toggles the row. A real <button> rather than a
+            div with role="button": it gets Enter/Space, focus and the correct
+            expanded state for free, and aria-expanded tells a screen reader
+            what the click does. */}
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left"
           onClick={() => setOpen((v) => !v)}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setOpen((v) => !v)}
+          aria-expanded={open}
         >
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs text-fg-subtle">#{d.id}</span>
@@ -921,13 +984,27 @@ function DraftRow(props: {
               </span>
             )}
           </div>
-          <p className="mt-1 font-medium">
-            <span className="text-fg-subtle mr-1.5 select-none">{open ? "▾" : "▸"}</span>
-            {d.title}
+          {/* City first, title second. Generated titles are near-identical —
+              20 drafts collapse onto ~3 distinct titles when the model is
+              unavailable — so leading with the title means every row looks the
+              same. The city is what actually tells them apart. */}
+          <p className="mt-1 font-medium flex items-baseline gap-1.5">
+            <ChevronRight
+              size={14}
+              aria-hidden="true"
+              className={cn(
+                "shrink-0 self-center text-fg-subtle transition-transform",
+                open && "rotate-90",
+              )}
+            />
+            <span>{d.city || "(no city)"}</span>
+            {d.postal_code && (
+              <span className="text-xs font-normal text-fg-subtle">{d.postal_code}</span>
+            )}
           </p>
+          <p className="text-sm text-fg-muted mt-0.5 line-clamp-2">{d.title}</p>
           <p className="text-xs text-fg-subtle mt-0.5">
-            {d.city}
-            {d.postal_code ? ` ${d.postal_code}` : ""} · created {fmt(d.created_at)}
+            created {fmt(d.created_at)}
             {d.attempts > 1 ? ` · ${d.attempts} attempts` : ""}
           </p>
           {parked && d.failed_message && (
@@ -939,28 +1016,20 @@ function DraftRow(props: {
               publish before requeueing.
             </p>
           )}
-        </div>
-        <div className="flex shrink-0 gap-1">
-          {/* Preview is for things not yet published — once it is live, the
-              real Craigslist page is the truth, not a mock-up. */}
-          {(d.status === "queued" || d.status === "needs_attention") && (
-            <Action label="Preview" onClick={props.onPreview} busy={busy} />
-          )}
-          <Action label="Edit" onClick={props.onEdit} busy={busy} />
-          {d.status === "queued" && (
-            <>
-              <Action label="Top" onClick={props.onTop} busy={busy} />
-              <Action label={d.reviewed ? "Unmark" : "Reviewed"} onClick={props.onReview} busy={busy} />
-            </>
-          )}
-          {parked && <Action label="Requeue" onClick={props.onRequeue} busy={busy} />}
-          <Action label="Delete" onClick={props.onDelete} busy={busy} danger />
+        </button>
+        {/* Six buttons in a row fight the title for space on a phone, so below
+            sm they move into the expansion as full-width targets. */}
+        <div className="hidden sm:flex shrink-0 gap-1">
+          <Actions {...props} draft={d} busy={busy} />
         </div>
       </div>
 
       {open && (
         <div className="mt-3 border-t border-border pt-3 space-y-3">
-          <div className="flex gap-4 text-xs text-fg-subtle flex-wrap">
+          <div className="sm:hidden grid grid-cols-2 gap-1">
+            <Actions {...props} draft={d} busy={busy} wide />
+          </div>
+          <div className="flex gap-x-4 gap-y-1 text-xs text-fg-subtle flex-wrap">
             <span>{d.county} / {d.city} {d.postal_code}</span>
             <span>“{d.geographic_area || d.city}” in the CL area box</span>
             <span>{d.phone_number}</span>
@@ -968,9 +1037,7 @@ function DraftRow(props: {
             {d.expires_at && <span>expires {fmt(d.expires_at)}</span>}
           </div>
           <DraftImages draftId={d.id} account={d.account} busy={busy} />
-          <pre className="text-xs text-fg-muted whitespace-pre-wrap font-mono max-h-96 overflow-auto bg-bg/60 rounded p-2">
-            {d.body}
-          </pre>
+          <DraftBody body={d.body} head={d.body_head} />
         </div>
       )}
     </li>
@@ -1273,13 +1340,97 @@ function PreviewDialog(props: { draft: Draft; onClose: () => void }) {
   );
 }
 
-function Action(props: { label: string; onClick: () => void; busy: boolean; danger?: boolean }) {
+/** The row's action set, rendered inline on desktop and stacked on mobile. */
+function Actions(props: {
+  draft: Draft;
+  busy: boolean;
+  wide?: boolean;
+  onEdit: () => void;
+  onPreview: () => void;
+  onReview: () => void;
+  onTop: () => void;
+  onRequeue: () => void;
+  onDelete: () => void;
+}) {
+  const { draft: d, busy, wide } = props;
+  const parked = d.status === "needs_attention";
+  return (
+    <>
+      {/* Preview is for things not yet published — once it is live, the real
+          Craigslist page is the truth, not a mock-up. */}
+      {(d.status === "queued" || parked) && (
+        <Action label="Preview" onClick={props.onPreview} busy={busy} wide={wide} />
+      )}
+      <Action label="Edit" onClick={props.onEdit} busy={busy} wide={wide} />
+      {d.status === "queued" && (
+        <>
+          <Action label="Top" onClick={props.onTop} busy={busy} wide={wide} />
+          <Action
+            label={d.reviewed ? "Unmark" : "Reviewed"}
+            onClick={props.onReview}
+            busy={busy}
+            wide={wide}
+          />
+        </>
+      )}
+      {parked && <Action label="Requeue" onClick={props.onRequeue} busy={busy} wide={wide} />}
+      <Action label="Delete" onClick={props.onDelete} busy={busy} danger wide={wide} />
+    </>
+  );
+}
+
+/**
+ * The body is ~14,200 characters, of which ~13,000 are the shared keyword tail.
+ * Dumping all of it into a scroll box is what made the list feel unnavigable.
+ * Splitting is exact when the stored head is a prefix of the body — which is
+ * how the generator assembles it — and falls back to showing everything when it
+ * is not, rather than guessing and hiding real copy.
+ */
+function DraftBody({ body, head }: { body: string; head: string | null }) {
+  const [showTail, setShowTail] = useState(false);
+  const splittable = Boolean(head && body.startsWith(head) && body.length > head.length);
+  const tail = splittable ? body.slice(head!.length).replace(/^\n+/, "") : "";
+
+  return (
+    <div className="space-y-2">
+      <pre className="text-xs text-fg-muted whitespace-pre-wrap font-mono max-h-96 overflow-auto bg-bg/60 rounded p-2">
+        {splittable ? head : body}
+      </pre>
+      {splittable && (
+        <>
+          <button
+            onClick={() => setShowTail((v) => !v)}
+            aria-expanded={showTail}
+            className="text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2"
+          >
+            {showTail ? "Hide" : "Show"} keyword tail ({tail.length.toLocaleString()} characters)
+          </button>
+          {showTail && (
+            <pre className="text-xs text-fg-subtle whitespace-pre-wrap font-mono max-h-72 overflow-auto bg-bg/60 rounded p-2">
+              {tail}
+            </pre>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function Action(props: {
+  label: string;
+  onClick: () => void;
+  busy: boolean;
+  danger?: boolean;
+  wide?: boolean;
+}) {
   return (
     <button
       onClick={props.onClick}
       disabled={props.busy}
       className={cn(
-        "text-xs px-2 py-1 rounded border disabled:opacity-40",
+        "text-xs rounded border disabled:opacity-40",
+        // 40px tall on mobile so it is a comfortable touch target.
+        props.wide ? "px-3 py-2.5 w-full" : "px-2 py-1",
         props.danger
           ? "border-danger-border text-danger-fg hover:bg-danger"
           : "border-border-strong text-fg-muted hover:bg-surface-2",
@@ -1295,9 +1446,24 @@ function EditDialog(props: {
   onClose: () => void;
   onSave: (patch: Record<string, unknown>) => Promise<void>;
 }) {
-  const [title, setTitle] = useState(props.draft.title);
-  const [body, setBody] = useState(props.draft.body);
-  const [geo, setGeo] = useState(props.draft.geographic_area ?? props.draft.city);
+  const d = props.draft;
+  const [title, setTitle] = useState(d.title);
+  const [geo, setGeo] = useState(d.geographic_area ?? d.city);
+
+  // The generator assembles body as `head + "\n\n" + tail`, so when the stored
+  // head is a prefix of the body the split is exact and needs no guessing. When
+  // it is not — hand-written drafts, or one already edited — fall back to the
+  // single textarea. Inferring a split we cannot prove would silently truncate
+  // a live ad.
+  const splittable = Boolean(d.body_head && d.body.startsWith(d.body_head) && d.body.length > d.body_head.length);
+  const tail = splittable ? d.body.slice(d.body_head!.length).replace(/^\n+/, "") : "";
+
+  const [head, setHead] = useState(splittable ? d.body_head! : d.body);
+  const [tailUnlocked, setTailUnlocked] = useState(false);
+  const [editableTail, setEditableTail] = useState(tail);
+  const [showTail, setShowTail] = useState(false);
+
+  const body = splittable ? `${head}\n\n${editableTail}` : head;
 
   // Escape now closes the dialog (Radix), so a 14,000-character body needs a
   // guard or a stray keypress silently discards the edit.
@@ -1321,7 +1487,20 @@ function EditDialog(props: {
             Cancel
           </button>
           <button
-            onClick={() => void props.onSave({ title, body, geographic_area: geo, reviewed: true })}
+            onClick={() =>
+              // body_head goes with it. EditDialog used to send only `body`,
+              // leaving body_head frozen at whatever the generator wrote — and
+              // similarity_report scores duplicate detection against body_head
+              // alone, so every edit silently decoupled the score from the copy
+              // that would actually publish.
+              void props.onSave({
+                title,
+                body,
+                body_head: splittable ? head : head.split("\n\n.")[0].slice(0, 2000),
+                geographic_area: geo,
+                reviewed: true,
+              })
+            }
             className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover"
           >
             Save &amp; mark reviewed
@@ -1346,15 +1525,62 @@ function EditDialog(props: {
           </label>
           <label className="block">
             <span className="text-xs text-fg-muted">
-              Body — the keyword tail is part of this text; edit the top section
+              {splittable
+                ? "Ad copy — the part a buyer actually reads. The keyword tail is separate, below."
+                : "Body — the keyword tail is part of this text; edit the top section"}
             </span>
             <textarea
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={16}
+              value={head}
+              onChange={(e) => setHead(e.target.value)}
+              rows={splittable ? 14 : 16}
               className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm font-mono"
             />
+            <span className="text-xs text-fg-subtle mt-1 block">
+              {head.length.toLocaleString()} characters
+            </span>
           </label>
+
+          {/* Read-only by default. DESIGN.md decision 7 requires the tail stay
+              byte-exact across every ad — it is appended from one stored
+              template — so editing it here is deliberate, not incidental. */}
+          {splittable && (
+            <div className="rounded border border-border bg-bg/40">
+              <div className="flex flex-wrap items-center gap-2 p-2">
+                <button
+                  onClick={() => setShowTail((v) => !v)}
+                  aria-expanded={showTail}
+                  className="text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2"
+                >
+                  {showTail ? "Hide" : "Show"} keyword tail (
+                  {editableTail.length.toLocaleString()} characters)
+                </button>
+                <span className="text-xs text-fg-subtle">
+                  Identical on every ad. Appended automatically.
+                </span>
+                {showTail && !tailUnlocked && (
+                  <button
+                    onClick={() => setTailUnlocked(true)}
+                    className="ml-auto text-xs px-2 py-1 rounded border border-warn-border text-warn-fg hover:bg-warn"
+                  >
+                    Edit anyway
+                  </button>
+                )}
+              </div>
+              {showTail && (
+                <textarea
+                  value={editableTail}
+                  readOnly={!tailUnlocked}
+                  onChange={(e) => setEditableTail(e.target.value)}
+                  rows={10}
+                  aria-label="Keyword tail"
+                  className={cn(
+                    "w-full border-t border-border px-2 py-1.5 text-xs font-mono bg-transparent",
+                    !tailUnlocked && "text-fg-subtle",
+                  )}
+                />
+              )}
+            </div>
+          )}
       </>
     </Modal>
   );
