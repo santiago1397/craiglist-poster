@@ -699,7 +699,8 @@ _OUTCOME_TO_STATUS = {
 # obviously safe until that has been observed. Park them for a human.
 PRE_MUTATION_STEPS = frozenset({
     "launch", "lease", "login_check", "open_account_page", "find_post_row",
-    "open_edit_form", "open_edit_step", "hydrate", "verify_hash", "diff",
+    "open_edit_form", "open_edit_step", "read_images", "hydrate", "verify_hash",
+    "diff",
 })
 
 

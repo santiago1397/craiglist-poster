@@ -100,17 +100,30 @@ SEL = {
     "hub_marker": ".draft_warning, .preview-edit-buttons",
     "hub_publish": "form#publish_top button[name='go']",
     "hub_cancel": "button[name='discard']",
-    # --- Everything below is still inferred; no run has reached ?s=edit yet.
-    # --- Craigslist's house style on the pages we have seen is
-    # --- `input[type=submit][name=go]`, so the submit selectors accept both.
+    # --- OBSERVED: the copy sub-page, ?s=edit (artifact 123c1662, 2026-07-31).
+    # --- Title "south florida | posting details", one <form id="postingForm">
+    # --- POSTing to /k/<token>. These five were guesses that happened to be
+    # --- right; the census confirmed each at exactly 1.
     "edit_title": "input[name='PostingTitle']",
     "edit_body": "textarea[name='PostingBody']",
     "edit_postal": "input[name='postal']",
     "edit_city": "input[name='city']",
     "edit_phone": "input[name='contact_phone']",
-    "edit_license": "input[name='license_number']",
-    # The edit form's continue/save control.
-    "save_button": "button[type='submit'], input[type='submit']",
+    # Not `license_number` — that name does not exist here. The form carries a
+    # `has_license` radio pair plus this free-text field.
+    "edit_license": "input[name='license_info']",
+    # The save control, and the reason it has to be named this precisely.
+    #
+    # `button[type=submit], input[type=submit]` matched THREE elements on this
+    # page, in this document order:
+    #
+    #   1. button[name=go][value=continue]        — save
+    #   2. button[name=discard][value=y]          — cancel edit, discards it all
+    #   3. button[name=submit][value=feedback]    — the feedback widget
+    #
+    # Everything here takes `.first`, so that selector was one DOM reordering
+    # away from discarding the operator's edit instead of saving it.
+    "save_button": "form#postingForm button[name='go'][value='continue']",
     # Image editor.
     "image_thumb": ".swatch, .thumb, li.thumb",
     "image_remove": "a:has-text('remove'), button:has-text('remove')",
@@ -137,7 +150,8 @@ SEL = {
 # only form of this failure anyone can act on.
 PRE_MUTATION_STEPS = frozenset({
     "launch", "lease", "login_check", "open_account_page", "find_post_row",
-    "open_edit_form", "open_edit_step", "hydrate", "verify_hash", "diff",
+    "open_edit_form", "open_edit_step", "read_images", "hydrate", "verify_hash",
+    "diff",
 })
 
 # What the content hash covers: the fields the edit form actually exposes.
@@ -173,7 +187,7 @@ CENSUS_KEYS = (
     "hub_marker", "hub_publish", "hub_cancel",
     "edit_title", "edit_body", "edit_postal",
     "edit_city", "edit_phone", "edit_license", "save_button", "publish_button",
-    "file_input", "image_thumb", "images_done",
+    "file_input", "image_thumb", "image_remove", "images_done",
 )
 
 # Craigslist's edit sub-pages, reachable as plain GETs off the hub URL.
@@ -522,10 +536,32 @@ def hydrate_post(
                     })
                     return result
                 fields = _read_form(page)
-                images = _live_images(page)
                 if TRACE:
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_hydrate", label="form_loaded",
+                        post_id=post_id, account=account.name,
+                    ))
+
+            # Images live on their own sub-page. Reading them from the copy page
+            # reported every posting as having none, which would have made the
+            # reconcile diff believe it was adding a gallery to a bare ad rather
+            # than replacing one.
+            with log.step("read_images"):
+                page.goto(
+                    hub_step_url(hub_url, HUB_STEP_IMAGES),
+                    wait_until="domcontentloaded",
+                )
+                read_pause(900)
+                images = _live_images(page)
+                log.note(
+                    "images",
+                    f"image_thumb={_count(page, 'image_thumb')} "
+                    f"file_input={_count(page, 'file_input')} "
+                    f"image_remove={_count(page, 'image_remove')}",
+                )
+                if TRACE or not images:
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_hydrate", label="images_loaded",
                         post_id=post_id, account=account.name,
                     ))
 
@@ -748,7 +784,28 @@ def reconcile_post(
                         ),
                     )
                 live = _read_form(page)
-                live_images = _live_images(page)
+
+            manage_images = bool(desired.get("image_set_managed"))
+            live_images: list[dict] = []
+            if manage_images:
+                # The copy page carries no gallery — counting thumbnails there
+                # reported every posting as having none, which would have made
+                # the diff believe it was adding a gallery to a bare ad rather
+                # than replacing one. Read it where it lives, then come back, so
+                # the fill loop and its pre-flight run on the copy page.
+                with log.step("read_images"):
+                    page.goto(
+                        hub_step_url(hub_url, HUB_STEP_IMAGES),
+                        wait_until="domcontentloaded",
+                    )
+                    read_pause(700)
+                    live_images = _live_images(page)
+                    log.note("images", f"live={len(live_images)} desired={len(photos)}")
+                    page.goto(
+                        hub_step_url(hub_url, HUB_STEP_EDIT),
+                        wait_until="domcontentloaded",
+                    )
+                    read_pause(700)
                 if TRACE:
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_reconcile", label="form_loaded",
@@ -780,7 +837,6 @@ def reconcile_post(
                     k: desired.get(k, "") for k in HASHED_FIELDS
                     if (desired.get(k) or "").strip() != (live.get(k) or "").strip()
                 }
-                manage_images = bool(desired.get("image_set_managed"))
                 images_differ = manage_images and len(photos) != len(live_images)
                 log.note("diff", f"{len(text_changes)} text field(s), images={images_differ}")
 
