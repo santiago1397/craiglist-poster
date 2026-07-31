@@ -72,6 +72,7 @@ All commands run via `uv run cl <command>`.
 | `cl post --account craigs1` | Restrict the claim to one account (still respects machine binding). |
 | `cl post --dry-run` | Walk the form without publishing. Reads the head of the queue but **claims nothing**, so it never consumes a draft. |
 | `cl post --headless` | Run browser headless (not recommended — easier to detect). |
+| `cl post --draft-id <id>` | Post one specific draft. Used by the dashboard's **Post now**; you rarely type it. Refuses unless that draft carries a live request. |
 | `cl check-ghosts --proxy http://host:port` | Check whether recent posts are visible in public search, from a different network (phone hotspot or any proxy you supply). |
 | `cl check-ghosts --allow-local-ip` | Same check from this machine's IP. Weaker — CL shows you your own ghosted posts. |
 | `cl edit` | Run one pass of pending edit work: load posts the dashboard asked for, apply queued changes. The reporter daemon does this every 15s anyway. |
@@ -145,6 +146,24 @@ desktop clamps whatever the server sends to hard ceilings compiled into
 06:00–22:00) and reports a `flow_error` when it has to clamp — so a mistyped
 setting can't get an account banned. Raising a *ceiling* is a deliberate code
 change and redeploy.
+
+---
+
+## Posting one draft on demand
+
+**Review → Post now** on any queued draft publishes that one without waiting for
+the next scheduled slot. The reporter daemon picks the request up within ~15
+seconds and runs the ordinary posting flow against that draft.
+
+It changes *when* a post is attempted and *which* draft goes — never whether it
+is allowed. Every guardrail below still applies, evaluated on the server exactly
+as for a 9am fire, and the post counts against the day's cap like any other. If
+the account cannot post right now you are told why immediately and nothing is
+queued, so a click can never surface as a surprise post hours later.
+
+Requires the reporter daemon to be running on the posting machine — that is what
+polls for the request. If it is down, the request expires after 20 minutes and
+says so on the draft.
 
 ---
 

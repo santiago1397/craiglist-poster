@@ -36,6 +36,11 @@ type Draft = {
   attempts: number;
   created_at: string;
   generated_by: string | null; // 'ai' | 'fallback' | null when hand-written
+  // "Post now": set while the desktop has yet to pick the request up, cleared
+  // by event ingest once the attempt comes back. There is no client-side
+  // mirror of this — the column is the truth and the poll below reads it.
+  post_requested_at: string | null;
+  post_request_error: string | null;
 };
 
 type GenerationState = {
@@ -143,6 +148,7 @@ export default function ReviewPage() {
   const [creating, setCreating] = useState(false);
   const [previewing, setPreviewing] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState<Draft | null>(null);
+  const [postingNow, setPostingNow] = useState<Draft | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   const params = useMemo(() => {
@@ -166,6 +172,11 @@ export default function ReviewPage() {
     queryKey: ["drafts", params],
     queryFn: () => api.get<{ drafts: Draft[] }>("/drafts", params),
     placeholderData: (prev) => prev,
+    // Poll only while a "Post now" is outstanding. The desktop picks one up
+    // within ~15s and you are watching for it, so this page — which otherwise
+    // never polls — goes live for exactly as long as something is in flight.
+    refetchInterval: (q) =>
+      q.state.data?.drafts?.some((d) => d.post_requested_at) ? 5_000 : false,
   });
   const accountsQ = useQuery({
     queryKey: ["accounts"],
@@ -394,11 +405,42 @@ export default function ReviewPage() {
               onReview={() => mutate(() => api.patch(`/drafts/${d.id}`, { reviewed: !d.reviewed }))}
               onTop={() => mutate(() => api.post(`/drafts/${d.id}/reorder`, { after_id: null }))}
               onRequeue={() => mutate(() => api.post(`/drafts/${d.id}/requeue`))}
+              onPostNow={() => setPostingNow(d)}
+              onCancelPostNow={() => mutate(() => api.del(`/drafts/${d.id}/post-now`))}
               onDelete={() => setDeleting(d)}
             />
           ))}
         </ul>
       )}
+
+      {/* Publishing is outward-facing and irreversible — it puts a real ad on a
+          real account and permanently burns the images it uses. It deserves at
+          least the friction Delete gets. */}
+      <ConfirmDialog
+        open={postingNow !== null}
+        onOpenChange={(o) => !o && setPostingNow(null)}
+        title={`Post draft #${postingNow?.id} now?`}
+        body={
+          <>
+            <span className="block font-medium text-fg">{postingNow?.title}</span>
+            <span className="block mt-1">
+              {postingNow?.account} · {postingNow?.city}. This publishes a live
+              ad on Craigslist and permanently retires the images it uses.
+            </span>
+            <span className="block mt-2 text-fg-subtle">
+              The guardrails still apply — if this account cannot post right
+              now, you will be told why and nothing will happen. It counts
+              against today's cap like any scheduled post.
+            </span>
+          </>
+        }
+        busy={busy}
+        onConfirm={() => {
+          const id = postingNow?.id;
+          setPostingNow(null);
+          if (id !== undefined) void mutate(() => api.post(`/drafts/${id}/post-now`));
+        }}
+      />
 
       <ConfirmDialog
         open={deleting !== null}
@@ -948,6 +990,8 @@ function DraftRow(props: {
   onReview: () => void;
   onTop: () => void;
   onRequeue: () => void;
+  onPostNow: () => void;
+  onCancelPostNow: () => void;
   onDelete: () => void;
 }) {
   const { draft: d, busy } = props;
@@ -999,7 +1043,22 @@ function DraftRow(props: {
                 failed at {d.failed_step ?? "unknown step"}
               </span>
             )}
+            {d.post_requested_at && (
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-accent-soft text-accent-soft-fg"
+                title="The desktop picks this up within about 15 seconds, then opens Chrome and posts it"
+              >
+                posting requested
+              </span>
+            )}
           </div>
+          {/* An expired or failed request explains itself here. Every other
+              trace of it lives in a log file on the posting machine, so without
+              this line "I pressed Post now and nothing happened" has no answer
+              from the dashboard. */}
+          {d.post_request_error && (
+            <p className="mt-1 text-xs text-warn-fg">{d.post_request_error}</p>
+          )}
           {/* The ad's own title leads, with the location after it in brackets.
               Leading with the city was a workaround for generated titles being
               near-identical — but it meant the row never showed you the thing
@@ -1481,10 +1540,16 @@ function Actions(props: {
   onReview: () => void;
   onTop: () => void;
   onRequeue: () => void;
+  onPostNow: () => void;
+  onCancelPostNow: () => void;
   onDelete: () => void;
 }) {
   const { draft: d, busy, wide } = props;
   const parked = d.status === "needs_attention";
+  // No client state: the DB column is the truth and the page polls it while
+  // anything is outstanding, so this flips back on its own when ingest clears
+  // the flag. Same approach as the Edits page's hydrate button.
+  const requested = !!d.post_requested_at;
   return (
     <>
       {/* Preview is for things not yet published — once it is live, the real
@@ -1495,6 +1560,16 @@ function Actions(props: {
       <Action label="Edit" onClick={props.onEdit} busy={busy} wide={wide} />
       {d.status === "queued" && (
         <>
+          {requested ? (
+            <Action
+              label="Cancel post"
+              onClick={props.onCancelPostNow}
+              busy={busy}
+              wide={wide}
+            />
+          ) : (
+            <Action label="Post now" onClick={props.onPostNow} busy={busy} wide={wide} />
+          )}
           <Action label="Top" onClick={props.onTop} busy={busy} wide={wide} />
           <Action
             label={d.reviewed ? "Unmark" : "Reviewed"}

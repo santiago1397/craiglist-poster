@@ -30,6 +30,17 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 # on demand (DESIGN_EDITS decision 24) and you are watching for it in the UI.
 EDIT_POLL_SECONDS = 15
 
+# How often the daemon looks for an operator's "Post now". Same beat as edits,
+# for the same reason: someone is watching the dashboard for it to happen.
+POST_REQUEST_POLL_SECONDS = 15
+
+# Hard ceiling on one spawned posting run. Comfortably longer than a real post
+# (a couple of minutes) and deliberately shorter than the server's 45-minute
+# stale-claim reaper, so a hung run is killed while the server still believes
+# the draft is claimed — the reaper then parks it with its "may or may not have
+# published" message, which is the right answer for a state nobody knows.
+POST_REQUEST_TIMEOUT_SECONDS = 1500
+
 
 def _setup_logging(verbose: bool = False):
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -190,6 +201,11 @@ def status():
 @app.command("post")
 def post(
     account: str = typer.Option(None, help="Restrict the claim to one account"),
+    requested_draft_id: int = typer.Option(
+        None, "--draft-id",
+        help="Post this specific draft (an operator's 'Post now'). It must "
+             "still carry a live request on the server.",
+    ),
     dry_run: bool = typer.Option(False, help="Walk the form but don't publish (claims nothing)"),
     headless: bool = typer.Option(False, help="Run browser headless (NOT recommended)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="DEBUG-level console logging"),
@@ -205,6 +221,14 @@ def post(
 
     _setup_logging(verbose=verbose)
     machine = _machine_name()
+
+    # `--dry-run` peeks at the head of the queue and claims nothing, so it
+    # cannot honour a specific id — it would rehearse a different draft than the
+    # one asked for and report success. Refuse rather than mislead.
+    if requested_draft_id is not None and dry_run:
+        typer.echo("--draft-id cannot be combined with --dry-run: a dry run reads "
+                   "the head of the queue and would walk a different draft.")
+        raise typer.Exit(2)
 
     # Misconfiguration exits report to the server before quitting. A wrong
     # CL_MACHINE used to stop posting forever with no server-side trace: every
@@ -262,7 +286,9 @@ def post(
     try:
         draft = (
             _peek_draft(bound) if dry_run
-            else queue_client.claim(bound, outbox_pending=pending)
+            else queue_client.claim(
+                bound, outbox_pending=pending, draft_id=requested_draft_id
+            )
         )
     except queue_client.QueueUnavailable as e:
         logger.error(f"queue unavailable: {e}")
@@ -271,6 +297,17 @@ def post(
         raise typer.Exit(4)
 
     if draft is None:
+        if requested_draft_id is not None:
+            # Exit 0, deliberately. The daemon spawns this every 15s while a
+            # request is live and reports non-zero exits as flow_errors; a
+            # guardrail that has not cleared yet is a normal answer, not a
+            # failure, and treating it as one would file the same Diagnostics
+            # entry eighty times before the request expired.
+            typer.echo(
+                f"Draft {requested_draft_id} was not claimed — see the reason "
+                f"above. Nothing was posted."
+            )
+            raise typer.Exit(0)
         typer.echo("Nothing to post right now. Run `cl status` to see why.")
         reporter_mod.emit(PostAttempt(
             ts=_dt.now(_tz.utc),
@@ -815,6 +852,109 @@ def reporter_daemon(
 
     edit_thread = threading.Thread(target=_edit_loop, name="cl-edit-worker", daemon=True)
     edit_thread.start()
+
+    def _post_request_loop():
+        """Execute an operator's "Post now" from the dashboard.
+
+        Its own thread, not folded into `_edit_loop`: a posting run blocks for
+        minutes and would stall hydration polling for its whole duration.
+
+        Spawns `cl post --draft-id` as a subprocess rather than posting inline.
+        That path — machine binding, outbox flush, image fetch, the form, the
+        failure taxonomy — is the most carefully tested code in the project and
+        is reused here byte for byte. A daemon thread reimplementing it would be
+        a second posting path to keep correct forever.
+        """
+        import subprocess
+
+        from . import edit_worker, lease
+
+        bound = [a.name for a in ACCOUNTS if a.allowed_machine == machine]
+        if not bound:
+            logger.info("post-now watcher idle: no accounts bound to this machine")
+            return
+        # `cli.py` is at src/craigslist_auto/cli.py; the project root is two up.
+        # `load_dotenv()` searches upward from cwd, so the child needs this to
+        # find the same .env this process read.
+        project_root = Path(__file__).resolve().parents[2]
+
+        while not stop.is_set():
+            req = None
+            try:
+                work = queue_client.post_requests(bound)
+                requests = work.get("requests") or []
+                if requests:
+                    # One per beat. Same reasoning as max_reconciles=1 in the
+                    # edit worker — spacing browser sessions is deliberate.
+                    req = requests[0]
+                    holder = lease.current_holder()
+                    if edit_worker.near_posting_slot():
+                        # Defer, don't cancel; the request's TTL is the backstop.
+                        logger.info(
+                            "post-now deferred: within 10 minutes of a scheduled slot"
+                        )
+                    elif holder is not None:
+                        logger.info(
+                            f"post-now deferred: browser held by {holder['flow']!r}"
+                        )
+                    else:
+                        logger.info(
+                            f"post-now: spawning a posting run for draft "
+                            f"{req['id']} ({req['account']})"
+                        )
+                        # Hold our flusher: the child samples the outbox to
+                        # decide whether the server may authorise its claim, and
+                        # a batch of ours mid-POST would read as a backlog.
+                        with reporter_mod.pause_flushing():
+                            proc = subprocess.run(
+                                [sys.executable, "-m", "craigslist_auto.cli",
+                                 "post", "--draft-id", str(req["id"])],
+                                cwd=str(project_root),
+                                capture_output=True,
+                                text=True,
+                                timeout=POST_REQUEST_TIMEOUT_SECONDS,
+                                # Hide the child's console window, not Chrome —
+                                # the poster runs headful and needs the desktop.
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                            )
+                        logger.info(
+                            f"post-now: draft {req['id']} run exited {proc.returncode}"
+                        )
+                        if proc.returncode != 0:
+                            reporter_mod.report_flow_error(
+                                "post_now",
+                                f"posting run for draft {req['id']} exited "
+                                f"{proc.returncode}",
+                                step="subprocess",
+                                account=req["account"],
+                                context={
+                                    "draft_id": req["id"],
+                                    "returncode": proc.returncode,
+                                    "stdout": (proc.stdout or "")[-1500:],
+                                    "stderr": (proc.stderr or "")[-1500:],
+                                },
+                            )
+            except subprocess.TimeoutExpired:
+                logger.error(f"post-now: run exceeded {POST_REQUEST_TIMEOUT_SECONDS}s")
+                reporter_mod.report_flow_error(
+                    "post_now",
+                    f"posting run exceeded {POST_REQUEST_TIMEOUT_SECONDS}s and was "
+                    f"killed; the draft may or may not have published",
+                    step="subprocess",
+                    context={"draft_id": (req or {}).get("id")},
+                )
+            except queue_client.QueueUnavailable as e:
+                logger.warning(f"post-now poll failed: {e}")
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning(f"post-now watcher raised: {e}")
+                reporter_mod.report_flow_error("post_now", e)
+            if stop.wait(POST_REQUEST_POLL_SECONDS):
+                return
+
+    post_now_thread = threading.Thread(
+        target=_post_request_loop, name="cl-post-now", daemon=True
+    )
+    post_now_thread.start()
 
     # Flusher runs on the main thread; blocks until stop is set.
     reporter_mod.flush_forever(stop_event=stop)

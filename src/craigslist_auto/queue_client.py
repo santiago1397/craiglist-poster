@@ -176,13 +176,33 @@ def claim_edit(post_id: str) -> dict | None:
     return desired
 
 
-def claim(accounts: list[str], *, outbox_pending: int = 0) -> dict | None:
+def post_requests(accounts: list[str], limit: int = 10) -> dict:
+    """Drafts an operator pressed "Post now" on, for this machine's accounts.
+
+    Polled every ~15s by the reporter daemon, which spawns a posting run for
+    whatever comes back.
+    """
+    return _request(
+        "GET", "/post-requests",
+        params={"accounts": ",".join(accounts), "limit": limit},
+    )
+
+
+def claim(
+    accounts: list[str], *, outbox_pending: int = 0, draft_id: int | None = None
+) -> dict | None:
     """Atomically take the next draft to post, or None if there is nothing.
 
     Returns the draft dict. `None` covers every "not now" case — outside the
     window, cooldown, empty queue, outbox backlog — and the reason is logged.
+
+    `draft_id` pins the claim to one operator-requested draft. The server still
+    applies every guardrail, and still refuses unless that draft carries a live
+    request — so this narrows what may be claimed, it never widens it.
     """
     payload = {"accounts": accounts, "outbox_pending": outbox_pending}
+    if draft_id is not None:
+        payload["draft_id"] = draft_id
     data = _request("POST", "/claim", json=payload)
 
     draft = data.get("draft")

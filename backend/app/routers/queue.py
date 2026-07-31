@@ -34,6 +34,10 @@ class ClaimBody(BaseModel):
     # the server's post history may be stale, so claiming is refused until it
     # drains (see DESIGN.md, derived requirements).
     outbox_pending: int = 0
+    # Pin the claim to one draft an operator pressed "Post now" on. The draft
+    # must still carry a live request — naming an id is not on its own
+    # permission to post it.
+    draft_id: int | None = None
 
 
 @router.get("")
@@ -103,8 +107,44 @@ def claim(body: ClaimBody, machine: str = Depends(require_machine_token)) -> dic
         }
     with tx() as c:
         return queue_svc.claim_next(
-            c, machine=machine, candidate_accounts=body.accounts
+            c,
+            machine=machine,
+            candidate_accounts=body.accounts,
+            draft_id=body.draft_id,
         )
+
+
+@router.get("/post-requests")
+def post_requests(
+    machine: str = Depends(require_machine_token),
+    accounts: str = Query(description="comma-separated account names"),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict:
+    """Drafts an operator pressed "Post now" on (DESIGN.md decision 32).
+
+    Polled every ~15s by the reporter daemon, which spawns `cl post --draft-id`
+    for whatever comes back. Mirrors `/edits/pending`: the reaper runs on the
+    poll path rather than on a timer, because the poll is the one moment we know
+    a machine is alive to ask.
+
+    Filtered to accounts bound to the asking machine, so a request for craigs1
+    is never even visible to a machine that cannot post it.
+    """
+    names = [a.strip() for a in accounts.split(",") if a.strip()]
+    if not names:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="no accounts given"
+        )
+    with tx() as c:
+        expired = queue_svc.expire_post_requests(c)
+        requests = queue_svc.pending_post_requests(c, accounts=names, limit=limit)
+        eligibility = queue_svc.evaluate_eligibility(c, names)
+    return {
+        "machine": machine,
+        "requests": requests,
+        "expired": expired,
+        "eligibility": eligibility,
+    }
 
 
 # ---------------------------------------------------------------------------

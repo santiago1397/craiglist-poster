@@ -208,6 +208,52 @@ def requeue(draft_id: int) -> dict:
         return drafts_svc.update_draft(c, draft_id, {"status": "queued"})
 
 
+@router.post("/{draft_id}/post-now", status_code=status.HTTP_202_ACCEPTED)
+def post_now(draft_id: int, admin: str = Depends(require_admin)) -> dict:
+    """Ask the desktop to post this draft on its next poll (~15s).
+
+    202, not 200: nothing has published yet. The desktop still has to pick the
+    request up, take the browser lease and drive the form.
+
+    Refuses synchronously on the guardrails rather than queueing a request that
+    might fire much later — same rules, same wording, same server-side
+    evaluation a scheduled run gets. Nothing here can post something a 9am fire
+    would not have been allowed to post.
+    """
+    with tx() as c:
+        draft = drafts_svc.get_draft(c, draft_id)
+        if draft is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found"
+            )
+        try:
+            result = drafts_svc.request_post(c, draft_id, requested_by=admin)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        except drafts_svc.NotEligible as e:
+            # 409 with the reasons intact — the dashboard shows the operator the
+            # same strings `cl status` prints, rather than a generic refusal.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": f"{draft['account']} cannot post right now",
+                    "reasons": e.reasons,
+                },
+            )
+    return result
+
+
+@router.delete("/{draft_id}/post-now", status_code=status.HTTP_204_NO_CONTENT)
+def cancel_post_now(draft_id: int) -> None:
+    """Withdraw a request the desktop has not picked up yet.
+
+    Best-effort by nature: once the draft is `claimed` the browser is already
+    driving the form and there is nothing left to cancel.
+    """
+    with tx() as c:
+        drafts_svc.clear_post_request(c, draft_id)
+
+
 @router.delete("/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_draft(draft_id: int) -> None:
     with tx() as c:
