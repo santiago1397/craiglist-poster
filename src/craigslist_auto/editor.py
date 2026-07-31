@@ -154,7 +154,19 @@ SEL = {
     # --- `ui-sortable` also answers DESIGN_EDITS spike question 2: images can be
     # --- reordered by drag. Full replace does not need it, but it is not a
     # --- constraint we are working around.
-    "image_thumb": "figure.imgbox",
+    # `:not(.template)` is load-bearing. The gallery ships a 25th, hidden
+    # `<figure class="imgbox template">` with no id and no <img>, which the
+    # uploader clones for each new image. Counting it would have been the first
+    # real write's undoing twice over: the delete loop would have tried to
+    # remove a prototype and never reached zero, and the upload assertion
+    # `thumbnails == len(photos)` would have read 25 against 24 — both of which
+    # raise with mutated=True, i.e. `degraded_live`, after the 24 real images
+    # had already been deleted.
+    "image_thumb": "figure.imgbox:not(.template)",
+    # Deliberately unscoped: the replace loop resolves it *inside* a thumb
+    # (`thumb.locator(image_remove)`), so scoping it to the figure here would
+    # look for a figure within a figure. It therefore counts one higher than
+    # `image_thumb` in the census — that gap is the template, not a fault.
     "image_remove": "button.imgbox-delete-image",
     # Hidden by design (opacity 0, absolutely positioned) with a generated id,
     # so it is matched on type and driven with set_input_files rather than by
