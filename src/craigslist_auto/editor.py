@@ -69,9 +69,40 @@ SEL = {
         "td.buttons form.manage.edit input[type='submit'], "
         "td.buttons input.managebtn[value='edit']"
     ),
-    # --- Everything below is still inferred; the spike has not reached the
-    # --- edit form itself. Craigslist's house style on the pages we have seen
-    # --- is `input[type=submit][name=go]`, so the submit selectors accept both.
+    # --- OBSERVED: the hub (artifact 6039e4cc, 2026-07-31) ---
+    #
+    # Clicking "edit" does NOT open a form. It opens /k/<token>, a preview of
+    # the posting with a control bar:
+    #
+    #   <div class="draft_warning">
+    #     press "publish" to apply edits
+    #     <form action="/k/<token>" method="post" id="publish_top">
+    #       <input type="hidden" name="cryptedStepCheck" value="...">
+    #       <input type="hidden" name="continue" value="y">
+    #       <button name="go" value="Continue">publish</button>
+    #     </form>
+    #   </div>
+    #   <div class="preview-edit-buttons">
+    #     <button onclick="...'/k/<token>?s=edit'">edit post</button>
+    #     <button onclick="...'/k/<token>?s=geoverify'">edit location</button>
+    #     <button onclick="...'/k/<token>?s=editimage'">edit images</button>
+    #     <form ...><button name="discard" value="y">cancel edit</button></form>
+    #   </div>
+    #
+    # Two things matter. Editing is a **hub with three sub-pages**, not one form
+    # — so the old model, "open the form and fill everything in", was wrong
+    # shape as well as wrong selectors. And the sub-pages are plain GET URLs, so
+    # they are navigated to rather than clicked; only publish and cancel are
+    # POSTs carrying `cryptedStepCheck`.
+    #
+    # Nothing reaches the live posting until `publish`. That is what makes
+    # reading the form safe, and it is why hydration never touches these two.
+    "hub_marker": ".draft_warning, .preview-edit-buttons",
+    "hub_publish": "form#publish_top button[name='go']",
+    "hub_cancel": "button[name='discard']",
+    # --- Everything below is still inferred; no run has reached ?s=edit yet.
+    # --- Craigslist's house style on the pages we have seen is
+    # --- `input[type=submit][name=go]`, so the submit selectors accept both.
     "edit_title": "input[name='PostingTitle']",
     "edit_body": "textarea[name='PostingBody']",
     "edit_postal": "input[name='postal']",
@@ -106,7 +137,7 @@ SEL = {
 # only form of this failure anyone can act on.
 PRE_MUTATION_STEPS = frozenset({
     "launch", "lease", "login_check", "open_account_page", "find_post_row",
-    "open_edit_form", "hydrate", "verify_hash", "diff",
+    "open_edit_form", "open_edit_step", "hydrate", "verify_hash", "diff",
 })
 
 # What the content hash covers: the fields the edit form actually exposes.
@@ -138,10 +169,28 @@ FIELD_SEL = {
 # failure — and a count of 2 is as wrong as a count of 0, because `_fill` and
 # the click helpers all take `.first`.
 CENSUS_KEYS = (
-    "posting_row", "row_edit_button", "edit_title", "edit_body", "edit_postal",
+    "posting_row", "row_edit_button",
+    "hub_marker", "hub_publish", "hub_cancel",
+    "edit_title", "edit_body", "edit_postal",
     "edit_city", "edit_phone", "edit_license", "save_button", "publish_button",
     "file_input", "image_thumb", "images_done",
 )
+
+# Craigslist's edit sub-pages, reachable as plain GETs off the hub URL.
+HUB_STEP_EDIT = "edit"
+HUB_STEP_LOCATION = "geoverify"
+HUB_STEP_IMAGES = "editimage"
+
+
+def hub_step_url(hub_url: str, step: str) -> str:
+    """The URL of one edit sub-page, given the hub we landed on.
+
+    The hub renders these as `onclick="window.location.href=..."` buttons, so
+    navigating is exactly what clicking one would do — and it does not depend on
+    a selector that can drift.
+    """
+    base = hub_url.split("?")[0].split("#")[0]
+    return f"{base}?s={step}"
 
 # Capture screenshots and HTML on success too, not only on failure. The most
 # useful artifact in this project right now is a healthy edit form: it is the
@@ -426,6 +475,29 @@ def hydrate_post(
                 edit.first.click()
                 page.wait_for_load_state("domcontentloaded")
                 read_pause(900)
+                hub_url = page.url
+                log.note("hub", hub_url)
+                if _count(page, "hub_marker") == 0:
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_hydrate", label="hub_unrecognised",
+                        post_id=post_id, account=account.name,
+                    ))
+                    result.update({
+                        "error_type": "selector_miss",
+                        "error_message": (
+                            f"clicking edit landed on {hub_url}, which does not look "
+                            f"like the edit hub"
+                        ),
+                    })
+                    return result
+
+            # The hub is a preview, not a form. The copy lives one GET away.
+            with log.step("open_edit_step"):
+                page.goto(
+                    hub_step_url(hub_url, HUB_STEP_EDIT), wait_until="domcontentloaded"
+                )
+                read_pause(900)
+
 
             with log.step("hydrate"):
                 # The census lands on the step trail, so the dashboard's History
@@ -443,8 +515,9 @@ def hydrate_post(
                     result.update({
                         "error_type": "selector_miss",
                         "error_message": (
-                            "edit form did not expose the expected title input — "
-                            "selectors in editor.SEL need updating"
+                            f"the edit form at {page.url} did not expose the "
+                            f"expected title input — selectors in editor.SEL "
+                            f"need updating"
                         ),
                     })
                     return result
@@ -633,6 +706,29 @@ def reconcile_post(
                 edit.first.click()
                 page.wait_for_load_state("domcontentloaded")
                 read_pause(900)
+                hub_url = page.url
+                log.note("hub", hub_url)
+                if _count(page, "hub_marker") == 0:
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_reconcile", label="hub_unrecognised",
+                        post_id=post_id, account=account.name,
+                    ))
+                    return _result(
+                        "failed_form", failed_step="open_edit_form",
+                        error_type="selector_miss",
+                        error_message=(
+                            f"clicking edit landed on {hub_url}, which is not the "
+                            f"edit hub"
+                        ),
+                    )
+
+            # The hub is a preview, not a form. The copy lives one GET away.
+            with log.step("open_edit_step"):
+                page.goto(
+                    hub_step_url(hub_url, HUB_STEP_EDIT), wait_until="domcontentloaded"
+                )
+                read_pause(900)
+
 
             with log.step("hydrate"):
                 census = _census(page)
@@ -646,7 +742,10 @@ def reconcile_post(
                     return _result(
                         "failed_form", failed_step="hydrate",
                         error_type="selector_miss",
-                        error_message="edit form did not expose the expected inputs",
+                        error_message=(
+                            f"the edit form at {page.url} did not expose the "
+                            f"expected inputs"
+                        ),
                     )
                 live = _read_form(page)
                 live_images = _live_images(page)
@@ -758,9 +857,31 @@ def reconcile_post(
                     with log.step(f"fill_{key}"):
                         _fill(page, sel_key, desired[key])
 
+            # Submitting the copy sub-page returns to the hub; it does not
+            # publish. Nothing reaches the live posting until the hub's publish.
+            with log.step("submit_copy"):
+                save = page.locator(SEL["save_button"])
+                if _count(page, "save_button") == 0:
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_reconcile", label="no_save_control",
+                        post_id=post_id, account=account.name,
+                    ))
+                    raise EditFailure(
+                        "submit_copy", f"no submit control on {page.url}", mutated=True
+                    )
+                save.first.click()
+                page.wait_for_load_state("domcontentloaded")
+                sleep_jitter(1.2)
+
             final_images = len(live_images)
             if manage_images:
                 try:
+                    with log.step("open_images_step"):
+                        page.goto(
+                            hub_step_url(hub_url, HUB_STEP_IMAGES),
+                            wait_until="domcontentloaded",
+                        )
+                        read_pause(900)
                     final_images, extra = _replace_images(
                         page, log, photos, account.name, post_id
                     )
@@ -799,29 +920,37 @@ def reconcile_post(
                     log.note("images_recovered", "re-uploaded after a failed replace")
                     final_images = page.locator(SEL["image_thumb"]).count()
 
-            with log.step("save"):
+            # Back to the hub, and only now does anything become public. Up to
+            # this point every change has been a draft Craigslist would have
+            # thrown away on "cancel edit".
+            with log.step("publish"):
                 done = page.locator(SEL["images_done"])
                 if _count(page, "images_done") > 0:
                     done.first.click()
                     page.wait_for_load_state("domcontentloaded")
                     sleep_jitter(1.2)
-                save = page.locator(SEL["save_button"])
-                publish = page.locator(SEL["publish_button"])
-                target = publish if _count(page, "publish_button") > 0 else save
-                if target.count() == 0:
+                page.goto(hub_url, wait_until="domcontentloaded")
+                read_pause(900)
+                publish = page.locator(SEL["hub_publish"])
+                if publish.count() == 0:
                     artifact_ids.extend(artifacts.capture_page(
-                        page, flow="edit_reconcile", label="no_save_control",
+                        page, flow="edit_reconcile", label="no_publish_control",
                         post_id=post_id, account=account.name,
                     ))
-                    raise EditFailure("save", "no save/publish control found", mutated=True)
-                target.first.click()
+                    raise EditFailure(
+                        "publish",
+                        f"no publish control on the hub at {page.url} — the edit is "
+                        f"staged but not applied",
+                        mutated=True,
+                    )
+                publish.first.click()
                 page.wait_for_load_state("domcontentloaded")
                 sleep_jitter(2.0)
                 if TRACE:
                     # Proof the write landed, captured while the page that
                     # accepted it is still on screen.
                     artifact_ids.extend(artifacts.capture_page(
-                        page, flow="edit_reconcile", label="after_save",
+                        page, flow="edit_reconcile", label="after_publish",
                         post_id=post_id, account=account.name,
                     ))
 

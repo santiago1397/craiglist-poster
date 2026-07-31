@@ -692,9 +692,14 @@ _OUTCOME_TO_STATUS = {
 # A failure at or before these steps mutated nothing on Craigslist, so the edit
 # can go straight back to pending and retry. Anything later either typed into a
 # live form or touched its images, and needs the routing table above.
+# `submit_copy`, `open_images_step` and `publish` are deliberately absent.
+# Craigslist stages an edit as a draft and only commits it when the hub's
+# publish is pressed, so a failure at those steps leaves the live posting
+# untouched — but it also leaves a draft session open, and retrying blind is not
+# obviously safe until that has been observed. Park them for a human.
 PRE_MUTATION_STEPS = frozenset({
     "launch", "lease", "login_check", "open_account_page", "find_post_row",
-    "open_edit_form", "hydrate", "verify_hash", "diff",
+    "open_edit_form", "open_edit_step", "hydrate", "verify_hash", "diff",
 })
 
 
