@@ -1395,9 +1395,14 @@ function PreviewDialog(props: { draft: Draft; onClose: () => void }) {
           {images.length > 0 ? (
             <div className="mb-4">
               <div className="bg-slate-100 flex items-center justify-center">
+                {/* Capped at 420px tall — roughly 560px wide at 4:3 — so 1024
+                    covers it at 2x. The original averages 772KB and would be
+                    downscaled by the browser anyway. */}
                 <img
-                  src={`${IMG_BASE}/images/${images[active]?.id}/raw`}
+                  src={`${IMG_BASE}/images/${images[active]?.id}/thumb?w=1024`}
                   alt={`${active + 1} of ${images.length}`}
+                  loading="lazy"
+                  decoding="async"
                   className="max-h-[420px] w-auto object-contain"
                 />
               </div>

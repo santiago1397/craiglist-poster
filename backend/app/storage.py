@@ -90,7 +90,12 @@ def delete(rel: str) -> bool:
 # rebuilt on demand — deleting the whole `thumbs/` tree is always safe.
 # ---------------------------------------------------------------------------
 
-THUMB_WIDTHS = (480,)
+# Two sizes, both derived: 480 for grid tiles, 1024 for constrained previews
+# (a modal capped at 420px tall is ~560px wide, so 1024 covers it at 2x).
+# Add a width here rather than falling back to `/raw` when a new size appears —
+# no view should pull a full-resolution original to render it smaller.
+THUMB_WIDTHS = (480, 1024)
+DEFAULT_THUMB_WIDTH = 480
 THUMB_QUALITY = 78
 
 
@@ -104,13 +109,18 @@ def thumb_path(rel: str, width: int) -> Path:
     return p
 
 
-def get_or_make_thumb(rel: str, width: int = 480) -> Path | None:
+def get_or_make_thumb(rel: str, width: int = DEFAULT_THUMB_WIDTH) -> Path | None:
     """Return a cached thumbnail, rendering it once if it does not exist.
 
     Returns None when the source bytes are missing, so the caller can answer
     410 rather than 500. Any Pillow failure also returns None — a thumbnail is
     an optimisation, and falling back to the original beats a broken grid.
+
+    Never upscales: a source narrower than `width` is returned as-is by Pillow's
+    `thumbnail`, so a small upload does not become a larger file than it was.
     """
+    if width not in THUMB_WIDTHS:
+        raise ValueError(f"width must be one of {THUMB_WIDTHS}")
     src = open_path(rel)
     if not src.exists():
         return None
