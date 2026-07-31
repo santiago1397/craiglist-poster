@@ -133,7 +133,7 @@ export default function PromptsPage() {
 
   return (
     <div className="p-4 space-y-4">
-      <header className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-lg font-semibold">Prompt studio</h1>
           <p className="text-xs text-fg-subtle mt-0.5">
@@ -143,7 +143,7 @@ export default function PromptsPage() {
         <a href="/images" className="text-sm px-3 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2">
           ← Images
         </a>
-      </header>
+      </div>
 
       {error && (
         <div className="rounded border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">{error}</div>

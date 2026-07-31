@@ -6,6 +6,7 @@
 // to make it easy to catch one before it goes rather than to hold it back.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
 import { cn } from "../lib/cn";
 import { ConfirmDialog, Modal, RawModal } from "../components/Modal";
@@ -112,20 +113,12 @@ const IMG_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "
 const fmt = formatDateTime;
 
 export default function ReviewPage() {
-  const [drafts, setDrafts] = useState<Draft[]>([]);
-  const [health, setHealth] = useState<Health | null>(null);
+  const qc = useQueryClient();
   const [filter, setFilter] = useState<FilterKey>("needs_attention");
-  const [accounts, setAccounts] = useState<string[]>([]);
   const [editing, setEditing] = useState<Draft | null>(null);
   const [creating, setCreating] = useState(false);
   const [previewing, setPreviewing] = useState<Draft | null>(null);
   const [deleting, setDeleting] = useState<Draft | null>(null);
-  const [posting, setPosting] = useState<PostingState | null>(null);
-  const [locations, setLocations] = useState<LocationRef | null>(null);
-  const [generation, setGeneration] = useState<GenerationState | null>(null);
-  const [schedule, setSchedule] = useState<ScheduleEntry[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
 
   const params = useMemo(() => {
     switch (filter) {
@@ -140,82 +133,120 @@ export default function ReviewPage() {
     }
   }, [filter]);
 
-  const load = useCallback(async () => {
-    setError(null);
-    try {
-      const [list, accts, posting, locs, gen] = await Promise.all([
-        api.get<{ drafts: Draft[] }>("/drafts", params),
-        api.get<{ accounts: string[] }>("/accounts"),
-        api.get<PostingState>("/settings/posting"),
-        api.get<LocationRef>("/reference/locations"),
-        api.get<GenerationState>("/settings/generation"),
-      ]);
-      setDrafts(list.drafts);
-      setAccounts(accts.accounts);
-      setPosting(posting);
-      setLocations(locs);
-      setGeneration(gen);
-      if (accts.accounts.length) {
-        const list = accts.accounts.join(",");
-        const [h, s] = await Promise.all([
-          api.get<Health>("/drafts/health", { accounts: list }),
-          api.get<{ schedule: ScheduleEntry[] }>("/drafts/schedule", { accounts: list }),
-        ]);
-        setHealth(h);
-        setSchedule(s.schedule);
-      }
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    }
-  }, [params]);
+  // Every mutation used to call load(), which re-requested all seven endpoints
+  // — including /reference/locations, which is a constant compiled into
+  // reference.py. Marking one draft reviewed cost seven round trips. Each query
+  // is now cached and invalidated on its own terms.
+  const draftsQ = useQuery({
+    queryKey: ["drafts", params],
+    queryFn: () => api.get<{ drafts: Draft[] }>("/drafts", params),
+    placeholderData: (prev) => prev,
+  });
+  const accountsQ = useQuery({
+    queryKey: ["accounts"],
+    queryFn: () => api.get<{ accounts: string[] }>("/accounts"),
+    staleTime: 5 * 60_000,
+  });
+  const postingQ = useQuery({
+    queryKey: ["settings", "posting"],
+    queryFn: () => api.get<PostingState>("/settings/posting"),
+  });
+  const locationsQ = useQuery({
+    queryKey: ["reference", "locations"],
+    queryFn: () => api.get<LocationRef>("/reference/locations"),
+    staleTime: Infinity, // static reference data; it cannot change at runtime
+  });
+  const generationQ = useQuery({
+    queryKey: ["settings", "generation"],
+    queryFn: () => api.get<GenerationState>("/settings/generation"),
+  });
 
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const accounts = accountsQ.data?.accounts ?? [];
+  const acctKey = accounts.join(",");
 
-  async function mutate(fn: () => Promise<unknown>) {
-    setBusy(true);
-    setError(null);
-    try {
-      await fn();
-      await load();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const healthQ = useQuery({
+    queryKey: ["drafts", "health", acctKey],
+    queryFn: () => api.get<Health>("/drafts/health", { accounts: acctKey }),
+    enabled: accounts.length > 0,
+  });
+  const scheduleQ = useQuery({
+    queryKey: ["drafts", "schedule", acctKey],
+    queryFn: () =>
+      api.get<{ schedule: ScheduleEntry[] }>("/drafts/schedule", { accounts: acctKey }),
+    enabled: accounts.length > 0,
+  });
+
+  const drafts = draftsQ.data?.drafts ?? [];
+  const posting = postingQ.data ?? null;
+  const locations = locationsQ.data ?? null;
+  const generation = generationQ.data ?? null;
+  const health = healthQ.data ?? null;
+  const schedule = scheduleQ.data?.schedule ?? [];
+
+  // Anything that changes drafts also changes queue depth and the forecast.
+  const refreshDrafts = () =>
+    Promise.all([
+      qc.invalidateQueries({ queryKey: ["drafts"] }),
+      qc.invalidateQueries({ queryKey: ["accounts"] }),
+    ]);
+
+  const mutation = useMutation({
+    mutationFn: (fn: () => Promise<unknown>) => fn(),
+    onSuccess: refreshDrafts,
+  });
+
+  const settingsMutation = useMutation({
+    mutationFn: (fn: () => Promise<unknown>) => fn(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings"] }),
+  });
+
+  const mutate = (fn: () => Promise<unknown>) => mutation.mutateAsync(fn).catch(() => {});
+
+  const busy = mutation.isPending || settingsMutation.isPending;
+  const queryError =
+    draftsQ.error ?? accountsQ.error ?? postingQ.error ?? healthQ.error ?? mutation.error ??
+    settingsMutation.error;
+  const error = queryError
+    ? queryError instanceof ApiError
+      ? queryError.message
+      : String(queryError)
+    : null;
 
   return (
     <div className="p-4 space-y-4">
-      <header className="flex items-center justify-between">
+      {/* A div, not <header>: the app shell already provides the one banner
+          landmark, and a second confuses landmark navigation. */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <h1 className="text-lg font-semibold">Review</h1>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             disabled={busy}
             onClick={() => mutate(() => api.post("/drafts/generate", { force: true, limit: 10 }))}
-            className="text-sm px-3 py-1 rounded bg-accent hover:bg-accent-hover disabled:opacity-40"
+            className="text-sm px-3 py-1 rounded bg-accent text-accent-fg hover:bg-accent-hover disabled:opacity-40"
             title="Fill the queue now instead of waiting for the background job"
           >
-            {busy ? "Generating…" : "Generate now"}
+            {mutation.isPending ? "Working…" : "Generate now"}
           </button>
           <button
             onClick={() => setCreating(true)}
-            className="text-sm px-3 py-1 rounded bg-primary hover:bg-primary-hover"
+            className="text-sm px-3 py-1 rounded bg-primary text-primary-fg hover:bg-primary-hover"
           >
             New draft
           </button>
           <button
-            onClick={() => void load()}
+            onClick={() => void qc.invalidateQueries()}
             className="text-sm px-2 py-1 rounded hover:bg-surface-2 text-fg-muted"
           >
             Refresh
           </button>
         </div>
-      </header>
+      </div>
 
       {error && (
-        <div className="rounded border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+        <div
+          role="alert"
+          className="rounded border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg"
+        >
           {error}
         </div>
       )}
@@ -224,8 +255,13 @@ export default function ReviewPage() {
         <PostingSwitch
           state={posting}
           busy={busy}
+          // settingsMutation, not mutate: pausing has to invalidate the
+          // settings queries so both this switch and the header status pill
+          // reflect it immediately.
           onToggle={(enabled, reason) =>
-            mutate(() => api.put("/settings/posting", { enabled, reason }))
+            settingsMutation
+              .mutateAsync(() => api.put("/settings/posting", { enabled, reason }))
+              .catch(() => {})
           }
         />
       )}
@@ -255,7 +291,17 @@ export default function ReviewPage() {
         ))}
       </div>
 
-      {drafts.length === 0 ? (
+      {draftsQ.isLoading ? (
+        <ul className="space-y-2" aria-hidden="true">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <li key={i} className="rounded border border-border bg-surface/40 p-3 space-y-2">
+              <div className="h-3 w-40 bg-surface-2 rounded animate-pulse" />
+              <div className="h-4 w-2/3 bg-surface-2 rounded animate-pulse" />
+              <div className="h-3 w-1/3 bg-surface-2 rounded animate-pulse" />
+            </li>
+          ))}
+        </ul>
+      ) : drafts.length === 0 ? (
         <p className="text-fg-subtle text-sm py-8 text-center">
           Nothing here.
           {filter === "queued" && " An empty queue means nothing will post — posting is fail-closed."}
