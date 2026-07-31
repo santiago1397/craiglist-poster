@@ -83,29 +83,47 @@ All commands run via `uv run cl <command>`.
 
 ## Editing live posts
 
-A post used to be write-once. Now the dashboard's **Edits** tab can change one,
-and the desktop applies it when it next has a free browser.
+A post used to be write-once. Now **Posts → click any post** opens its own page,
+where you edit it with the same form Review uses for drafts — copy, images and
+all — and the desktop applies the change when it next has a free browser.
+
+There is no separate Edits tab any more. "Change this ad" is one question, and
+it should not depend on whether the ad has published yet.
 
 The flow is asynchronous end to end — nothing here happens the moment you click:
 
 1. **Load** — the desktop opens the post's real Craigslist edit form and reports
    its current content back. The dashboard has never stored post bodies, so this
-   is the only way to know what a post actually says.
-2. **Edit** — you change the title/body. That records *desired state*, not a job:
-   editing twice before the desktop runs just supersedes, it doesn't queue twice.
+   is the only way to know what a post actually says. Nothing is editable until
+   you have done this once.
+2. **Edit** — you change the copy or the images. That records *desired state*,
+   not a job: editing twice before the desktop runs just supersedes, it doesn't
+   queue twice.
 3. **Reconcile** — the desktop takes the browser lease, re-reads the form, checks
    it still matches what you were looking at, and applies the change.
 
 If the live post moved underneath you, the edit **parks** instead of clobbering
 it. If a reconcile fails after touching the images, the post is flagged
 `degraded_live` — that means a live posting is in a worse state than before and
-needs you.
+needs you. Both surface on the post's own page, and as counts on **Posts** and
+in **Diagnostics → Editing live posts**.
 
-> **Editing ships disabled.** `edits_enabled` defaults to false. Nothing will
-> touch a live posting until you turn it on under **Settings → Guardrails**, and
-> you should not do that until the phase-0 spike in
-> [DESIGN_EDITS.md](DESIGN_EDITS.md) is done — the Craigslist edit-form
-> selectors in `src/craigslist_auto/editor.py` are inferred, not observed.
+> **Editing is now ON, and the selectors behind it have never been run against
+> the real form.** Migration 0015 flips `edits_enabled` to true. The Craigslist
+> edit-form selectors in `src/craigslist_auto/editor.py` are still inferred, so
+> work through the ladder in [DESIGN_EDITS.md](DESIGN_EDITS.md) — spike,
+> `cl edit --dry-run`, then `cl edit-canary` on a throwaway post — before
+> letting the daemon run against real inventory. Set `CL_EDIT_TRACE=1` while you
+> do: it captures the form on success as well as failure, and every attempt
+> records which selectors matched.
+>
+> To stop it at any time, without a deploy: **Settings → Guardrails**, or
+> `UPDATE guardrail_settings SET edits_enabled = FALSE, edits_paused_reason = '…'`.
+
+**County and service type are not editable on a live post.** Craigslist's edit
+form exposes no control for either, so offering them would stage a change the
+desktop can never make. Anything else it cannot reach fails loudly rather than
+reporting success — see `unsupported_field` in Diagnostics.
 
 Edits have their own guardrails, mirroring posting: an edit window, a per-account
 daily cap, a per-post cooldown, and a lifetime cap. Failed attempts count against

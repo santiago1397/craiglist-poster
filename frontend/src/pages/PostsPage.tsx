@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { AlertTriangle, Circle, CircleOff, ExternalLink, EyeOff, HelpCircle } from "lucide-react";
 import { api } from "../lib/api";
 import { formatDate, formatNumber, formatRate } from "../lib/format";
@@ -24,6 +24,9 @@ type PostRow = {
   shares: number | null;
   favorites: number | null;
   ghosted: boolean | null;
+  // Editing state, so a row can say it has a change waiting or needs rescuing.
+  edit_status: string | null;
+  has_pending_edit: boolean | null;
   days_active: number | null;
   views_per_day: number | null;
   impressions_per_day: number | null;
@@ -43,6 +46,7 @@ type Resp = {
   offset: number;
   items: PostRow[];
   counts: Partial<Record<Liveness, number>>;
+  edit_counts: { degraded: number; parked: number; pending: number };
   sync: SyncInfo;
 };
 type AccountsResp = { accounts: string[] };
@@ -55,6 +59,16 @@ export default function PostsPage() {
   const [ghost, setGhost] = useState<string>("");
   const [since, setSince] = useState<string>("");
   const [search, setSearch] = useState<string>("");
+  // Read from the URL so Diagnostics and the retired /edits page can link
+  // straight to "show me what is degraded".
+  const [urlParams, setUrlParams] = useSearchParams();
+  const edit = urlParams.get("edit") ?? "";
+  const setEdit = (v: string) => {
+    const next = new URLSearchParams(urlParams);
+    if (v) next.set("edit", v);
+    else next.delete("edit");
+    setUrlParams(next, { replace: true });
+  };
   const [sort, setSort] = useState<string>("posted_ts");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(0);
@@ -70,6 +84,7 @@ export default function PostsPage() {
       account: account || undefined,
       status: status || undefined,
       ghost: ghost || undefined,
+      edit: edit || undefined,
       since: since || undefined,
       search: search || undefined,
       sort,
@@ -77,7 +92,7 @@ export default function PostsPage() {
       limit: PAGE_SIZE,
       offset: page * PAGE_SIZE,
     }),
-    [account, status, ghost, since, search, sort, sortDir, page],
+    [account, status, ghost, edit, since, search, sort, sortDir, page],
   );
 
   const q = useQuery({
@@ -89,6 +104,7 @@ export default function PostsPage() {
   const items = q.data?.items ?? [];
   const total = q.data?.total ?? 0;
   const counts = q.data?.counts ?? {};
+  const editCounts = q.data?.edit_counts;
   const sync = q.data?.sync;
   const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
 
@@ -112,11 +128,36 @@ export default function PostsPage() {
           {formatNumber(counts.ended ?? 0)} ended
           {counts.unknown ? ` · ${formatNumber(counts.unknown)} never checked` : null}
         </p>
+        {/* A degraded posting is live and worse off than before an edit touched
+            it — usually with no photos. It gets its own chip rather than a line
+            in a tally, because it is the one thing here that cannot wait. */}
+        {!!editCounts?.degraded && (
+          <button
+            onClick={() => {
+              setEdit("degraded");
+              setPage(0);
+            }}
+            className="text-xs px-2 py-0.5 rounded border border-danger-border bg-danger text-danger-fg hover:opacity-90"
+          >
+            {editCounts.degraded} degraded — needs you now
+          </button>
+        )}
+        {!!editCounts?.parked && (
+          <button
+            onClick={() => {
+              setEdit("parked");
+              setPage(0);
+            }}
+            className="text-xs px-2 py-0.5 rounded border border-warn-border bg-warn text-warn-fg hover:opacity-90"
+          >
+            {editCounts.parked} parked edit{editCounts.parked === 1 ? "" : "s"}
+          </button>
+        )}
       </div>
 
       {sync?.stale && <StaleSyncBanner sync={sync} />}
 
-      <div className="grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-6">
+      <div className="grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <input
           value={search}
           onChange={(e) => {
@@ -166,6 +207,19 @@ export default function PostsPage() {
           <option value="visible">Visible</option>
           <option value="ghosted">Ghosted</option>
           <option value="unchecked">Unchecked</option>
+        </select>
+        <select
+          value={edit}
+          onChange={(e) => {
+            setEdit(e.target.value);
+            setPage(0);
+          }}
+          className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
+        >
+          <option value="">Any edit state</option>
+          <option value="pending">Change pending</option>
+          <option value="parked">Parked</option>
+          <option value="degraded">Degraded</option>
         </select>
         <select
           value={since}
@@ -220,7 +274,10 @@ export default function PostsPage() {
                   {r.account} · {formatDate(r.posted_ts)} · {r.post_id}
                 </p>
               </Link>
-              <StatusChip liveness={r.liveness} ghosted={r.ghosted} staleDays={r.sync_age_days} />
+              <div className="flex flex-col items-end gap-1">
+                <StatusChip liveness={r.liveness} ghosted={r.ghosted} staleDays={r.sync_age_days} />
+                <EditChip post={r} />
+              </div>
             </div>
             <dl className="mt-2 grid grid-cols-4 gap-2 text-center">
               {[
@@ -286,11 +343,14 @@ export default function PostsPage() {
                   {formatDate(r.posted_ts)}
                 </td>
                 <td className="px-3 py-2">
-                  <StatusChip
-                  liveness={r.liveness}
-                  ghosted={r.ghosted}
-                  staleDays={r.sync_age_days}
-                />
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <StatusChip
+                      liveness={r.liveness}
+                      ghosted={r.ghosted}
+                      staleDays={r.sync_age_days}
+                    />
+                    <EditChip post={r} />
+                  </div>
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.impressions)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.views)}</td>
@@ -416,6 +476,31 @@ const LIVENESS_STYLE: Record<Liveness, { label: string; cls: string; Icon: typeo
     Icon: HelpCircle,
   },
 };
+
+// The edit state of a row, when it has one worth showing. Deliberately silent
+// for an ad with nothing staged — most rows are in that state and a chip on
+// every one of them would say nothing.
+function EditChip({ post }: { post: PostRow }) {
+  const style =
+    post.edit_status === "degraded_live"
+      ? { label: "degraded", cls: "text-danger-fg border-danger-border bg-danger" }
+      : ["parked_stale", "parked_gone", "failed"].includes(post.edit_status ?? "")
+        ? { label: "edit parked", cls: "text-warn-fg border-warn-border bg-warn" }
+        : post.has_pending_edit
+          ? { label: "edit pending", cls: "text-fg-muted border-border-strong bg-surface-2" }
+          : null;
+  if (!style) return null;
+  return (
+    <span
+      className={cn(
+        "text-xs px-1.5 py-0.5 rounded border whitespace-nowrap",
+        style.cls,
+      )}
+    >
+      {style.label}
+    </span>
+  );
+}
 
 function StatusChip({
   liveness,

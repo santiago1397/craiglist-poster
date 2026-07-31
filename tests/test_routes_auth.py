@@ -11,6 +11,14 @@ required = [
     "/drafts", "/drafts/health", "/drafts/{draft_id}",
     "/drafts/{draft_id}/reorder", "/drafts/{draft_id}/requeue",
     "/settings/guardrails", "/settings/machine-tokens",
+    # Live-post editing. These drive the editor on a post's own page, and they
+    # can change a listing that is published and earning, so they belong in this
+    # inventory at least as much as the draft routes do.
+    "/edits", "/edits/health", "/edits/{post_id}",
+    "/edits/{post_id}/hydrate", "/edits/{post_id}/desired",
+    "/edits/{post_id}/requeue", "/edits/{post_id}/attempts",
+    "/edits/{post_id}/images", "/edits/{post_id}/images/{image_id}",
+    "/edits/{post_id}/images/autofill", "/edits/{post_id}/images/cover",
 ]
 missing = [r for r in required if r not in paths]
 assert not missing, f"missing routes: {missing}"
@@ -27,6 +35,17 @@ checks = [
     ("GET", "/drafts", None),
     ("PUT", "/settings/guardrails", {"max_posts_per_day_total": 3}),
     ("DELETE", "/drafts/1", None),
+    # Every write that can reach a live Craigslist listing.
+    ("GET", "/edits", None),
+    ("GET", "/edits/7811111111", None),
+    ("POST", "/edits/7811111111/hydrate", None),
+    ("PUT", "/edits/7811111111/desired", {"title": "x"}),
+    ("DELETE", "/edits/7811111111/desired", None),
+    ("POST", "/edits/7811111111/requeue", None),
+    ("POST", "/edits/7811111111/images", {"image_id": 1, "slot": 1}),
+    ("POST", "/edits/7811111111/images/autofill", {"count": 5}),
+    ("POST", "/edits/7811111111/images/cover", None),
+    ("DELETE", "/edits/7811111111/images/1", None),
 ]
 for method, path, body in checks:
     r = client.request(method, path, json=body)

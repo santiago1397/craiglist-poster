@@ -5,7 +5,7 @@
 // post whether or not they have been read (decision 22), so this page's job is
 // to make it easy to catch one before it goes rather than to hold it back.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
@@ -13,6 +13,17 @@ import { cn } from "../lib/cn";
 import { ChevronRight } from "lucide-react";
 import { ConfirmDialog, Modal, RawModal } from "../components/Modal";
 import { formatDate, formatDateTime, formatDayLabel, formatTime } from "../lib/format";
+import { PostingForm } from "../components/posting/PostingForm";
+import { SlotPicker, draftTarget } from "../components/images/SlotPicker";
+import {
+  deriveBodyHead,
+  effectiveBodyLength,
+  postingDirty,
+  splitBody,
+  POSTING_BODY_LIMIT,
+  type LocationRef,
+  type PostingFormValue,
+} from "../lib/posting";
 
 type Draft = {
   id: number;
@@ -42,37 +53,6 @@ type Draft = {
   post_requested_at: string | null;
   post_request_error: string | null;
 };
-
-// Craigslist advertises 16,000 characters and rejects below it — measured
-// against the live form, 15,945 by this rule was refused and 15,412 published.
-// Mirrors POSTING_BODY_LIMIT / effective_body_length in
-// backend/app/services/drafts.py; the server is the authority, this is here so
-// you find out while typing rather than three failed posting slots later.
-const POSTING_BODY_LIMIT = 15_000;
-
-function effectiveBodyLength(body: string): number {
-  // A textarea submits with every line break as CRLF, and the value comes back
-  // HTML-escaped — so newlines cost two and each "&" costs five.
-  const crlf = body.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n/g, "\r\n");
-  return crlf.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").length;
-}
-
-function BodyCounter({ body }: { body: string }) {
-  const n = effectiveBodyLength(body);
-  const over = n > POSTING_BODY_LIMIT;
-  const near = !over && n > POSTING_BODY_LIMIT * 0.9;
-  return (
-    <span
-      className={cn(
-        "text-xs tabular-nums",
-        over ? "text-danger-fg font-medium" : near ? "text-warn-fg" : "text-fg-subtle",
-      )}
-    >
-      {n.toLocaleString()} / {POSTING_BODY_LIMIT.toLocaleString()}
-      {over && ` — ${(n - POSTING_BODY_LIMIT).toLocaleString()} over, Craigslist will reject this`}
-    </span>
-  );
-}
 
 type GenerationState = {
   enabled: boolean;
@@ -108,19 +88,6 @@ type PostingState = {
   paused_reason: string | null;
 };
 
-type CountyRef = {
-  name: string;
-  subarea_supported: boolean;
-  cities: { city: string; zip: string }[];
-};
-
-type LocationRef = {
-  counties: CountyRef[];
-  phone_numbers: string[];
-  license_number: string;
-  service_offered: string;
-};
-
 type ScheduleEntry = {
   draft_id: number;
   account: string;
@@ -137,22 +104,6 @@ const FILTERS = [
 ] as const;
 
 type FilterKey = (typeof FILTERS)[number]["key"];
-
-// Craigslist accepts 24 images per posting: one thumbnail plus 23 more.
-const MAX_IMAGE_SLOTS = 24;
-
-// Slot 1 is the thumbnail and takes a cover; every other slot takes a photo.
-// The server enforces this — attaching the wrong kind is a 409.
-const COVER_SLOT = 1;
-
-// A candidate from one of the two stacks. `bucket` is computed server-side;
-// 'assigned' means a live draft already holds it.
-type PoolImage = {
-  id: number;
-  kind: "cover" | "photo";
-  bucket: string;
-  assigned_draft_id: number | null;
-};
 
 const IMG_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
 
@@ -535,10 +486,12 @@ function CreateDialog(props: {
   onCreate: (payload: Record<string, unknown>) => Promise<void>;
 }) {
   const L = props.locations;
-  const [f, setF] = useState({
+  const [f, setF] = useState<PostingFormValue>({
     account: props.accounts[0] ?? "",
     title: "",
     body: "",
+    // Nothing has split this copy, so the body editor stays a single box.
+    body_head: null,
     city: "",
     county: "",
     postal_code: "",
@@ -546,8 +499,6 @@ function CreateDialog(props: {
     phone_number: "",
     license_number: "",
   });
-  const set = (k: keyof typeof f) => (e: { target: { value: string } }) =>
-    setF({ ...f, [k]: e.target.value });
 
   // Prefill the constants once reference data lands — license and phone are
   // the same on every ad, so making you retype them only invites typos.
@@ -559,26 +510,6 @@ function CreateDialog(props: {
       phone_number: prev.phone_number || L.phone_numbers[0],
     }));
   }, [L]);
-
-  const county = L?.counties.find((c) => c.name === f.county) ?? null;
-
-  // Changing county invalidates the chosen city, so clear both it and the zip
-  // rather than leaving a Broward city sitting under Palm Beach.
-  const onCounty = (name: string) =>
-    setF({ ...f, county: name, city: "", postal_code: "" });
-
-  // Selecting a city fills its zip, still editable afterwards.
-  // Picking a city seeds the free-text area box too, but leaves it editable —
-  // widening it to nearby towns is the whole point of the separate field.
-  const onCity = (city: string) => {
-    const hit = county?.cities.find((c) => c.city === city);
-    setF({
-      ...f,
-      city,
-      postal_code: hit?.zip ?? f.postal_code,
-      geographic_area: f.geographic_area.trim() ? f.geographic_area : city,
-    });
-  };
 
   const valid =
     f.account &&
@@ -618,7 +549,7 @@ function CreateDialog(props: {
                 service_offered: L?.service_offered ?? "",
                 // body_head drives the advisory similarity score; without a
                 // generator to split head from tail, the body doubles as it.
-                body_head: f.body.split("\n\n.")[0].slice(0, 2000),
+                body_head: deriveBodyHead(f.body),
                 source: "manual",
               })
             }
@@ -629,192 +560,19 @@ function CreateDialog(props: {
         </>
       }
     >
-      <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* On a fresh database no account has posted yet, so the list is
-                empty — fall back to typing the name rather than dead-ending. */}
-            {props.accounts.length > 0 ? (
-              <label className="block">
-                <span className="text-xs text-fg-muted">Account</span>
-                <select
-                  value={f.account}
-                  onChange={set("account")}
-                  className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-                >
-                  {props.accounts.map((a) => (
-                    <option key={a} value={a}>
-                      {a}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : (
-              <Field label="Account (e.g. craigs1)" value={f.account} onChange={set("account")} />
-            )}
-            {/* County first: it decides which cities are valid, and it is what
-                the poster uses to pick the Craigslist subarea. */}
-            <label className="block">
-              <span className="text-xs text-fg-muted">County</span>
-              <select
-                value={f.county}
-                onChange={(e) => onCounty(e.target.value)}
-                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-              >
-                <option value="">Select…</option>
-                {L?.counties.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {c.name}
-                    {c.subarea_supported ? "" : "  (not routable)"}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-fg-muted">
-                City {county ? `(${county.cities.length})` : ""}
-              </span>
-              <select
-                value={f.city}
-                onChange={(e) => onCity(e.target.value)}
-                disabled={!county}
-                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm disabled:opacity-40"
-              >
-                <option value="">{county ? "Select…" : "Pick a county first"}</option>
-                {county?.cities.map((c) => (
-                  <option key={c.city} value={c.city}>
-                    {c.city}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <Field label="Zip" value={f.postal_code} onChange={set("postal_code")} />
-
-            <label className="block">
-              <span className="text-xs text-fg-muted">Phone</span>
-              <select
-                value={f.phone_number}
-                onChange={set("phone_number")}
-                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-              >
-                {L?.phone_numbers.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <Field label="License" value={f.license_number} onChange={set("license_number")} />
-          </div>
-
-          {county && !county.subarea_supported && (
-            <p className="text-xs text-warn-fg border border-warn-border bg-warn/60 rounded px-2 py-1.5">
-              The poster cannot map <strong>{county.name}</strong> to a Craigslist
-              subarea — it will fall back to the first option on the form and file
-              the ad under the wrong area. Use a different county until that is
-              fixed.
-            </p>
-          )}
-          <label className="block">
-            <span className="text-xs text-fg-muted">
-              City or neighborhood — Craigslist's free-text area box. Accepts
-              more than one place: “Fort Lauderdale, Davie, Plantation” widens
-              the searches you show up in.
-            </span>
-            <input
-              value={f.geographic_area}
-              onChange={set("geographic_area")}
-              placeholder={f.city || "e.g. Davie, Plantation, Cooper City"}
-              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-            />
-          </label>
-          <TitleField value={f.title} onChange={(v) => setF({ ...f, title: v })} />
-          <label className="block">
-            <span className="flex items-baseline justify-between gap-2">
-              <span className="text-xs text-fg-muted">
-                Body — paste the full posting text, keyword tail included
-              </span>
-              <BodyCounter body={f.body} />
-            </span>
-            <textarea
-              value={f.body}
-              onChange={set("body")}
-              rows={14}
-              className={cn(
-                "w-full mt-1 bg-bg border rounded px-2 py-1.5 text-sm font-mono",
-                effectiveBodyLength(f.body) > POSTING_BODY_LIMIT
-                  ? "border-danger-border"
-                  : "border-border-strong",
-              )}
-            />
-          </label>
-      </>
+      <PostingForm
+        value={f}
+        onChange={setF}
+        accounts={props.accounts}
+        locations={L}
+        caps={{
+          accountEditable: true,
+          showCounty: true,
+          showGeographicArea: true,
+          cityMode: "select",
+        }}
+      />
     </Modal>
-  );
-}
-
-function Field(props: {
-  label: string;
-  value: string;
-  onChange: (e: { target: { value: string } }) => void;
-}) {
-  return (
-    <label className="block">
-      <span className="text-xs text-fg-muted">{props.label}</span>
-      <input
-        value={props.value}
-        onChange={props.onChange}
-        className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-      />
-    </label>
-  );
-}
-
-// Craigslist truncates posting titles around 70 characters. Nothing warned you,
-// so an over-long title silently lost its ending — usually the city or the
-// call to action, which is the part doing the work.
-const TITLE_LIMIT = 70;
-
-function TitleField({
-  value,
-  onChange,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  const over = value.length > TITLE_LIMIT;
-  return (
-    <label className="block">
-      <span className="flex items-baseline justify-between gap-2">
-        <span className="text-xs text-fg-muted">Title</span>
-        <span className={cn("text-xs tabular-nums", over ? "text-warn-fg" : "text-fg-subtle")}>
-          {value.length}/{TITLE_LIMIT}
-        </span>
-      </span>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-describedby="title-limit-hint"
-        className={cn(
-          "w-full mt-1 bg-bg border rounded px-2 py-1.5 text-sm",
-          over ? "border-warn-border" : "border-border-strong",
-        )}
-      />
-      {/* A soft warning, not a maxLength: hard-truncating a pasted title would
-          throw away characters without saying so. */}
-      <span
-        id="title-limit-hint"
-        className={cn("text-xs mt-1 block", over ? "text-warn-fg" : "sr-only")}
-      >
-        {over
-          ? `Craigslist shows about ${TITLE_LIMIT} characters — the last ${
-              value.length - TITLE_LIMIT
-            } may be cut off.`
-          : `Craigslist shows about ${TITLE_LIMIT} characters.`}
-      </span>
-    </label>
   );
 }
 
@@ -1159,7 +917,7 @@ function DraftRow(props: {
             {d.not_before && <span>not before {fmt(d.not_before)}</span>}
             {d.expires_at && <span>expires {fmt(d.expires_at)}</span>}
           </div>
-          <DraftImages draftId={d.id} account={d.account} busy={busy} />
+          <SlotPicker target={draftTarget(d.id, d.account)} busy={busy} />
           <DraftBody body={d.body} head={d.body_head} />
         </div>
       )}
@@ -1174,274 +932,6 @@ function DraftRow(props: {
 // The cover is a separate act from the photos, because they are separate
 // decisions: slot 1 is the Craigslist thumbnail and is chosen by hand, while
 // slots 2-24 are bulk and fill with one press.
-function DraftImages(props: { draftId: number; account: string; busy: boolean }) {
-  const [attached, setAttached] = useState<{ id: number; slot: number }[]>([]);
-  const [pool, setPool] = useState<PoolImage[]>([]);
-  // Which stack the open picker is showing: covers for slot 1, photos for the
-  // rest. `null` means closed.
-  const [picking, setPicking] = useState<"cover" | "photo" | null>(null);
-  const [filling, setFilling] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const r = await api.get<{ images: { id: number; slot: number }[] }>(
-        `/images/draft/${props.draftId}`,
-      );
-      setAttached(r.images);
-    } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
-    }
-  }, [props.draftId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  async function openPicker(kind: "cover" | "photo") {
-    setErr(null);
-    try {
-      // Reserved images come back too, so they can be offered greyed rather
-      // than vanishing with no explanation of where they went.
-      const r = await api.get<{ images: PoolImage[] }>("/images", {
-        status: "approved",
-        kind,
-        account: props.account,
-        limit: 60,
-      });
-      setPool(r.images);
-      setPicking(kind);
-    } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
-    }
-  }
-
-  async function act(fn: () => Promise<unknown>) {
-    setErr(null);
-    try {
-      await fn();
-      await load();
-    } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
-    }
-  }
-
-  async function autofill() {
-    setErr(null);
-    setNote(null);
-    setFilling(true);
-    try {
-      const r = await api.post<{ filled: number; requested: number }>(
-        `/images/draft/${props.draftId}/autofill`,
-        { count: MAX_IMAGE_SLOTS - 1 },
-      );
-      // A short fill is the ordinary case with manual refill, so it is reported
-      // plainly rather than as an error.
-      setNote(
-        r.filled === 0
-          ? "Nothing to add — the photo stack has nothing free for this account."
-          : r.filled < r.requested
-            ? `Filled ${r.filled} of ${r.requested} — the photo stack is short.`
-            : `Filled ${r.filled} slots.`,
-      );
-      await load();
-    } catch (e) {
-      setErr(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setFilling(false);
-    }
-  }
-
-  const cover = attached.find((a) => a.slot === COVER_SLOT) ?? null;
-  const photos = attached.filter((a) => a.slot !== COVER_SLOT);
-  // Photos land in the first free slot after the cover, so a detach in the
-  // middle is reused rather than pushing everything toward the 24-slot ceiling.
-  const taken = new Set(attached.map((a) => a.slot));
-  const nextPhotoSlot =
-    Array.from({ length: MAX_IMAGE_SLOTS - 1 }, (_, i) => i + 2).find((s) => !taken.has(s)) ??
-    MAX_IMAGE_SLOTS;
-  const targetSlot = picking === "cover" ? COVER_SLOT : nextPhotoSlot;
-  const free = pool.filter((p) => !attached.some((a) => a.id === p.id));
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-xs text-fg-muted">
-          Images ({attached.length}/{MAX_IMAGE_SLOTS})
-        </span>
-        <button
-          disabled={props.busy}
-          onClick={() => void openPicker("cover")}
-          className={cn(
-            "text-xs px-2 py-0.5 rounded border disabled:opacity-40",
-            cover
-              ? "border-border-strong text-fg-muted hover:bg-surface-2"
-              : "border-warn-border bg-warn text-warn-fg hover:opacity-90",
-          )}
-        >
-          {cover ? "Change cover" : "Choose cover"}
-        </button>
-        {photos.length < MAX_IMAGE_SLOTS - 1 && (
-          <>
-            <button
-              disabled={props.busy || filling}
-              onClick={() => void autofill()}
-              className="text-xs px-2 py-0.5 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
-            >
-              {filling ? "Filling…" : `Autofill ${MAX_IMAGE_SLOTS - 1} photos`}
-            </button>
-            <button
-              disabled={props.busy}
-              onClick={() => void openPicker("photo")}
-              className="text-xs px-2 py-0.5 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
-            >
-              + Add photo
-            </button>
-          </>
-        )}
-      </div>
-      {err && <p className="text-xs text-danger-fg">{err}</p>}
-      {note && <p className="text-xs text-fg-muted">{note}</p>}
-      {!cover && attached.length > 0 && (
-        <p className="text-xs text-warn-fg">
-          No cover chosen. If this posts as-is, one gets picked automatically at claim time —
-          or a roof photo becomes the thumbnail if the cover stack is empty.
-        </p>
-      )}
-
-      {attached.length === 0 ? (
-        <p className="text-xs text-fg-subtle italic">
-          No images — this post will go out text-only.
-        </p>
-      ) : (
-        <ul className="flex gap-2 flex-wrap">
-          {attached.map((a) => (
-            <li key={a.id} className="relative">
-              {/* /thumb. Stored files average ~772KB, so a draft at the
-                  24-slot limit was ~18MB of full-resolution downloads the
-                  moment you expanded its row, on whatever connection you were
-                  on. Lazy + async decode means only what you scroll to. */}
-              <img
-                src={`${IMG_BASE}/images/${a.id}/thumb`}
-                alt={a.slot === 1 ? "Cover image (Craigslist thumbnail)" : `Image in slot ${a.slot}`}
-                loading="lazy"
-                decoding="async"
-                width={112}
-                height={80}
-                className="h-20 w-28 object-cover rounded border border-border-strong bg-surface-2"
-              />
-              <span className="absolute top-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-white">
-                {a.slot === 1 ? "cover" : a.slot}
-              </span>
-              <button
-                onClick={() => act(() => api.del(`/images/draft/${props.draftId}/attach/${a.id}`))}
-                className="absolute top-0.5 right-0.5 text-[10px] px-1 rounded bg-black/70 text-danger-fg hover:bg-danger"
-                title="Detach"
-              >
-                ✕
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {picking && (
-        <div className="border border-border-strong rounded p-2 bg-bg/60">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-xs text-fg-muted">
-              {picking === "cover"
-                ? `Cover stack — becomes the Craigslist thumbnail`
-                : `Photo stack — attaches as slot ${targetSlot}`}
-              {" · "}
-              {props.account}
-            </span>
-            <button
-              onClick={() => setPicking(null)}
-              className="text-xs text-fg-muted hover:text-fg px-1"
-            >
-              close
-            </button>
-          </div>
-          {free.length === 0 ? (
-            <p className="text-xs text-fg-subtle">
-              The {picking} stack is empty for this account. Generate or upload{" "}
-              {picking}s on the Images page.
-            </p>
-          ) : (
-            <ul className="flex gap-2 flex-wrap max-h-44 overflow-auto">
-              {free.map((p) => {
-                // Reserved by another draft. Shown rather than hidden, because
-                // an image silently missing from the picker is impossible to
-                // reason about — and reuse is legitimate, just never accidental.
-                const held =
-                  p.bucket === "assigned" && p.assigned_draft_id !== props.draftId
-                    ? (p.assigned_draft_id ?? "a live posting")
-                    : null;
-                return (
-                  <li key={p.id}>
-                    <button
-                      onClick={() =>
-                        act(async () => {
-                          if (
-                            held !== null &&
-                            !window.confirm(
-                              `Image ${p.id} is already reserved by ` +
-                                `${typeof held === "number" ? `draft #${held}` : held}. ` +
-                                `Using it here means the same picture goes out twice on ` +
-                                `this account, which is what gets listings ghosted.\n\n` +
-                                `Attach it anyway?`,
-                            )
-                          )
-                            return;
-                          await api.post(`/images/draft/${props.draftId}/attach`, {
-                            image_id: p.id,
-                            slot: targetSlot,
-                            allow_double_book: held !== null,
-                          });
-                          setPicking(null);
-                        })
-                      }
-                      className="block relative"
-                      title={
-                        held !== null
-                          ? `Reserved by ${typeof held === "number" ? `draft #${held}` : held} — click to reuse anyway`
-                          : `Attach as slot ${targetSlot}`
-                      }
-                    >
-                      <img
-                        src={`${IMG_BASE}/images/${p.id}/thumb`}
-                        alt={`Image ${p.id}${held !== null ? `, reserved` : ""}`}
-                        loading="lazy"
-                        decoding="async"
-                        width={96}
-                        height={64}
-                        className={cn(
-                          "h-16 w-24 object-cover rounded border border-border-strong bg-surface-2 hover:border-ring",
-                          held !== null && "opacity-40",
-                        )}
-                      />
-                      {held !== null && (
-                        <span className="absolute bottom-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-warn-fg">
-                          {typeof held === "number" ? `#${held}` : "live"}
-                        </span>
-                      )}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// A deliberately faithful mock of a Craigslist posting page, so you can judge
-// the ad as a buyer sees it rather than as a database row. Rendered light-on-
-// white regardless of the dashboard theme, because that is what Craigslist is —
-// and because the contrast is exactly what makes the disclaimer unmissable.
 function PreviewDialog(props: { draft: Draft; onClose: () => void }) {
   const d = props.draft;
   const [images, setImages] = useState<{ id: number; slot: number }[]>([]);
@@ -1639,13 +1129,12 @@ function Actions(props: {
  */
 function DraftBody({ body, head }: { body: string; head: string | null }) {
   const [showTail, setShowTail] = useState(false);
-  const splittable = Boolean(head && body.startsWith(head) && body.length > head.length);
-  const tail = splittable ? body.slice(head!.length).replace(/^\n+/, "") : "";
+  const { splittable, head: copy, tail } = splitBody(body, head);
 
   return (
     <div className="space-y-2">
       <pre className="text-xs text-fg-muted whitespace-pre-wrap font-mono max-h-96 overflow-auto bg-bg/60 rounded p-2">
-        {splittable ? head : body}
+        {copy}
       </pre>
       {splittable && (
         <>
@@ -1705,72 +1194,32 @@ function EditDialog(props: {
   onSave: (patch: Record<string, unknown>) => Promise<void>;
 }) {
   const d = props.draft;
-  const L = props.locations;
-  const [title, setTitle] = useState(d.title);
-  const [geo, setGeo] = useState(d.geographic_area ?? d.city);
-  const [where, setWhere] = useState({
+  const initial: PostingFormValue = {
     account: d.account,
     county: d.county ?? "",
     city: d.city ?? "",
     postal_code: d.postal_code ?? "",
     phone_number: d.phone_number ?? "",
     license_number: d.license_number ?? "",
-  });
-  const setW = (k: keyof typeof where) => (e: { target: { value: string } }) =>
-    setWhere({ ...where, [k]: e.target.value });
-
-  const county = L?.counties.find((c) => c.name === where.county) ?? null;
-
-  // Same cascade as the create form: changing county invalidates the city and
-  // zip rather than leaving a Broward city filed under Palm Beach.
-  const onCounty = (name: string) =>
-    setWhere({ ...where, county: name, city: "", postal_code: "" });
-  const onCity = (city: string) => {
-    const hit = L?.counties.find((c) => c.name === where.county)?.cities.find((c) => c.city === city);
-    setWhere({ ...where, city, postal_code: hit?.zip ?? where.postal_code });
-    // Only reseed the free-text box while it is still just mirroring the city;
-    // a widened area like "Davie, Plantation" is yours and must survive.
-    setGeo((g) => (!g.trim() || g === where.city ? city : g));
+    title: d.title,
+    body: d.body,
+    body_head: d.body_head,
+    geographic_area: d.geographic_area ?? d.city,
   };
+  const [f, setF] = useState<PostingFormValue>(initial);
 
-  // An existing draft may name a county the reference data no longer lists, and
-  // silently blanking it on open would rewrite the draft on the next save.
-  const countyMissing = Boolean(where.county && L && !county);
-
-  // The generator assembles body as `head + "\n\n" + tail`, so when the stored
-  // head is a prefix of the body the split is exact and needs no guessing. When
-  // it is not — hand-written drafts, or one already edited — fall back to the
-  // single textarea. Inferring a split we cannot prove would silently truncate
-  // a live ad.
-  const splittable = Boolean(d.body_head && d.body.startsWith(d.body_head) && d.body.length > d.body_head.length);
-  const tail = splittable ? d.body.slice(d.body_head!.length).replace(/^\n+/, "") : "";
-
-  const [head, setHead] = useState(splittable ? d.body_head! : d.body);
-  const [tailUnlocked, setTailUnlocked] = useState(false);
-  const [editableTail, setEditableTail] = useState(tail);
-  const [showTail, setShowTail] = useState(false);
-
-  const body = splittable ? `${head}\n\n${editableTail}` : head;
-
-  // Escape now closes the dialog (Radix), so a 14,000-character body needs a
-  // guard or a stray keypress silently discards the edit.
-  const dirty =
-    title !== props.draft.title ||
-    body !== props.draft.body ||
-    geo !== (props.draft.geographic_area ?? props.draft.city) ||
-    where.account !== props.draft.account ||
-    where.county !== (props.draft.county ?? "") ||
-    where.city !== (props.draft.city ?? "") ||
-    where.postal_code !== (props.draft.postal_code ?? "") ||
-    where.phone_number !== (props.draft.phone_number ?? "") ||
-    where.license_number !== (props.draft.license_number ?? "");
+  // Escape closes the dialog (Radix), so a 14,000-character body needs a guard
+  // or a stray keypress silently discards the edit.
+  const dirty = postingDirty(f, initial);
+  const overLimit = effectiveBodyLength(f.body) > POSTING_BODY_LIMIT;
+  const split = splitBody(f.body, f.body_head);
 
   return (
     <Modal
       open
       onOpenChange={(o) => !o && props.onClose()}
       onRequestClose={() => !dirty || confirm("Discard your unsaved changes to this draft?")}
-      title={`Edit draft #${props.draft.id}`}
+      title={`Edit draft #${d.id}`}
       footer={
         <>
           <button
@@ -1780,26 +1229,31 @@ function EditDialog(props: {
             Cancel
           </button>
           <button
-            // The server rejects an over-length body with a 422, so saving
-            // would only bounce. Blocking here says so before the round trip.
-            disabled={effectiveBodyLength(body) > POSTING_BODY_LIMIT}
+            // The server rejects an over-length body with a 422, so saving would
+            // only bounce. Blocking here says so before the round trip.
+            disabled={overLimit}
             title={
-              effectiveBodyLength(body) > POSTING_BODY_LIMIT
+              overLimit
                 ? "The body is over Craigslist's limit — shorten it before saving"
                 : undefined
             }
             onClick={() =>
-              // body_head goes with it. EditDialog used to send only `body`,
-              // leaving body_head frozen at whatever the generator wrote — and
+              // body_head goes with it. This used to send only `body`, leaving
+              // body_head frozen at whatever the generator wrote — and
               // similarity_report scores duplicate detection against body_head
               // alone, so every edit silently decoupled the score from the copy
               // that would actually publish.
               void props.onSave({
-                title,
-                body,
-                body_head: splittable ? head : head.split("\n\n.")[0].slice(0, 2000),
-                geographic_area: geo,
-                ...where,
+                account: f.account,
+                county: f.county,
+                city: f.city,
+                postal_code: f.postal_code,
+                phone_number: f.phone_number,
+                license_number: f.license_number,
+                title: f.title,
+                body: f.body,
+                body_head: split.splittable ? split.head : deriveBodyHead(f.body),
+                geographic_area: f.geographic_area,
                 reviewed: true,
               })
             }
@@ -1810,189 +1264,18 @@ function EditDialog(props: {
         </>
       }
     >
-      <>
-          {/* Where it posts, in the same shape and order as the create form. */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {props.accounts.length > 0 ? (
-              <label className="block">
-                <span className="text-xs text-fg-muted">Account</span>
-                <select
-                  value={where.account}
-                  onChange={setW("account")}
-                  className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-                >
-                  {/* An account absent from the reported list still has to be
-                      selectable, or opening this dialog would silently move the
-                      draft to a different one on save. */}
-                  {(props.accounts.includes(where.account)
-                    ? props.accounts
-                    : [where.account, ...props.accounts]
-                  ).map((a) => (
-                    <option key={a} value={a}>
-                      {a}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : (
-              <Field label="Account" value={where.account} onChange={setW("account")} />
-            )}
-
-            <label className="block">
-              <span className="text-xs text-fg-muted">County</span>
-              <select
-                value={where.county}
-                onChange={(e) => onCounty(e.target.value)}
-                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-              >
-                <option value="">Select…</option>
-                {countyMissing && (
-                  <option value={where.county}>{where.county} (not in reference data)</option>
-                )}
-                {L?.counties.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {c.name}
-                    {c.subarea_supported ? "" : "  (not routable)"}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="block">
-              <span className="text-xs text-fg-muted">
-                City {county ? `(${county.cities.length})` : ""}
-              </span>
-              <select
-                value={where.city}
-                onChange={(e) => onCity(e.target.value)}
-                disabled={!county && !countyMissing}
-                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm disabled:opacity-40"
-              >
-                <option value="">{county ? "Select…" : "Pick a county first"}</option>
-                {/* Likewise for a city the county no longer lists. */}
-                {where.city && !county?.cities.some((c) => c.city === where.city) && (
-                  <option value={where.city}>{where.city}</option>
-                )}
-                {county?.cities.map((c) => (
-                  <option key={c.city} value={c.city}>
-                    {c.city}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <Field label="Zip" value={where.postal_code} onChange={setW("postal_code")} />
-
-            <label className="block">
-              <span className="text-xs text-fg-muted">Phone</span>
-              <select
-                value={where.phone_number}
-                onChange={setW("phone_number")}
-                className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-              >
-                {(L?.phone_numbers ?? []).includes(where.phone_number) ? null : (
-                  <option value={where.phone_number}>{where.phone_number || "—"}</option>
-                )}
-                {L?.phone_numbers.map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <Field label="License" value={where.license_number} onChange={setW("license_number")} />
-          </div>
-
-          {county && !county.subarea_supported && (
-            <p className="text-xs text-warn-fg border border-warn-border bg-warn/60 rounded px-2 py-1.5">
-              The poster cannot map <strong>{county.name}</strong> to a Craigslist
-              subarea — it will fall back to the first option on the form and file
-              the ad under the wrong area. Use a different county until that is
-              fixed.
-            </p>
-          )}
-
-          <label className="block">
-            <span className="text-xs text-fg-muted">
-              City or neighborhood — goes in Craigslist's free-text area box.
-              Not limited to one city: “Fort Lauderdale, Davie, Plantation” or a
-              neighbourhood both work, and widen the searches you appear in.
-            </span>
-            <input
-              value={geo}
-              onChange={(e) => setGeo(e.target.value)}
-              placeholder={props.draft.city}
-              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-            />
-          </label>
-          <TitleField value={title} onChange={setTitle} />
-          <label className="block">
-            <span className="text-xs text-fg-muted">
-              {splittable
-                ? "Ad copy — the part a buyer actually reads. The keyword tail is separate, below."
-                : "Body — the keyword tail is part of this text; edit the top section"}
-            </span>
-            <textarea
-              value={head}
-              onChange={(e) => setHead(e.target.value)}
-              rows={splittable ? 14 : 16}
-              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm font-mono"
-            />
-            {/* The head's own length is the writing aid; the total against the
-                limit is the thing that decides whether Craigslist takes it, so
-                both are shown and the total is what gates Save. */}
-            <span className="mt-1 flex items-baseline justify-between gap-2">
-              <span className="text-xs text-fg-subtle">
-                {head.length.toLocaleString()} characters
-                {splittable && " in the ad copy"}
-              </span>
-              <BodyCounter body={body} />
-            </span>
-          </label>
-
-          {/* Read-only by default. DESIGN.md decision 7 requires the tail stay
-              byte-exact across every ad — it is appended from one stored
-              template — so editing it here is deliberate, not incidental. */}
-          {splittable && (
-            <div className="rounded border border-border bg-bg/40">
-              <div className="flex flex-wrap items-center gap-2 p-2">
-                <button
-                  onClick={() => setShowTail((v) => !v)}
-                  aria-expanded={showTail}
-                  className="text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2"
-                >
-                  {showTail ? "Hide" : "Show"} keyword tail (
-                  {editableTail.length.toLocaleString()} characters)
-                </button>
-                <span className="text-xs text-fg-subtle">
-                  Identical on every ad. Appended automatically.
-                </span>
-                {showTail && !tailUnlocked && (
-                  <button
-                    onClick={() => setTailUnlocked(true)}
-                    className="ml-auto text-xs px-2 py-1 rounded border border-warn-border text-warn-fg hover:bg-warn"
-                  >
-                    Edit anyway
-                  </button>
-                )}
-              </div>
-              {showTail && (
-                <textarea
-                  value={editableTail}
-                  readOnly={!tailUnlocked}
-                  onChange={(e) => setEditableTail(e.target.value)}
-                  rows={10}
-                  aria-label="Keyword tail"
-                  className={cn(
-                    "w-full border-t border-border px-2 py-1.5 text-xs font-mono bg-transparent",
-                    !tailUnlocked && "text-fg-subtle",
-                  )}
-                />
-              )}
-            </div>
-          )}
-      </>
+      <PostingForm
+        value={f}
+        onChange={setF}
+        accounts={props.accounts}
+        locations={props.locations}
+        caps={{
+          accountEditable: true,
+          showCounty: true,
+          showGeographicArea: true,
+          cityMode: "select",
+        }}
+      />
     </Modal>
   );
 }

@@ -463,11 +463,23 @@ def reserved_by(conn: psycopg.Connection, image_id: int) -> int | None:
     return row["draft_id"] if row else None
 
 
-def reserved_by_post(conn: psycopg.Connection, image_id: int) -> str | None:
-    """The live posting whose desired image set holds this image, if any."""
+def reserved_by_post(
+    conn: psycopg.Connection, image_id: int, *, exclude_post_id: str | None = None
+) -> str | None:
+    """The live posting whose desired image set holds this image, if any.
+
+    `exclude_post_id` is the caller's own post. Without it, moving an image from
+    slot 3 to slot 4 of the same posting reads as a double-booking against
+    itself. Excluding in SQL rather than comparing the result keeps the answer
+    deterministic when an image is somehow held by more than one post.
+    """
     row = conn.execute(
-        "SELECT post_id FROM post_desired_images WHERE image_id = %s LIMIT 1",
-        (image_id,),
+        """
+        SELECT post_id FROM post_desired_images
+        WHERE image_id = %s AND (%s::text IS NULL OR post_id <> %s)
+        ORDER BY post_id LIMIT 1
+        """,
+        (image_id, exclude_post_id, exclude_post_id),
     ).fetchone()
     return row["post_id"] if row else None
 
@@ -570,30 +582,40 @@ def stack_health(conn: psycopg.Connection) -> dict:
 # Attachment — this is where an image becomes an account's forever
 # ---------------------------------------------------------------------------
 
-def attach(
+def _check_attachable(
     conn: psycopg.Connection,
     *,
-    draft_id: int,
     image_id: int,
+    account: str,
     slot: int,
-    allow_double_book: bool = False,
+    allow_double_book: bool,
+    self_draft_id: int | None = None,
+    self_post_id: str | None = None,
 ) -> dict:
+    """Every rule that governs binding an image to a slot. Returns the image row.
+
+    Shared by `attach` (queued drafts) and `attach_to_post` (live postings)
+    because the rules are the same rules — the only thing that differs is which
+    table the row lands in. The live-post path used to reimplement a thinner
+    version of this and quietly lost the kind partition and the reservation
+    check with it, so a photo could take slot 1 of a live listing and the same
+    image could be staged on two ads at once.
+
+    `self_draft_id` / `self_post_id` name the target doing the asking, so
+    re-attaching an image to a slot it already occupies is not read as a
+    double-booking against itself.
+    """
     if not (1 <= slot <= MAX_SLOTS):
         raise ValueError(f"slot must be 1-{MAX_SLOTS}")
-    draft = conn.execute(
-        "SELECT id, account, status FROM drafts WHERE id = %s", (draft_id,)
-    ).fetchone()
-    if draft is None:
-        raise ValueError("draft not found")
     img = conn.execute("SELECT * FROM images WHERE id = %s", (image_id,)).fetchone()
     if img is None:
         raise ValueError("image not found")
     if img["status"] != "approved":
         raise ValueError("image is not approved yet")
-    if img["owner_account"] and img["owner_account"] != draft["account"]:
+    if img["owner_account"] and img["owner_account"] != account:
         raise ValueError(
             f"image belongs to {img['owner_account']} and cannot be reused by "
-            f"{draft['account']}"
+            f"{account}"
         )
     # The partition. Slot 1 is the Craigslist thumbnail and the only place a
     # cover belongs; a cover anywhere else publishes a phone number in the
@@ -610,17 +632,41 @@ def attach(
     # accident (which is what the unguarded version did, every top-up run).
     if not allow_double_book:
         holder = reserved_by(conn, image_id)
-        if holder is not None and holder != draft_id:
+        if holder is not None and holder != self_draft_id:
             raise ValueError(
                 f"image is already attached to draft {holder}; detach it there "
                 f"first, or confirm the reuse"
             )
-        post_holder = reserved_by_post(conn, image_id)
+        post_holder = reserved_by_post(conn, image_id, exclude_post_id=self_post_id)
         if post_holder is not None:
             raise ValueError(
                 f"image is staged on live posting {post_holder}; using it here "
                 f"would put the same picture on two listings"
             )
+    return dict(img)
+
+
+def attach(
+    conn: psycopg.Connection,
+    *,
+    draft_id: int,
+    image_id: int,
+    slot: int,
+    allow_double_book: bool = False,
+) -> dict:
+    draft = conn.execute(
+        "SELECT id, account, status FROM drafts WHERE id = %s", (draft_id,)
+    ).fetchone()
+    if draft is None:
+        raise ValueError("draft not found")
+    img = _check_attachable(
+        conn,
+        image_id=image_id,
+        account=draft["account"],
+        slot=slot,
+        allow_double_book=allow_double_book,
+        self_draft_id=draft_id,
+    )
 
     conn.execute(
         """
@@ -672,6 +718,126 @@ def images_for_draft(conn: psycopg.Connection, draft_id: int) -> list[dict]:
         (draft_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# The same three operations against a live posting's desired image set.
+#
+# `post_desired_images` mirrors `draft_images` exactly (DESIGN_EDITS decision
+# 34), so these are the draft functions with one table swapped. They live here
+# rather than in `services.edits` so that ownership, the cooldown and the
+# cover/photo partition stay owned by one module — the live-post path drifted
+# away from these rules once already.
+# ---------------------------------------------------------------------------
+
+def images_for_post(conn: psycopg.Connection, post_id: str) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT i.*, pdi.slot FROM post_desired_images pdi
+        JOIN images i ON i.id = pdi.image_id
+        WHERE pdi.post_id = %s ORDER BY pdi.slot
+        """,
+        (post_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def attach_to_post(
+    conn: psycopg.Connection,
+    *,
+    post_id: str,
+    account: str,
+    image_id: int,
+    slot: int,
+    allow_double_book: bool = False,
+) -> dict:
+    """Bind an image to a slot of a live posting's desired set.
+
+    Same rules as `attach`, including decision 13's permanent account claim: an
+    approved image with no owner becomes this account's the moment it is staged
+    on one of its listings.
+    """
+    img = _check_attachable(
+        conn,
+        image_id=image_id,
+        account=account,
+        slot=slot,
+        allow_double_book=allow_double_book,
+        self_post_id=post_id,
+    )
+
+    conn.execute(
+        """
+        INSERT INTO post_desired_images (post_id, image_id, slot) VALUES (%s,%s,%s)
+        ON CONFLICT (post_id, slot) DO UPDATE SET image_id = EXCLUDED.image_id
+        """,
+        (post_id, image_id, slot),
+    )
+    if img["owner_account"] is None:
+        conn.execute(
+            "UPDATE images SET owner_account = %s, updated_at = NOW() WHERE id = %s",
+            (account, image_id),
+        )
+    return {"post_id": post_id, "image_id": image_id, "slot": slot,
+            "owner_account": account}
+
+
+def fill_post_photo_slots(
+    conn: psycopg.Connection,
+    *,
+    post_id: str,
+    account: str,
+    want: int,
+    rng: random.Random | None = None,
+) -> list[dict]:
+    """Top up a live posting's empty photo slots. Never touches the cover."""
+    rng = rng or random.Random()
+    taken = {i["slot"] for i in images_for_post(conn, post_id)}
+    free = [s for s in range(COVER_SLOT + 1, MAX_SLOTS + 1) if s not in taken][:want]
+    if not free:
+        return []
+
+    candidates = pick_for_draft(
+        conn, account=account, count=len(free) + 8, kind="photo", rng=rng
+    )
+    attached: list[dict] = []
+    for slot, img in zip(free, candidates):
+        try:
+            attach_to_post(
+                conn, post_id=post_id, account=account, image_id=img["id"], slot=slot
+            )
+            attached.append(img)
+        except ValueError as e:
+            logger.warning(f"could not attach image {img['id']} to post {post_id}: {e}")
+    if len(attached) < want:
+        logger.info(
+            f"post {post_id}: filled {len(attached)}/{want} photo slot(s) — "
+            f"the photo stack for {account} is short"
+        )
+    return attached
+
+
+def attach_post_cover(
+    conn: psycopg.Connection,
+    *,
+    post_id: str,
+    account: str,
+    rng: random.Random | None = None,
+) -> dict | None:
+    """Put a cover in slot 1 of a live posting's desired set if it is empty."""
+    rng = rng or random.Random()
+    if any(i["slot"] == COVER_SLOT for i in images_for_post(conn, post_id)):
+        return None
+    for img in pick_for_draft(conn, account=account, count=5, kind="cover", rng=rng):
+        try:
+            attach_to_post(
+                conn, post_id=post_id, account=account,
+                image_id=img["id"], slot=COVER_SLOT,
+            )
+            return img
+        except ValueError as e:
+            logger.warning(f"could not attach cover {img['id']} to post {post_id}: {e}")
+    return None
 
 
 def mark_used(conn: psycopg.Connection, image_ids: list[int]) -> None:

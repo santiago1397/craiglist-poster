@@ -8,16 +8,16 @@
 //
 // The split is xl, not md and no longer lg. Six nav links plus the status pill
 // and the theme toggle measured 836px, so at exactly 768 the header overflowed
-// again — the original bug, moved rather than fixed. Adding Diagnostics makes
-// eight links, which measures past 1024 and would have moved it a second time.
-// Raising the breakpoint is the fix that scales; the drawer already holds every
-// link and is the better layout below a genuinely wide screen anyway.
+// again — the original bug, moved rather than fixed. Adding Diagnostics took it
+// to eight, which measures past 1024 and would have moved it a second time.
+// Folding Edits into Posts brings it back to seven, but the breakpoint stays at
+// xl: it is the one that scales, and the drawer is the better layout below a
+// genuinely wide screen anyway.
 
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-  PencilLine,
   Images as ImagesIcon,
   LayoutDashboard,
   ListChecks,
@@ -40,7 +40,9 @@ import { cn } from "../lib/cn";
 const NAV = [
   { to: "/", label: "Dashboard", Icon: LayoutDashboard },
   { to: "/review", label: "Review", Icon: ListChecks },
-  { to: "/edits", label: "Edits", Icon: PencilLine },
+  // Editing a live posting lives on that posting's own page, under Posts. It
+  // had its own tab and its own near-duplicate list of the same ads, which made
+  // "change this ad" a question about whether it had published yet.
   { to: "/images", label: "Images", Icon: ImagesIcon },
   { to: "/prompts", label: "Prompts", Icon: Sparkles },
   { to: "/posts", label: "Posts", Icon: ScrollText },
