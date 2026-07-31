@@ -11,6 +11,18 @@ ok = []
 
 with tx() as c:
     c.execute("TRUNCATE drafts, posts, post_attempts, machine_tokens CASCADE")
+    # This test claims a draft, so it needs the posting window open. Left at the
+    # 08-19 default it passed during the working day and failed every evening,
+    # which is exactly when someone is most likely to be running the suite
+    # before shipping.
+    #
+    # Only the window, and it is put back at the end: `guardrail_settings` is a
+    # singleton these scripts share, and test_queue_logic asserts against the
+    # defaults. Leaving it widened moved the failure rather than fixing it.
+    c.execute(
+        "UPDATE guardrail_settings SET post_window_start_hour = 0, "
+        "post_window_end_hour = 24 WHERE singleton"
+    )
     d = drafts_svc.create_draft(c, {
         "account": "craigs1", "title": "Roof Repair Serving Davie",
         "body": "full body", "body_head": "full body",
@@ -69,6 +81,14 @@ bad = f"999999.{token.split('.', 1)[1]}"
 r = client.get("/queue/settings", headers={"Authorization": f"Bearer {bad}"})
 assert r.status_code == 401
 ok.append("unknown token id is rejected")
+
+# Put the window back. `guardrail_settings` is a singleton these scripts share,
+# so a widened window leaks into whatever runs next.
+with tx() as c:
+    c.execute(
+        "UPDATE guardrail_settings SET post_window_start_hour = 8, "
+        "post_window_end_hour = 19 WHERE singleton"
+    )
 
 print("\n".join(f"  OK  {line}" for line in ok))
 print(f"\n{len(ok)} checks passed")

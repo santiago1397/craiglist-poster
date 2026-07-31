@@ -9,7 +9,7 @@ every route the desktop calls with a machine token stays under one prefix.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
 from ..auth import require_admin
@@ -149,6 +149,29 @@ def requeue(post_id: str) -> dict:
                 detail="Edit is not parked",
             )
         return row
+
+
+@router.post("/{post_id}/apply-now", status_code=status.HTTP_202_ACCEPTED)
+def apply_now(post_id: str, request: Request) -> dict:
+    """Ask the desktop to apply this post's pending edit now.
+
+    202 because nothing has happened yet — the desktop picks it up on its next
+    poll, within about 15 seconds. It changes when the edit runs, never whether
+    it is allowed: the window and the per-post cooldown are skipped, the master
+    posting switch, `edits_enabled` and both caps are not.
+    """
+    who = getattr(getattr(request, "state", None), "user", None) or None
+    with tx() as c:
+        try:
+            row = edits_svc.request_reconcile(
+                c, post_id=post_id, requested_by=str(who) if who else None
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+        health = edits_svc.edit_health(c, [row["account"]])
+    # Surfacing the blocks with the 202 means a request that will not run says so
+    # immediately, rather than looking accepted and expiring twenty minutes later.
+    return {"requested_at": row["reconcile_requested_at"], "blocks": health["global_blocks"]}
 
 
 @router.get("/{post_id}/attempts")

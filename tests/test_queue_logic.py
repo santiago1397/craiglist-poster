@@ -25,6 +25,14 @@ def reset():
         c.execute("UPDATE guardrail_settings SET max_posts_per_day_total = 3, "
                   "min_hours_between_posts_same_account = 20, "
                   "max_posts_per_account_per_week = 7, "
+                  # The window and the weekday rule are asserted on below, so
+                  # set them here rather than inheriting whatever the last
+                  # script left behind — `guardrail_settings` is a singleton
+                  # shared by every test in this directory, and a widened window
+                  # elsewhere silently turned the out-of-window check into a
+                  # no-op that still passed.
+                  "post_window_start_hour = 8, post_window_end_hour = 19, "
+                  "post_weekdays_only = TRUE, "
                   # Reset the kill switch too, or a previous test leaving it
                   # paused makes every check here fail for the wrong reason.
                   "posting_enabled = TRUE, paused_at = NULL, paused_reason = NULL")
