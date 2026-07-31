@@ -1,7 +1,9 @@
 .PHONY: help deploy docker-prod docker-prod-down docker-prod-logs docker-prod-build
 
 # === Deploy (push to VPS via SSH) ===
-# Requires an SSH alias `craigslist` in ~/.ssh/config (see scripts/deploy.sh).
+# Defaults to the `dispatch` alias in ~/.ssh/config and the repo at
+# /opt/santiagoproperties/craiglist-poster. Migrations apply on container start,
+# and the script reports the schema version before and after.
 # Override on the command line if needed:
 #   make deploy SSH_ALIAS=myhost VPS_REPO_PATH=/srv/craigslist_automation
 deploy:
