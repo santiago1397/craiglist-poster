@@ -36,6 +36,10 @@ type Generation = {
   photos_min: number;
   photos_max: number;
   imageless_rate: number;
+  image_topup_enabled: boolean;
+  image_stack_floor: number;
+  image_stack_target: number;
+  image_topup_batch: number;
   api_key_configured: boolean;
   seed_ads: number;
   generated_total: number;
@@ -541,7 +545,8 @@ function GenerationForm({
   const [f, setF] = useState(value);
   useEffect(() => setF(value), [value]);
   const dirty = JSON.stringify(f) !== JSON.stringify(value);
-  const rangeInvalid = f.photos_min > f.photos_max;
+  const rangeInvalid =
+    f.photos_min > f.photos_max || f.image_stack_floor > f.image_stack_target;
 
   return (
     <Section
@@ -561,6 +566,10 @@ function GenerationForm({
                 photos_min: f.photos_min,
                 photos_max: f.photos_max,
                 imageless_rate: f.imageless_rate,
+                image_topup_enabled: f.image_topup_enabled,
+                image_stack_floor: f.image_stack_floor,
+                image_stack_target: f.image_stack_target,
+                image_topup_batch: f.image_topup_batch,
               })
             }
             className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
@@ -626,7 +635,7 @@ function GenerationForm({
         />
         <NumberField
           label="Most photos per post"
-          hint="Slot 1 becomes the search thumbnail."
+          hint="Photos fill slots 2-24; slot 1 is the cover you pick."
           value={f.photos_max}
           min={0}
           max={24}
@@ -639,6 +648,59 @@ function GenerationForm({
           Fewest cannot exceed most — the server rejects this.
         </p>
       )}
+
+      {/* Off by default: this is the one thing here that spends money on its
+          own, and the image prompts are still being tuned. */}
+      <div className="pt-3 border-t border-border space-y-3">
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            checked={f.image_topup_enabled}
+            onChange={(e) => setF({ ...f, image_topup_enabled: e.target.checked })}
+            className="mt-1"
+          />
+          <span>
+            <span className="text-sm text-fg">Refill the photo stack automatically</span>
+            <span className="text-xs text-fg-subtle mt-0.5 block">
+              Generates photos into Available whenever depth drops below the floor.
+              Covers are never auto-generated — those stay yours to approve. At
+              ~$0.0035 an image, 23-photo posts run roughly $7/month. Leave this off
+              until the image prompts are settled.
+            </span>
+          </span>
+        </label>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <NumberField
+            label="Refill below"
+            hint="Available photos that trigger a refill."
+            value={f.image_stack_floor}
+            min={0}
+            max={100000}
+            onChange={(n) => setF({ ...f, image_stack_floor: n })}
+          />
+          <NumberField
+            label="Refill up to"
+            hint="Target depth."
+            value={f.image_stack_target}
+            min={0}
+            max={100000}
+            onChange={(n) => setF({ ...f, image_stack_target: n })}
+          />
+          <NumberField
+            label="Per cycle"
+            hint="Cap per run, so a flip cannot spend it all at once."
+            value={f.image_topup_batch}
+            min={1}
+            max={100}
+            onChange={(n) => setF({ ...f, image_topup_batch: n })}
+          />
+        </div>
+        {f.image_stack_floor > f.image_stack_target && (
+          <p className="text-sm text-danger-fg">
+            The floor cannot exceed the target — the server rejects this.
+          </p>
+        )}
+      </div>
 
       <p className="text-xs text-fg-subtle">
         {value.seed_ads} seed ads · {value.generated_total} AI / {value.fallback_total} fallback
