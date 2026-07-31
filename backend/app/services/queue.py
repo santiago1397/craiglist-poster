@@ -747,7 +747,13 @@ PRE_UPLOAD_STEPS = frozenset({
     "launch", "warmup", "login_check", "open_post_form", "dismiss_reuse_prompt",
     "advance_to_type", "type_service_offered", "category_skilled_trade",
     "advance_to_form", "form_title", "form_zip", "form_city", "form_license",
-    "form_phone", "form_body", "map_confirm",
+    "form_phone", "form_body",
+    # Craigslist rejected the form and redisplayed it. Nothing was uploaded —
+    # the run never got past the details page — so the draft goes back to the
+    # queue and its images stay clean. This exists because the rejection used
+    # to surface as a photo_upload timeout and cost 24 images per attempt.
+    "form_validation",
+    "map_confirm",
 })
 
 

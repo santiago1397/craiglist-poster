@@ -298,9 +298,19 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             sleep_jitter(1.5, 0.4)
             _continue(page)
 
+            # Did that submission actually take? Everything below assumes we
+            # have moved on from the details form, and a rejected form looks
+            # identical to a slow one until a much later selector times out.
+            step = "form_validation"
+            logger.debug(f"step: {step}")
+            _assert_form_accepted(page)
+
             step = "map_confirm"
             logger.debug(f"step: {step}")
             _continue(page, optional=True)
+            # Again after the map step: geoverify can bounce us back to the
+            # form, and the same silence applies.
+            _assert_form_accepted(page)
 
             step = "photo_upload"
             logger.info(f"[{account.name}] photo_upload: {len(ad.photos)} file(s) queued")
@@ -714,6 +724,49 @@ def _continue(page: Page, optional: bool = False) -> None:
     human_click(page, btn)
     page.wait_for_load_state("domcontentloaded")
     sleep_jitter(1.2)
+
+
+def _assert_form_accepted(page: Page) -> None:
+    """Raise if Craigslist redisplayed the posting form with validation errors.
+
+    A rejected form comes back as HTTP 200 carrying the same page, so nothing
+    downstream notices — the run simply keeps going and dies at whatever
+    selector it looks for next. A body 403 characters over the 16,000 limit
+    surfaced as a 30-second timeout waiting for the photo uploader, and because
+    `photo_upload` is the first asset-consuming step, the server parked the
+    draft and retired all 24 attached images. Nothing had been uploaded: the
+    browser never left the details page.
+
+    So this is not cosmetic. Catching the rejection here keeps the failure
+    classified as pre-upload, which requeues the draft and burns nothing, and
+    puts Craigslist's own wording in the error instead of a selector timeout.
+    """
+    # The primary signal is structural, not textual: if the body textarea is
+    # still on the page, the submission did not advance us. Craigslist ships
+    # the error markup as a hidden template on a clean form, so keying off
+    # `.err` alone would abort every healthy run — a false positive here is
+    # safe (it requeues) but would stop posting entirely, which is worse than
+    # the bug it fixes.
+    still_on_form = page.locator("textarea[name='PostingBody']")
+    try:
+        if not still_on_form.count() or not still_on_form.first.is_visible():
+            return
+    except Exception:  # navigating out from under us — that is the good case
+        return
+
+    messages: list[str] = []
+    errors = page.locator("div.error-list, span.err")
+    for i in range(min(errors.count(), 6)):
+        try:
+            text = (errors.nth(i).inner_text() or "").strip()
+        except Exception:  # detached mid-read; not worth failing over
+            continue
+        if text:
+            messages.append(" ".join(text.split()))
+    detail = " | ".join(dict.fromkeys(messages))[:400] or (
+        "the details form was redisplayed with no visible reason"
+    )
+    raise RuntimeError(f"Craigslist rejected the form: {detail}")
 
 
 def _click_text(page: Page, text: str) -> None:
