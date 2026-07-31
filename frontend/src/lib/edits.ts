@@ -45,6 +45,9 @@ export type EditablePost = {
   hydrated_at: string | null;
   hydrate_requested_at: string | null;
   hydrate_error: string | null;
+  /** The walk that produced the content above, including the selector census. */
+  hydrate_steps: EditStep[] | null;
+  hydrate_artifact_ids: string[] | null;
 
   // Desired state, absent until the first edit.
   edit_status: string | null;

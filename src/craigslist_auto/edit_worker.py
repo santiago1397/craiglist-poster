@@ -26,7 +26,7 @@ from loguru import logger
 
 from . import artifacts, editor, queue_client, reporter
 from .config import ACCOUNTS_BY_NAME
-from .events import PostContent, PostEditAttempt, PostImage
+from .events import EditStep, PostContent, PostEditAttempt, PostImage
 from .lease import LeaseBusy
 
 ET = ZoneInfo("America/New_York")
@@ -69,6 +69,9 @@ def _emit_content(machine: str, result: dict) -> None:
         editable=result.get("editable", True),
         live_status=result.get("live_status"),
         artifact_ids=result.get("artifact_ids", []),
+        # The selector census rides here. Without it the only record of which
+        # selectors matched is logs/run.log on this machine.
+        steps=[EditStep(**s) for s in result.get("steps", [])],
     ))
 
 
