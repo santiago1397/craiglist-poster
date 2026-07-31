@@ -43,6 +43,37 @@ type Draft = {
   post_request_error: string | null;
 };
 
+// Craigslist advertises 16,000 characters and rejects below it — measured
+// against the live form, 15,945 by this rule was refused and 15,412 published.
+// Mirrors POSTING_BODY_LIMIT / effective_body_length in
+// backend/app/services/drafts.py; the server is the authority, this is here so
+// you find out while typing rather than three failed posting slots later.
+const POSTING_BODY_LIMIT = 15_000;
+
+function effectiveBodyLength(body: string): number {
+  // A textarea submits with every line break as CRLF, and the value comes back
+  // HTML-escaped — so newlines cost two and each "&" costs five.
+  const crlf = body.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n/g, "\r\n");
+  return crlf.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").length;
+}
+
+function BodyCounter({ body }: { body: string }) {
+  const n = effectiveBodyLength(body);
+  const over = n > POSTING_BODY_LIMIT;
+  const near = !over && n > POSTING_BODY_LIMIT * 0.9;
+  return (
+    <span
+      className={cn(
+        "text-xs tabular-nums",
+        over ? "text-danger-fg font-medium" : near ? "text-warn-fg" : "text-fg-subtle",
+      )}
+    >
+      {n.toLocaleString()} / {POSTING_BODY_LIMIT.toLocaleString()}
+      {over && ` — ${(n - POSTING_BODY_LIMIT).toLocaleString()} over, Craigslist will reject this`}
+    </span>
+  );
+}
+
 type GenerationState = {
   enabled: boolean;
   model: string;
@@ -549,7 +580,13 @@ function CreateDialog(props: {
     });
   };
 
-  const valid = f.account && f.title.trim() && f.body.trim() && f.county && f.city;
+  const valid =
+    f.account &&
+    f.title.trim() &&
+    f.body.trim() &&
+    f.county &&
+    f.city &&
+    effectiveBodyLength(f.body) <= POSTING_BODY_LIMIT;
 
   // Anything typed is unsaved work; Escape and backdrop clicks must not bin it.
   const dirty = Boolean(f.title.trim() || f.body.trim() || f.city || f.county);
@@ -695,14 +732,22 @@ function CreateDialog(props: {
           </label>
           <TitleField value={f.title} onChange={(v) => setF({ ...f, title: v })} />
           <label className="block">
-            <span className="text-xs text-fg-muted">
-              Body — paste the full posting text, keyword tail included
+            <span className="flex items-baseline justify-between gap-2">
+              <span className="text-xs text-fg-muted">
+                Body — paste the full posting text, keyword tail included
+              </span>
+              <BodyCounter body={f.body} />
             </span>
             <textarea
               value={f.body}
               onChange={set("body")}
               rows={14}
-              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm font-mono"
+              className={cn(
+                "w-full mt-1 bg-bg border rounded px-2 py-1.5 text-sm font-mono",
+                effectiveBodyLength(f.body) > POSTING_BODY_LIMIT
+                  ? "border-danger-border"
+                  : "border-border-strong",
+              )}
             />
           </label>
       </>
@@ -1735,6 +1780,14 @@ function EditDialog(props: {
             Cancel
           </button>
           <button
+            // The server rejects an over-length body with a 422, so saving
+            // would only bounce. Blocking here says so before the round trip.
+            disabled={effectiveBodyLength(body) > POSTING_BODY_LIMIT}
+            title={
+              effectiveBodyLength(body) > POSTING_BODY_LIMIT
+                ? "The body is over Craigslist's limit — shorten it before saving"
+                : undefined
+            }
             onClick={() =>
               // body_head goes with it. EditDialog used to send only `body`,
               // leaving body_head frozen at whatever the generator wrote — and
@@ -1750,7 +1803,7 @@ function EditDialog(props: {
                 reviewed: true,
               })
             }
-            className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover"
+            className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Save &amp; mark reviewed
           </button>
@@ -1886,8 +1939,15 @@ function EditDialog(props: {
               rows={splittable ? 14 : 16}
               className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm font-mono"
             />
-            <span className="text-xs text-fg-subtle mt-1 block">
-              {head.length.toLocaleString()} characters
+            {/* The head's own length is the writing aid; the total against the
+                limit is the thing that decides whether Craigslist takes it, so
+                both are shown and the total is what gates Save. */}
+            <span className="mt-1 flex items-baseline justify-between gap-2">
+              <span className="text-xs text-fg-subtle">
+                {head.length.toLocaleString()} characters
+                {splittable && " in the ad copy"}
+              </span>
+              <BodyCounter body={body} />
             </span>
           </label>
 

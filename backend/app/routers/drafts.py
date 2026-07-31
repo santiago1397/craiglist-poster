@@ -144,7 +144,14 @@ def generate(body: GenerateBody) -> dict:
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_draft(body: DraftCreate) -> dict:
     with tx() as c:
-        return drafts_svc.create_draft(c, body.model_dump())
+        try:
+            return drafts_svc.create_draft(c, body.model_dump())
+        except ValueError as e:
+            # An over-length body is the common one, and a 500 would hide the
+            # character count the operator needs to act on.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+            )
 
 
 @router.get("/{draft_id}")

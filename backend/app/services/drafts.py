@@ -29,6 +29,45 @@ _EDITABLE = (
 _OPERATOR_STATUSES = frozenset({"queued", "needs_attention", "expired"})
 
 
+# Craigslist says 16,000 characters and means something smaller. Measured
+# against the live form: a body of 15,945 by the rule below was rejected, and
+# 15,412 published. The gap is unexplained — likely more hidden accounting on
+# their side — so the ceiling sits well under the boundary rather than as close
+# to it as arithmetic allows. Two drafts were generated over the real limit and
+# failed repeatedly before anything caught it.
+POSTING_BODY_LIMIT = 15_000
+
+
+def effective_body_length(body: str | None) -> int:
+    """Length of a body as Craigslist appears to count it, not as Python does.
+
+    Two adjustments, both observed rather than guessed:
+
+    * A textarea submits with every line break normalised to CRLF, so each bare
+      newline in stored text costs two characters on the wire.
+    * The value comes back HTML-escaped, and an ad full of "Repair & Replace"
+      gains four characters per ampersand.
+
+    `len(body)` under-reports by ~90 characters on a typical draft here, which
+    is exactly the margin a naive check would have left.
+    """
+    text = body or ""
+    crlf = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+    escaped = crlf.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return len(escaped)
+
+
+def check_body_length(body: str | None) -> None:
+    """Raise if this body would be rejected by Craigslist."""
+    n = effective_body_length(body)
+    if n > POSTING_BODY_LIMIT:
+        raise ValueError(
+            f"body is {n} characters as Craigslist counts them "
+            f"({len(body or '')} raw); the limit is {POSTING_BODY_LIMIT}. "
+            f"Shorten it by at least {n - POSTING_BODY_LIMIT}."
+        )
+
+
 def list_drafts(
     conn: psycopg.Connection,
     *,
@@ -82,6 +121,7 @@ def _next_position(conn: psycopg.Connection, account: str) -> float:
 
 
 def create_draft(conn: psycopg.Connection, payload: dict) -> dict:
+    check_body_length(payload.get("body"))
     fields = {k: v for k, v in payload.items() if k in _EDITABLE and k != "status"}
     fields.setdefault("account", payload["account"])
     fields["position"] = _next_position(conn, fields["account"])
@@ -97,6 +137,8 @@ def create_draft(conn: psycopg.Connection, payload: dict) -> dict:
 
 def update_draft(conn: psycopg.Connection, draft_id: int, payload: dict) -> dict | None:
     fields = {k: v for k, v in payload.items() if k in _EDITABLE}
+    if "body" in fields:
+        check_body_length(fields["body"])
     if "status" in fields and fields["status"] not in _OPERATOR_STATUSES:
         raise ValueError(
             f"status {fields['status']!r} is owned by the posting flow, not the dashboard"

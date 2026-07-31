@@ -182,6 +182,49 @@ def _salvage(text: str) -> dict:
     return {"title": unescape(title_m.group(1)), "body_head": unescape(head_m.group(1))}
 
 
+def _fit_body(head: str, tail: str) -> str:
+    """Join the generated head to the keyword tail, within Craigslist's limit.
+
+    Nothing enforced a length here, and the tail template is edited by hand, so
+    a tail that grew by a few hundred characters silently produced drafts
+    Craigslist refuses. Two of them sat in the queue failing every scheduled
+    slot before anyone traced it — the rejection surfaced as an unrelated
+    photo-upload timeout, fixed separately in `poster._assert_form_accepted`.
+
+    The tail gives way rather than the copy: it is repeated filler, whereas the
+    head is the only part a reader actually reads. Trimmed at a comma or space
+    so the keyword list ends cleanly instead of mid-word.
+    """
+    if not tail:
+        return head
+    body = f"{head}\n\n{tail}"
+    if drafts_svc.effective_body_length(body) <= drafts_svc.POSTING_BODY_LIMIT:
+        return body
+
+    # Largest prefix of the tail that still fits.
+    lo, hi = 0, len(tail)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if (
+            drafts_svc.effective_body_length(f"{head}\n\n{tail[:mid]}")
+            <= drafts_svc.POSTING_BODY_LIMIT
+        ):
+            lo = mid
+        else:
+            hi = mid - 1
+
+    cut = tail[:lo].rstrip()
+    boundary = max(cut.rfind(", "), cut.rfind("\n"), cut.rfind(" "))
+    if boundary > len(cut) * 0.8:  # don't gut the tail chasing a clean edge
+        cut = cut[:boundary]
+    cut = cut.rstrip(" ,\n")
+    logger.warning(
+        f"keyword tail trimmed from {len(tail)} to {len(cut)} characters to stay "
+        f"under Craigslist's limit — consider shortening tail_template"
+    )
+    return f"{head}\n\n{cut}" if cut else head
+
+
 def _validate(data: dict, seed: dict) -> tuple[str, str]:
     title = str(data.get("title") or "").strip()
     head = str(data.get("body_head") or data.get("body") or "").strip()
@@ -324,7 +367,7 @@ def build_draft(
         )
 
     tail = g.get("tail_template") or ""
-    body = f"{head}\n\n{tail}" if tail else head
+    body = _fit_body(head, tail)
 
     draft = drafts_svc.create_draft(conn, {
         "account": account,

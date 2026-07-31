@@ -414,7 +414,7 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             page.wait_for_load_state("domcontentloaded", timeout=60_000)
             sleep_jitter(2.0)
 
-            run.url = _extract_post_url(page, run=run)
+            run.url = _extract_post_url(page, run=run, expected_title=ad.title)
             mark_photos_used(ad.photos)
             mark_content_used(ad)
             logger.success(f"[{account.name}] published: {run.url}")
@@ -877,11 +877,65 @@ def _handle_billing(page: Page, account_name: str, max_steps: int = 4) -> None:
         raise RuntimeError("billing flow exceeded max_steps without completing")
 
 
-def _extract_post_url(page: Page, *, run: PostRun | None = None) -> str | None:
-    # 1. Best case: confirmation page has a direct /d/ link to the live post.
-    link = page.locator("a[href*='/d/']").first
-    if link.count():
-        return link.get_attribute("href")
+def _slug_words(text: str) -> list[str]:
+    """Words from a title long enough to be distinctive in a URL slug."""
+    import re
+
+    return [w for w in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(w) > 3]
+
+
+def _url_matches_title(href: str, title: str) -> bool:
+    """Does this /d/ link plausibly belong to the ad we just published?
+
+    Craigslist builds the slug from the posting title, so a real match shares
+    several distinctive words with it. Two hits is deliberately lenient — the
+    slug is truncated — but more than enough to reject an unrelated listing.
+    """
+    words = _slug_words(title)[:6]
+    if not words:
+        return False
+    slug = (href or "").lower()
+    return sum(1 for w in words if w in slug) >= 2
+
+
+def _extract_post_url(
+    page: Page, *, run: PostRun | None = None, expected_title: str | None = None
+) -> str | None:
+    # 1. Best case: the confirmation page links straight to the live post.
+    #
+    # This used to take `.first` unconditionally, which is wrong: Craigslist
+    # renders other people's listings on that page, so the first /d/ link is
+    # not necessarily ours. A real run captured a stranger's Dodge Charger ad
+    # as the post URL. Recording a foreign URL is worse than recording none —
+    # it silently corrupts history, ghost checks and stats, and looks correct.
+    # So we match candidates against the title and never guess.
+    links = page.locator("a[href*='/d/']")
+    candidates = []
+    for i in range(min(links.count(), 20)):
+        try:
+            href = links.nth(i).get_attribute("href")
+        except Exception:
+            continue
+        if href:
+            candidates.append(href)
+
+    if candidates:
+        if not expected_title:
+            return candidates[0]
+        for href in candidates:
+            if _url_matches_title(href, expected_title):
+                return href
+        # Links present but none are ours. Fall through to PostingID rather
+        # than return someone else's ad.
+        msg = (
+            f"{len(candidates)} /d/ link(s) on the confirmation page, none "
+            f"matching this ad's title — ignored them rather than record a "
+            f"foreign listing."
+        )
+        if run is not None:
+            run.warn(msg)
+        else:
+            logger.warning(f"  {msg}")
     # 2. Paid-category receipt page: extract PostingID and resolve it to the
     #    canonical /d/ URL by loading the search-by-posting-ID page. That page
     #    renders the matching post at the top with a normal /d/... link, so
@@ -904,8 +958,19 @@ def _extract_post_url(page: Page, *, run: PostRun | None = None) -> str | None:
                 canonical = page.locator("a[href*='/d/']").first
                 if canonical.count():
                     href = canonical.get_attribute("href")
-                    logger.info(f"  resolved PostingID={post_id} → {href}")
-                    return href
+                    # Searching by postingID should return only our post, but
+                    # the same "don't record a stranger's ad" rule applies.
+                    if href and (
+                        not expected_title or _url_matches_title(href, expected_title)
+                    ):
+                        logger.info(f"  resolved PostingID={post_id} → {href}")
+                        return href
+                    if run is not None:
+                        run.warn(
+                            f"PostingID={post_id} resolved to a link that does not "
+                            f"match this ad's title; saved the search URL instead."
+                        )
+                    return search_url
                 # Post may not be indexed yet, or could be ghosted already.
                 # Either way, the search URL still resolves the post live.
                 if run is not None:
