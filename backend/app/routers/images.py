@@ -204,19 +204,28 @@ def delete_image(image_id: int) -> None:
 
 
 @router.get("/{image_id}/thumb")
-def thumb(image_id: int, request: Request) -> FileResponse:
-    """A downscaled copy, for grids.
+def thumb(image_id: int, request: Request, w: int = Query(default=storage.DEFAULT_THUMB_WIDTH)) -> FileResponse:
+    """A downscaled copy, sized for how it will be displayed.
 
-    The Images page renders up to 120 tiles a few hundred pixels wide. Serving
-    `/raw` into those meant ~94MB of full-resolution JPEG per page view, since
-    the stored files average 772KB. This is the same picture at 480px, around
-    25KB, rendered once and cached on the volume.
+    No view should pull a full-resolution original to render it smaller. The
+    Images grid drew 120 tiles a few hundred pixels wide from `/raw`, which at
+    772KB average was ~94MB a page view; the Review preview modal is capped at
+    420px tall and pulled the same 772KB original.
 
-    Falls back to the original if Pillow cannot read the file — a grid with
-    heavy images beats a grid with broken ones.
+    `w` must be one of `storage.THUMB_WIDTHS` — 480 for tiles, 1024 for
+    constrained previews. Requesting an arbitrary size would let a caller fill
+    the volume with one-off renders.
+
+    Falls back to the original if Pillow cannot read the file: a heavy image
+    beats a broken one.
     """
     if not _authorised(request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+    if w not in storage.THUMB_WIDTHS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"w must be one of {', '.join(str(x) for x in storage.THUMB_WIDTHS)}",
+        )
     with conn() as c:
         row = c.execute(
             "SELECT storage_path, mime, sha256 FROM images WHERE id = %s", (image_id,)
@@ -224,7 +233,7 @@ def thumb(image_id: int, request: Request) -> FileResponse:
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
 
-    path = storage.get_or_make_thumb(row["storage_path"])
+    path = storage.get_or_make_thumb(row["storage_path"], w)
     media_type = "image/jpeg"
     if path is None:
         path = storage.open_path(row["storage_path"])
@@ -239,7 +248,7 @@ def thumb(image_id: int, request: Request) -> FileResponse:
         media_type=media_type,
         # Derived from content-addressed bytes, so this can never go stale.
         headers={"Cache-Control": "public, max-age=31536000, immutable",
-                 "ETag": f"{row['sha256']}-t480"},
+                 "ETag": f"{row['sha256']}-t{w}"},
     )
 
 
