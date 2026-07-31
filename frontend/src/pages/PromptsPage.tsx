@@ -330,8 +330,10 @@ export default function PromptsPage() {
                 {tests.map((t) => (
                   <li key={t.id} className="space-y-1">
                     <img
-                      src={`${IMG_BASE}/images/${t.id}/raw`}
+                      src={`${IMG_BASE}/images/${t.id}/thumb`}
                       alt=""
+                      loading="lazy"
+                      decoding="async"
                       className="w-full aspect-[4/3] object-cover rounded border border-border-strong"
                     />
                     <button
