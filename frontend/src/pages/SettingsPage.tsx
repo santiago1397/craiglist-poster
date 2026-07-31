@@ -12,7 +12,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Check } from "lucide-react";
+import { AlertTriangle, Check, Pause, Play } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { cn } from "../lib/cn";
 import { formatDateTime } from "../lib/format";
@@ -104,6 +104,22 @@ export default function SettingsPage() {
           <Check size={16} aria-hidden="true" />
           {saved}
         </div>
+      )}
+
+      {guardrailsQ.data && generationQ.data && (
+        <QueueSizeSection
+          guardrails={guardrailsQ.data}
+          generation={generationQ.data}
+          busy={saveGuardrails.isPending || saveGeneration.isPending}
+          onSaveDepth={(patch) => {
+            setSaved(null);
+            saveGuardrails.mutate(patch);
+          }}
+          onToggleGeneration={(enabled) => {
+            setSaved(null);
+            saveGeneration.mutate({ enabled });
+          }}
+        />
       )}
 
       {guardrailsQ.data && (
@@ -209,6 +225,195 @@ function NumberField({
   );
 }
 
+// How big the queue should be, and whether it refills itself.
+//
+// These two settings were previously split across two forms with two separate
+// Save buttons: the depths sat in Guardrails next to the posting caps, and the
+// on/off switch was a checkbox buried in Draft generation between an API-key
+// warning and the model picker. They are one decision — how many drafts to keep
+// and who writes them — so they belong in one place.
+//
+// The switch applies immediately rather than waiting for a Save, matching the
+// posting switch on Review. Ticking a box and navigating away without noticing
+// an unsaved form is exactly the mistake worth designing out when the setting
+// silently writes AI drafts on a 30-minute loop.
+function QueueSizeSection({
+  guardrails,
+  generation,
+  busy,
+  onSaveDepth,
+  onToggleGeneration,
+}: {
+  guardrails: Guardrails;
+  generation: Generation;
+  busy: boolean;
+  onSaveDepth: (patch: Partial<Guardrails>) => void;
+  onToggleGeneration: (enabled: boolean) => void;
+}) {
+  const [target, setTarget] = useState(guardrails.queue_depth_target);
+  const [floor, setFloor] = useState(guardrails.queue_depth_floor);
+  useEffect(() => {
+    setTarget(guardrails.queue_depth_target);
+    setFloor(guardrails.queue_depth_floor);
+  }, [guardrails.queue_depth_target, guardrails.queue_depth_floor]);
+
+  const accountsQ = useQuery({
+    queryKey: ["accounts"],
+    queryFn: () => api.get<{ accounts: string[] }>("/accounts"),
+    staleTime: 5 * 60_000,
+  });
+  const list = accountsQ.data?.accounts ?? [];
+  const healthQ = useQuery({
+    queryKey: ["drafts", "health", list],
+    queryFn: () =>
+      api.get<{ accounts: Record<string, { queue_depth: number }> }>("/drafts/health", {
+        accounts: list.join(","),
+      }),
+    enabled: list.length > 0,
+  });
+
+  const depths = healthQ.data?.accounts ?? {};
+  const dirty =
+    target !== guardrails.queue_depth_target || floor !== guardrails.queue_depth_floor;
+  const invalid = floor > target;
+  const on = generation.enabled;
+
+  return (
+    <Section
+      title="Queue size"
+      description="How many drafts to keep waiting per account, and whether the server writes new ones automatically."
+      footer={
+        <>
+          <button
+            disabled={!dirty || busy || invalid}
+            onClick={() => onSaveDepth({ queue_depth_target: target, queue_depth_floor: floor })}
+            className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
+          >
+            {busy ? "Saving…" : "Save queue size"}
+          </button>
+          {dirty && (
+            <button
+              onClick={() => {
+                setTarget(guardrails.queue_depth_target);
+                setFloor(guardrails.queue_depth_floor);
+              }}
+              className="px-3 py-1.5 rounded text-sm text-fg-muted hover:bg-surface-2"
+            >
+              Reset
+            </button>
+          )}
+        </>
+      }
+    >
+      {/* Immediate-apply switch. Same shape as the posting switch on Review, so
+          "a thing that is currently on or off" reads the same way everywhere. */}
+      <section
+        className={cn(
+          "rounded border p-3",
+          on ? "border-border bg-surface/50" : "border-warn-border bg-warn",
+        )}
+      >
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            {on ? (
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-ok-solid" />
+                <span className="text-sm text-fg-muted">
+                  Auto-generation is on — topping up to {guardrails.queue_depth_target} per
+                  account
+                </span>
+              </div>
+            ) : (
+              <>
+                <p className="font-semibold text-warn-fg">Auto-generation is off</p>
+                <p className="text-xs text-warn-fg/70 mt-0.5">
+                  Nothing new is written. The queue only shrinks from here, and an
+                  empty queue posts nothing — posting is fail-closed.
+                </p>
+              </>
+            )}
+          </div>
+          <button
+            disabled={busy}
+            onClick={() => onToggleGeneration(!on)}
+            className={cn(
+              "px-4 py-1.5 rounded text-sm shrink-0 inline-flex items-center gap-1.5 disabled:opacity-40",
+              on ? "bg-warn-solid hover:bg-warn-solid/90" : "bg-ok-solid hover:bg-ok-solid/90",
+            )}
+          >
+            {on ? <Pause size={14} /> : <Play size={14} />}
+            {on ? "Turn off" : "Turn on"}
+          </button>
+        </div>
+      </section>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <NumberField
+          label="Keep per account"
+          hint="Top-up fills each account's queue to this many drafts."
+          value={target}
+          min={1}
+          max={1000}
+          onChange={setTarget}
+        />
+        <NumberField
+          label="Refill when below"
+          hint="Nothing is written until an account drops under this, so drafts arrive in batches rather than one at a time."
+          value={floor}
+          min={0}
+          max={500}
+          onChange={setFloor}
+        />
+      </div>
+
+      {invalid && (
+        <p className="text-sm text-danger-fg">
+          "Refill when below" cannot exceed "keep per account" — the server rejects
+          this.
+        </p>
+      )}
+
+      {/* Current vs target. Setting a target of 6 while sitting on 15 is a
+          normal thing to do; not showing the gap makes it look like nothing
+          happened, because top-up only ever adds. */}
+      {list.length > 0 && (
+        <div className="rounded border border-border p-3">
+          <p className="text-xs text-fg-subtle mb-2">Queued right now</p>
+          <div className="flex flex-wrap gap-x-6 gap-y-1">
+            {list.map((a) => {
+              const n = depths[a]?.queue_depth ?? 0;
+              return (
+                <span key={a} className="text-sm">
+                  <span className="text-fg-muted">{a}</span>{" "}
+                  <span
+                    className={cn(
+                      "font-medium",
+                      n === 0 ? "text-danger-fg" : n > target ? "text-warn-fg" : "text-fg",
+                    )}
+                  >
+                    {n}
+                  </span>
+                  <span className="text-fg-subtle"> / {target}</span>
+                </span>
+              );
+            })}
+          </div>
+          {Object.values(depths).some((d) => d.queue_depth > target) && (
+            <p className="text-xs text-fg-subtle mt-2">
+              Some accounts hold more than the target. Top-up only adds — lowering
+              the number never deletes anything. Trim the extras in{" "}
+              <a href="/review" className="underline">
+                Review
+              </a>
+              .
+            </p>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function GuardrailForm({
   value,
   busy,
@@ -224,7 +429,6 @@ function GuardrailForm({
   const set = <K extends keyof Guardrails>(k: K, v: Guardrails[K]) => setF({ ...f, [k]: v });
   const dirty = JSON.stringify(f) !== JSON.stringify(value);
   const windowInvalid = f.post_window_start_hour >= f.post_window_end_hour;
-  const depthInvalid = f.queue_depth_floor > f.queue_depth_target;
 
   return (
     <Section
@@ -233,7 +437,7 @@ function GuardrailForm({
       footer={
         <>
           <button
-            disabled={!dirty || busy || windowInvalid || depthInvalid}
+            disabled={!dirty || busy || windowInvalid}
             onClick={() => onSave(f)}
             className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
           >
@@ -299,22 +503,6 @@ function GuardrailForm({
             onChange={(n) => set("post_window_end_hour", n)}
           />
         </div>
-        <NumberField
-          label="Queue floor"
-          hint="Top-up starts when an account drops below this."
-          value={f.queue_depth_floor}
-          min={0}
-          max={500}
-          onChange={(n) => set("queue_depth_floor", n)}
-        />
-        <NumberField
-          label="Queue target"
-          hint="Top-up fills to this depth."
-          value={f.queue_depth_target}
-          min={1}
-          max={1000}
-          onChange={(n) => set("queue_depth_target", n)}
-        />
       </div>
 
       <label className="flex items-start gap-2">
@@ -335,11 +523,6 @@ function GuardrailForm({
       {windowInvalid && (
         <p className="text-sm text-danger-fg">
           The window must open before it closes — the server rejects this.
-        </p>
-      )}
-      {depthInvalid && (
-        <p className="text-sm text-danger-fg">
-          Queue floor cannot exceed queue target — the server rejects this.
         </p>
       )}
     </Section>
@@ -363,14 +546,16 @@ function GenerationForm({
   return (
     <Section
       title="Draft generation"
-      description="Auto-generated ad copy. Prompt text itself lives in the Prompt studio."
+      description="How auto-generated copy is written. Whether it runs at all is set under Queue size; the prompt text lives in the Prompt studio."
       footer={
         <>
           <button
             disabled={!dirty || busy || rangeInvalid}
+            // `enabled` is deliberately not sent: it is owned by the Queue size
+            // switch above and applies immediately. Including it here would let
+            // a stale copy of this form silently flip it back on Save.
             onClick={() =>
               onSave({
-                enabled: f.enabled,
                 model: f.model,
                 temperature: f.temperature,
                 photos_min: f.photos_min,
@@ -400,23 +585,6 @@ function GenerationForm({
           cause of ghosting. Set MINIMAX_API_KEY on the server to enable AI copy.
         </p>
       )}
-
-      <label className="flex items-start gap-2">
-        <input
-          type="checkbox"
-          checked={f.enabled}
-          onChange={(e) => setF({ ...f, enabled: e.target.checked })}
-          className="mt-0.5"
-        />
-        <span>
-          <span className="text-sm text-fg block">Auto-generation on</span>
-          <span className="text-xs text-fg-subtle">
-            Refills each account's queue when it drops below the floor. Off means
-            the queue only grows from drafts you write yourself — and an empty
-            queue posts nothing.
-          </span>
-        </span>
-      </label>
 
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="block">
