@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../lib/api";
 import { cn } from "../lib/cn";
+import { ConfirmDialog, Modal, RawModal } from "../components/Modal";
 
 type Draft = {
   id: number;
@@ -116,6 +117,7 @@ export default function ReviewPage() {
   const [editing, setEditing] = useState<Draft | null>(null);
   const [creating, setCreating] = useState(false);
   const [previewing, setPreviewing] = useState<Draft | null>(null);
+  const [deleting, setDeleting] = useState<Draft | null>(null);
   const [posting, setPosting] = useState<PostingState | null>(null);
   const [locations, setLocations] = useState<LocationRef | null>(null);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
@@ -268,11 +270,31 @@ export default function ReviewPage() {
               onReview={() => mutate(() => api.patch(`/drafts/${d.id}`, { reviewed: !d.reviewed }))}
               onTop={() => mutate(() => api.post(`/drafts/${d.id}/reorder`, { after_id: null }))}
               onRequeue={() => mutate(() => api.post(`/drafts/${d.id}/requeue`))}
-              onDelete={() => mutate(() => api.del(`/drafts/${d.id}`))}
+              onDelete={() => setDeleting(d)}
             />
           ))}
         </ul>
       )}
+
+      <ConfirmDialog
+        open={deleting !== null}
+        onOpenChange={(o) => !o && setDeleting(null)}
+        title={`Delete draft #${deleting?.id}?`}
+        body={
+          <>
+            <span className="block font-medium text-fg">{deleting?.title}</span>
+            <span className="block mt-1">
+              {deleting?.account} · {deleting?.city}. This cannot be undone.
+            </span>
+          </>
+        }
+        busy={busy}
+        onConfirm={() => {
+          const id = deleting?.id;
+          setDeleting(null);
+          if (id !== undefined) void mutate(() => api.del(`/drafts/${id}`));
+        }}
+      />
 
       {editing && (
         <EditDialog
@@ -361,17 +383,49 @@ function CreateDialog(props: {
 
   const valid = f.account && f.title.trim() && f.body.trim() && f.county && f.city;
 
+  // Anything typed is unsaved work; Escape and backdrop clicks must not bin it.
+  const dirty = Boolean(f.title.trim() || f.body.trim() || f.city || f.county);
+
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-10">
-      <div className="bg-surface border border-border-strong rounded-lg w-full max-w-3xl max-h-[90vh] flex flex-col">
-        <div className="p-3 border-b border-border flex items-center justify-between">
-          <h2 className="font-medium">New draft</h2>
-          <button onClick={props.onClose} className="text-fg-muted hover:text-fg px-2">
-            ✕
+    <Modal
+      open
+      onOpenChange={(o) => !o && props.onClose()}
+      onRequestClose={() =>
+        !dirty || confirm("Discard this draft? Everything you typed will be lost.")
+      }
+      title="New draft"
+      footer={
+        <>
+          <span className="text-xs text-fg-subtle mr-auto">
+            Goes to the back of {f.account || "the"} queue. Use Top to promote it.
+          </span>
+          <button
+            onClick={props.onClose}
+            className="px-3 py-1.5 rounded text-sm text-fg-muted hover:bg-surface-2"
+          >
+            Cancel
           </button>
-        </div>
-        <div className="p-3 space-y-3 overflow-auto">
-          <div className="grid grid-cols-2 gap-3">
+          <button
+            disabled={!valid}
+            onClick={() =>
+              void props.onCreate({
+                ...f,
+                service_offered: L?.service_offered ?? "",
+                // body_head drives the advisory similarity score; without a
+                // generator to split head from tail, the body doubles as it.
+                body_head: f.body.split("\n\n.")[0].slice(0, 2000),
+                source: "manual",
+              })
+            }
+            className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
+          >
+            Create
+          </button>
+        </>
+      }
+    >
+      <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* On a fresh database no account has posted yet, so the list is
                 empty — fall back to typing the name rather than dead-ending. */}
             {props.accounts.length > 0 ? (
@@ -483,38 +537,8 @@ function CreateDialog(props: {
               className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm font-mono"
             />
           </label>
-        </div>
-        <div className="p-3 border-t border-border flex justify-between items-center">
-          <span className="text-xs text-fg-subtle">
-            Goes to the back of {f.account || "the"} queue. Use Top to promote it.
-          </span>
-          <div className="flex gap-2">
-            <button
-              onClick={props.onClose}
-              className="px-3 py-1.5 rounded text-sm text-fg-muted hover:bg-surface-2"
-            >
-              Cancel
-            </button>
-            <button
-              disabled={!valid}
-              onClick={() =>
-                void props.onCreate({
-                  ...f,
-                  service_offered: L?.service_offered ?? "",
-                  // body_head drives the advisory similarity score; without a
-                  // generator to split head from tail, the body doubles as it.
-                  body_head: f.body.split("\n\n.")[0].slice(0, 2000),
-                  source: "manual",
-                })
-              }
-              className="px-3 py-1.5 rounded text-sm bg-primary hover:bg-primary-hover disabled:opacity-40"
-            >
-              Create
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+      </>
+    </Modal>
   );
 }
 
@@ -716,20 +740,24 @@ function Calendar({ entries }: { entries: ScheduleEntry[] }) {
           {open ? "Show less" : `Show all ${days.size} days`}
         </button>
       </div>
+      {/* min-w-0 on every flex child holding truncating text: a flex item
+          defaults to min-width:auto, which let a long title push the row past
+          the viewport instead of ellipsing. That was the last source of
+          horizontal page scroll on a phone. */}
       <div className="space-y-1.5">
         {shown.map(([day, list]) => (
-          <div key={day} className="flex gap-3 text-xs">
-            <span className="text-fg-subtle w-28 shrink-0">{day}</span>
-            <div className="flex-1 space-y-0.5">
+          <div key={day} className="flex gap-2 sm:gap-3 text-xs min-w-0">
+            <span className="text-fg-subtle w-20 sm:w-28 shrink-0">{day}</span>
+            <div className="flex-1 min-w-0 space-y-0.5">
               {list.map((e) => (
-                <div key={e.draft_id} className="flex gap-2">
-                  <span className="text-fg-subtle w-16 shrink-0">
+                <div key={e.draft_id} className="flex gap-2 min-w-0">
+                  <span className="text-fg-subtle w-14 sm:w-16 shrink-0">
                     {new Date(e.at).toLocaleTimeString(undefined, {
                       hour: "numeric", minute: "2-digit",
                     })}
                   </span>
-                  <span className="text-fg-muted w-20 shrink-0">{e.account}</span>
-                  <span className="text-fg-muted truncate">{e.title}</span>
+                  <span className="text-fg-muted w-16 sm:w-20 shrink-0">{e.account}</span>
+                  <span className="text-fg-muted truncate min-w-0">{e.title}</span>
                 </div>
               ))}
             </div>
@@ -1040,18 +1068,16 @@ function PreviewDialog(props: { draft: Draft; onClose: () => void }) {
   const county = d.county ? `${d.county.toLowerCase()} county` : "";
 
   return (
-    <div
-      className="fixed inset-0 bg-black/80 flex items-start justify-center p-4 z-20 overflow-auto"
-      onClick={props.onClose}
+    <RawModal
+      open
+      onOpenChange={(o) => !o && props.onClose()}
+      label={`Craigslist preview of draft ${d.id}`}
     >
-      <div
-        className="bg-white text-black w-full max-w-4xl my-4 rounded shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="bg-white text-black w-full max-w-4xl my-2 sm:my-4 rounded shadow-2xl">
         {/* Unmissable, and it stays put while you scroll the ad. */}
-        <div className="sticky top-0 z-10 bg-amber-400 text-black px-4 py-2.5 flex items-center justify-between gap-3 rounded-t">
-          <div>
-            <strong className="text-base">PREVIEW ONLY — NOT PUBLISHED</strong>
+        <div className="sticky top-0 z-10 bg-amber-400 text-black px-3 sm:px-4 py-2.5 flex items-start justify-between gap-3 rounded-t">
+          <div className="min-w-0">
+            <strong className="text-sm sm:text-base">PREVIEW ONLY — NOT PUBLISHED</strong>
             <p className="text-xs mt-0.5">
               This is a mock-up of how draft #{d.id} would look on Craigslist. It
               is not live, has no real post ID, and nobody else can see it.
@@ -1065,7 +1091,7 @@ function PreviewDialog(props: { draft: Draft; onClose: () => void }) {
           </button>
         </div>
 
-        <div className="p-4 font-sans text-[13px] leading-snug">
+        <div className="p-3 sm:p-4 font-sans text-[13px] leading-snug">
           <div className="text-[11px] text-blue-700 mb-3">
             <span className="text-slate-600">south florida</span>
             {county && <> &gt; <span className="text-slate-600">{county}</span></>}
@@ -1140,7 +1166,7 @@ function PreviewDialog(props: { draft: Draft; onClose: () => void }) {
           </div>
         </div>
       </div>
-    </div>
+    </RawModal>
   );
 }
 
@@ -1170,16 +1196,37 @@ function EditDialog(props: {
   const [body, setBody] = useState(props.draft.body);
   const [geo, setGeo] = useState(props.draft.geographic_area ?? props.draft.city);
 
+  // Escape now closes the dialog (Radix), so a 14,000-character body needs a
+  // guard or a stray keypress silently discards the edit.
+  const dirty =
+    title !== props.draft.title ||
+    body !== props.draft.body ||
+    geo !== (props.draft.geographic_area ?? props.draft.city);
+
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-10">
-      <div className="bg-surface border border-border-strong rounded-lg w-full max-w-3xl max-h-[90vh] flex flex-col">
-        <div className="p-3 border-b border-border flex items-center justify-between">
-          <h2 className="font-medium">Edit draft #{props.draft.id}</h2>
-          <button onClick={props.onClose} className="text-fg-muted hover:text-fg px-2">
-            ✕
+    <Modal
+      open
+      onOpenChange={(o) => !o && props.onClose()}
+      onRequestClose={() => !dirty || confirm("Discard your unsaved changes to this draft?")}
+      title={`Edit draft #${props.draft.id}`}
+      footer={
+        <>
+          <button
+            onClick={props.onClose}
+            className="px-3 py-1.5 rounded text-sm text-fg-muted hover:bg-surface-2"
+          >
+            Cancel
           </button>
-        </div>
-        <div className="p-3 space-y-3 overflow-auto">
+          <button
+            onClick={() => void props.onSave({ title, body, geographic_area: geo, reviewed: true })}
+            className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover"
+          >
+            Save &amp; mark reviewed
+          </button>
+        </>
+      }
+    >
+      <>
           <label className="block">
             <span className="text-xs text-fg-muted">Title</span>
             <input
@@ -1212,22 +1259,7 @@ function EditDialog(props: {
               className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm font-mono"
             />
           </label>
-        </div>
-        <div className="p-3 border-t border-border flex justify-end gap-2">
-          <button
-            onClick={props.onClose}
-            className="px-3 py-1.5 rounded text-sm text-fg-muted hover:bg-surface-2"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => void props.onSave({ title, body, geographic_area: geo, reviewed: true })}
-            className="px-3 py-1.5 rounded text-sm bg-primary hover:bg-primary-hover"
-          >
-            Save &amp; mark reviewed
-          </button>
-        </div>
-      </div>
-    </div>
+      </>
+    </Modal>
   );
 }
