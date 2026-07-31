@@ -110,6 +110,37 @@ if near_posting_slot is not None:
     if near_posting_slot(at(22, 0)):
         failures.append("22:00 was wrongly treated as near a posting slot")
 
+# --- finding a posting whose id is not Craigslist's id ----------------------
+# `stats._extract_post_id` falls back to the base62 token in Craigslist's
+# /view/d/<slug>/<token> share URL when the numeric id is not in the URL. That
+# token is never what `data-postingid` holds on the account page, so a post
+# recorded straight from a publish cannot be found by id — it has to be found
+# by its link. Getting this wrong reports a live, visible ad as "gone".
+try:
+    from craigslist_auto.editor import _url_token
+except Exception as e:  # pragma: no cover
+    _url_token = None
+    print(f"(skipping url-token checks: {e})")
+
+if _url_token is not None:
+    cases = [
+        ("https://www.craigslist.org/view/d/miami-emergency-roof/xvbywnthPhu59jd5tMPpGP",
+         "xvbywnthPhu59jd5tMPpGP", "base62 share token"),
+        ("https://miami.craigslist.org/mdc/trd/d/slug/7950716823.html",
+         "7950716823", "legacy numeric url"),
+        ("https://www.craigslist.org/view/d/slug/AbC123_-xyz9876/",
+         "AbC123_-xyz9876", "trailing slash"),
+        ("https://www.craigslist.org/view/d/slug/xvbywnthPhu59jd5tMPpGP?x=1",
+         "xvbywnthPhu59jd5tMPpGP", "query string stripped"),
+        ("https://example.com/short", None, "too short to match safely"),
+        (None, None, "no url"),
+    ]
+    for url, want, label in cases:
+        got = _url_token(url)
+        if got != want:
+            failures.append(f"url token ({label}): expected {want!r}, got {got!r}")
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
