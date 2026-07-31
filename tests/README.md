@@ -11,6 +11,8 @@ line per check on success.
 uv run python tests/test_events_schema.py     # event union, new fields, legacy compat
 uv run python tests/test_guardrail_clamp.py   # compiled ceilings actually clamp
 uv run python tests/test_outbox_guard.py     # only unsent *posted* attempts block a claim
+uv run python tests/test_browser_lease.py    # two flows can't share one Chrome profile
+uv run python tests/test_edit_guards.py      # content hash, edit clamps, posting-slot guard
 ```
 
 `test_events_schema.py` covers the thing most likely to break silently: an
@@ -42,6 +44,7 @@ PYTHONPATH=backend uv run python tests/test_queue_logic.py    # eligibility, cla
 PYTHONPATH=backend uv run python tests/test_accounts_list.py  # account picker on a fresh DB
 PYTHONPATH=backend uv run python tests/test_queue_http.py     # machine tokens over HTTP
 PYTHONPATH=backend uv run python tests/test_posting_switch.py # pause/resume actually stops claims
+PYTHONPATH=backend uv run python tests/test_edit_logic.py     # desired state, staleness, decision-16-style routing
 
 dropdb cl_scratch
 ```

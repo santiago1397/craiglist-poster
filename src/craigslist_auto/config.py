@@ -50,6 +50,24 @@ FLOOR_MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 18
 EARLIEST_POST_HOUR = 6
 LATEST_POST_HOUR = 22
 
+# Editing ceilings (DESIGN_EDITS.md decision 30). Editing a live posting is not
+# obviously safer than creating one — it is browser activity on an aged account
+# that Craigslist may re-review — so it gets the same treatment: the dashboard
+# owns the live values, these are the outer bounds it cannot talk us past.
+CEILING_MAX_EDITS_PER_ACCOUNT_PER_DAY = 5
+CEILING_MAX_EDITS_PER_POST_LIFETIME = 10
+FLOOR_MIN_HOURS_BETWEEN_EDITS_SAME_POST = 24
+
+# Defaults used when the server says nothing. `edits_enabled` is False on both
+# sides until the DESIGN_EDITS phase-0 spike has confirmed how Craigslist's edit
+# form actually behaves.
+EDITS_ENABLED = False
+MIN_HOURS_BETWEEN_EDITS_SAME_POST = 48
+MAX_EDITS_PER_ACCOUNT_PER_DAY = 3
+MAX_EDITS_PER_POST_LIFETIME = 5
+EDIT_WINDOW_START_HOUR = 8
+EDIT_WINDOW_END_HOUR = 19
+
 
 @dataclass(frozen=True)
 class Guardrails:
@@ -59,6 +77,14 @@ class Guardrails:
     post_window_start_hour: int
     post_window_end_hour: int
     post_weekdays_only: bool
+
+    # Editing (DESIGN_EDITS.md decision 30)
+    edits_enabled: bool = EDITS_ENABLED
+    min_hours_between_edits_same_post: int = MIN_HOURS_BETWEEN_EDITS_SAME_POST
+    max_edits_per_account_per_day: int = MAX_EDITS_PER_ACCOUNT_PER_DAY
+    max_edits_per_post_lifetime: int = MAX_EDITS_PER_POST_LIFETIME
+    edit_window_start_hour: int = EDIT_WINDOW_START_HOUR
+    edit_window_end_hour: int = EDIT_WINDOW_END_HOUR
 
 
 def compiled_guardrails() -> Guardrails:
@@ -70,6 +96,12 @@ def compiled_guardrails() -> Guardrails:
         post_window_start_hour=POST_WINDOW_START_HOUR,
         post_window_end_hour=POST_WINDOW_END_HOUR,
         post_weekdays_only=POST_WEEKDAYS_ONLY,
+        edits_enabled=EDITS_ENABLED,
+        min_hours_between_edits_same_post=MIN_HOURS_BETWEEN_EDITS_SAME_POST,
+        max_edits_per_account_per_day=MAX_EDITS_PER_ACCOUNT_PER_DAY,
+        max_edits_per_post_lifetime=MAX_EDITS_PER_POST_LIFETIME,
+        edit_window_start_hour=EDIT_WINDOW_START_HOUR,
+        edit_window_end_hour=EDIT_WINDOW_END_HOUR,
     )
 
 
@@ -135,6 +167,47 @@ def clamp_guardrails(remote: dict) -> tuple[Guardrails, list[str]]:
                 base.post_weekdays_only
                 if remote.get("post_weekdays_only") is None
                 else bool(remote["post_weekdays_only"])
+            ),
+            # Editing (decision 30). A server that has never been migrated sends
+            # nothing here, and the compiled defaults keep editing switched off.
+            edits_enabled=(
+                base.edits_enabled
+                if remote.get("edits_enabled") is None
+                else bool(remote["edits_enabled"])
+            ),
+            min_hours_between_edits_same_post=_clamp(
+                "min_hours_between_edits_same_post",
+                remote.get("min_hours_between_edits_same_post"),
+                lo=FLOOR_MIN_HOURS_BETWEEN_EDITS_SAME_POST,
+                default=base.min_hours_between_edits_same_post,
+            ),
+            max_edits_per_account_per_day=_clamp(
+                "max_edits_per_account_per_day",
+                remote.get("max_edits_per_account_per_day"),
+                lo=0,
+                hi=CEILING_MAX_EDITS_PER_ACCOUNT_PER_DAY,
+                default=base.max_edits_per_account_per_day,
+            ),
+            max_edits_per_post_lifetime=_clamp(
+                "max_edits_per_post_lifetime",
+                remote.get("max_edits_per_post_lifetime"),
+                lo=0,
+                hi=CEILING_MAX_EDITS_PER_POST_LIFETIME,
+                default=base.max_edits_per_post_lifetime,
+            ),
+            edit_window_start_hour=_clamp(
+                "edit_window_start_hour",
+                remote.get("edit_window_start_hour"),
+                lo=EARLIEST_POST_HOUR,
+                hi=LATEST_POST_HOUR - 1,
+                default=base.edit_window_start_hour,
+            ),
+            edit_window_end_hour=_clamp(
+                "edit_window_end_hour",
+                remote.get("edit_window_end_hour"),
+                lo=EARLIEST_POST_HOUR + 1,
+                hi=LATEST_POST_HOUR,
+                default=base.edit_window_end_hour,
             ),
         ),
         notes,

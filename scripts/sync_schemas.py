@@ -20,7 +20,10 @@ def main() -> int:
         return 1
     DST.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(SRC, DST)
-    print(f"Copied {SRC.relative_to(ROOT)} → {DST.relative_to(ROOT)}")
+    # ASCII arrow on purpose: Windows consoles default to cp1252, where a "→"
+    # raises UnicodeEncodeError *after* the copy already succeeded — making a
+    # working sync exit 1.
+    print(f"Copied {SRC.relative_to(ROOT)} -> {DST.relative_to(ROOT)}")
     return 0
 
 

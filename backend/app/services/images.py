@@ -337,13 +337,17 @@ def detach(conn: psycopg.Connection, *, draft_id: int, image_id: int) -> bool:
     if not cur.rowcount:
         return False
     # Release the claim only if it never published and nothing else holds it.
+    # `post_desired_images` (0010) is a second holder: an image attached to a
+    # live posting's desired set must not be released just because a draft let
+    # go of it, or it could then be claimed by another account.
     conn.execute(
         """
         UPDATE images SET owner_account = NULL, updated_at = NOW()
         WHERE id = %s AND used_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM draft_images WHERE image_id = %s)
+          AND NOT EXISTS (SELECT 1 FROM post_desired_images WHERE image_id = %s)
         """,
-        (image_id, image_id),
+        (image_id, image_id, image_id),
     )
     return True
 

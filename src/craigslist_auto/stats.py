@@ -356,7 +356,7 @@ def _click_next_page(page: Page) -> None:
 def _scrape_account(account: Account, headless: bool) -> list[dict]:
     """Return all active-tab rows for one account. Raises LoginExpiredError."""
     all_rows: list[dict] = []
-    with launch_account(account, headless=headless) as ctx:
+    with launch_account(account, headless=headless, flow="stats_sync") as ctx:
         page = ctx.new_page()
         _ensure_active_tab(page, account.name)
         read_pause(400)

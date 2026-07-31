@@ -11,11 +11,16 @@ so a network outage delays reporting instead of losing it.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
+
+# DESIGN.md decision 17 caps artifacts at ~2MB. The desktop downscales
+# screenshots before spooling; this is the server-side backstop.
+MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 
 from ..db import conn, tx
 from ..security import require_machine_token
+from ..services import edits as edits_svc
 from ..services import queue as queue_svc
 
 router = APIRouter()
@@ -100,3 +105,92 @@ def claim(body: ClaimBody, machine: str = Depends(require_machine_token)) -> dic
         return queue_svc.claim_next(
             c, machine=machine, candidate_accounts=body.accounts
         )
+
+
+# ---------------------------------------------------------------------------
+# Post editing (DESIGN_EDITS.md). Same machine token, same prefix — the desktop
+# still calls exactly one authenticated surface besides /events.
+# ---------------------------------------------------------------------------
+
+
+class EditClaimBody(BaseModel):
+    post_id: str
+
+
+@router.get("/edits/pending")
+def edits_pending(
+    machine: str = Depends(require_machine_token),
+    accounts: str = Query(description="comma-separated account names"),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict:
+    """What this machine could usefully do next (decision 29).
+
+    Polled every ~15s by the reporter daemon. Hydration requests are returned
+    even when editing is disabled — reading a form is not an edit, and gating it
+    would leave the dashboard unable to show you anything to edit.
+    """
+    names = [a.strip() for a in accounts.split(",") if a.strip()]
+    if not names:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="no accounts given"
+        )
+    with tx() as c:
+        # Reclaim anything a dead machine left mid-flight before answering.
+        edits_svc.release_stale_claims(c)
+        out = edits_svc.pending_work(c, accounts=names, limit=limit)
+    out["machine"] = machine
+    return out
+
+
+@router.post("/edits/claim")
+def edits_claim(body: EditClaimBody, machine: str = Depends(require_machine_token)) -> dict:
+    """Atomically take one post's desired state for reconciliation.
+
+    Always 200 — `desired is None` means someone else got there first, or the
+    edit stopped being pending between the poll and this call.
+    """
+    with tx() as c:
+        desired = edits_svc.claim_reconcile(c, machine=machine, post_id=body.post_id)
+    return {"desired": desired}
+
+
+@router.put("/artifacts/{artifact_id}", status_code=status.HTTP_201_CREATED)
+async def put_artifact(
+    artifact_id: str,
+    request: Request,
+    machine: str = Depends(require_machine_token),
+    kind: str = Query(pattern="^(screenshot|html)$"),
+    content_type: str = Query(default="application/octet-stream"),
+    post_id: str | None = Query(default=None),
+    account: str | None = Query(default=None),
+    flow: str | None = Query(default=None),
+    label: str | None = Query(default=None),
+) -> dict:
+    """Upload a failure artifact (DESIGN.md decision 17).
+
+    Raw body rather than multipart: the desktop is spooling one blob at a time
+    and this keeps the client a single httpx.put. Idempotent by artifact_id, so
+    a retry after a timeout does not store the bytes twice.
+    """
+    data = await request.body()
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="empty artifact"
+        )
+    if len(data) > MAX_ARTIFACT_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"artifact is {len(data)//1024}KB; limit is {MAX_ARTIFACT_BYTES//1024}KB",
+        )
+    with tx() as c:
+        c.execute(
+            """
+            INSERT INTO artifacts (id, machine, kind, content_type, size_bytes,
+                                   post_id, account, flow, label, data)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (artifact_id, machine, kind, content_type, len(data),
+             post_id, account, flow, label, data),
+        )
+    return {"id": artifact_id, "size_bytes": len(data)}

@@ -14,6 +14,7 @@ import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
+  PencilLine,
   Images as ImagesIcon,
   LayoutDashboard,
   ListChecks,
@@ -35,6 +36,7 @@ import { cn } from "../lib/cn";
 const NAV = [
   { to: "/", label: "Dashboard", Icon: LayoutDashboard },
   { to: "/review", label: "Review", Icon: ListChecks },
+  { to: "/edits", label: "Edits", Icon: PencilLine },
   { to: "/images", label: "Images", Icon: ImagesIcon },
   { to: "/prompts", label: "Prompts", Icon: Sparkles },
   { to: "/posts", label: "Posts", Icon: ScrollText },
