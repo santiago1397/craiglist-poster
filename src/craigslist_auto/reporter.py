@@ -39,6 +39,31 @@ OUTBOX_DB = DATA_DIR / "outbox.sqlite"
 _INIT_LOCK = threading.Lock()
 _INITED = False
 
+# Held while a child process owns the outbox. See `pause_flushing`.
+_FLUSH_PAUSED = threading.Event()
+
+
+@contextmanager
+def pause_flushing() -> Iterator[None]:
+    """Hold this process's flusher while a subprocess drives the outbox.
+
+    `cl post` decides whether it may claim by sampling `pending_history_count()`
+    and the server refuses the claim outright when that is non-zero. But
+    `flush_once` selects, POSTs, then marks sent as three separate statements —
+    so for the duration of an in-flight POST (up to REQUEST_TIMEOUT) those rows
+    still read as unsent. A daemon flushing a `posted` event at the moment a
+    spawned `cl post` samples would hand it a phantom backlog and get its claim
+    refused, and the operator would see a button that did nothing.
+
+    Pausing is enough because the child does its own `flush_until_empty()`
+    first: nothing goes unsent, it just goes via the child.
+    """
+    _FLUSH_PAUSED.set()
+    try:
+        yield
+    finally:
+        _FLUSH_PAUSED.clear()
+
 
 def machine_id() -> str:
     return os.environ.get("MACHINE_ID") or platform.node().lower()
@@ -336,6 +361,14 @@ def flush_forever(stop_event: threading.Event | None = None) -> None:
         if stop_event is not None and stop_event.is_set():
             logger.info("reporter flusher stopping (stop_event set)")
             return
+        if _FLUSH_PAUSED.is_set():
+            # A subprocess owns the outbox. Idle rather than race it.
+            if stop_event is not None:
+                if stop_event.wait(1.0):
+                    return
+            else:
+                time.sleep(1.0)
+            continue
         result = flush_once()
         if result.sent:
             logger.info(f"flushed {result.sent} events")

@@ -190,6 +190,7 @@ def _route_draft(conn: psycopg.Connection, ev: PostAttempt) -> None:
         queue_svc.mark_posted(
             conn, draft_id=ev.draft_id, post_id=ev.post_id, posted_at=ev.ts
         )
+        _clear_post_request(conn, ev.draft_id)
     elif ev.outcome in ("failed_login", "failed_form", "failed_other"):
         new_status = queue_svc.release_or_park(
             conn,
@@ -201,10 +202,38 @@ def _route_draft(conn: psycopg.Connection, ev: PostAttempt) -> None:
             # images are burned.
             photos_confirmed=ev.photos_confirmed,
         )
+        # Clear the request on failure too, and deliberately. A pre-upload
+        # failure sends the draft back to 'queued'; if the flag survived, the
+        # daemon would see it again on its next 15s beat and retry unattended,
+        # forever. One press of the button is one attempt — the operator reads
+        # the failure and decides whether to press it again.
+        _clear_post_request(conn, ev.draft_id, error=ev.error_message)
         logger.info(
             f"draft {ev.draft_id} failed at step {ev.failed_step!r} -> {new_status}"
         )
     # dry_run and the skipped_* outcomes never hold a claim, so nothing to do.
+
+
+def _clear_post_request(
+    conn: psycopg.Connection, draft_id: int, *, error: str | None = None
+) -> None:
+    """End a "Post now" request now that its attempt has been accounted for.
+
+    Runs on the durable path rather than at claim time, so a VPS outage delays
+    the clear instead of losing it — the same reason `record_content` clears
+    `hydrate_requested_at` here rather than over the queue API.
+    """
+    conn.execute(
+        """
+        UPDATE drafts
+        SET post_requested_at = NULL,
+            post_requested_by = NULL,
+            post_request_error = %s,
+            updated_at = NOW()
+        WHERE id = %s AND post_requested_at IS NOT NULL
+        """,
+        ((error or "")[:1000] or None, draft_id),
+    )
 
 
 def _insert_snapshot(conn: psycopg.Connection, ev: SnapshotTaken) -> bool:

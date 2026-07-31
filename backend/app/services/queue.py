@@ -112,6 +112,19 @@ def _posts_last_24h_total(conn: psycopg.Connection, now: datetime) -> int:
     return row["n"] or 0
 
 
+def _accounts_with_claim(conn: psycopg.Connection) -> set[str]:
+    """Accounts holding a draft that was claimed but has not reported yet.
+
+    Bounded by `release_stale_claims`, which parks anything older than
+    STALE_CLAIM_MINUTES — so a machine that dies mid-post blocks its account
+    until the reaper runs, not forever.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT account FROM drafts WHERE status = 'claimed'"
+    ).fetchall()
+    return {r["account"] for r in rows}
+
+
 def _posts_last_7d_by_account(conn: psycopg.Connection, now: datetime) -> dict[str, int]:
     rows = conn.execute(
         "SELECT account, COUNT(*) AS n FROM posts WHERE posted_ts >= %s GROUP BY account",
@@ -164,10 +177,19 @@ def evaluate_eligibility(
     last_post = _last_post_by_account(conn)
     weekly = _posts_last_7d_by_account(conn, now)
     depths = queue_depths(conn)
+    in_flight = _accounts_with_claim(conn)
 
     out: dict[str, dict] = {}
     for name in accounts:
         reasons = list(global_blocks)
+        # A claim that has not reported yet is invisible to every count above,
+        # because all of them read `posts`, which ingest only fills once the
+        # attempt comes back. Two claims a minute apart therefore both pass the
+        # cooldown and the daily cap on stale history, and the browser lease
+        # serialises them without cancelling either — so both publish. The
+        # in-flight claim is the only evidence that exists in that window.
+        if name in in_flight:
+            reasons.append("a post is already in flight for this account")
         last = last_post.get(name)
         if last is not None:
             hours = (now - last).total_seconds() / 3600
@@ -278,6 +300,63 @@ def release_stale_claims(
     return cur.rowcount or 0
 
 
+# A "Post now" request is refused synchronously when the guardrails don't allow
+# it, so a live flag means the desktop simply hasn't polled yet — normally a
+# matter of seconds. This is the backstop for the case nothing else covers: the
+# daemon was down when the button was pressed. Long enough to outlast a posting
+# run holding the browser lease, short enough that a Friday click can never be
+# picked up on Monday.
+POST_REQUEST_TTL_MINUTES = 20
+
+
+def expire_post_requests(
+    conn: psycopg.Connection, older_than_minutes: int = POST_REQUEST_TTL_MINUTES
+) -> int:
+    """Drop post requests nothing ever collected, and say so on the draft.
+
+    The message matters more than the cleanup. Without it, "I pressed Post now
+    and nothing happened" is unanswerable from the dashboard — every other trace
+    of the refusal lives in `logs/run.log` on a machine the operator is probably
+    not sitting at.
+    """
+    cur = conn.execute(
+        """
+        UPDATE drafts
+        SET post_requested_at = NULL,
+            post_requested_by = NULL,
+            post_request_error = 'Post now expired after '
+                || make_interval(mins => %s) || ' without the desktop picking it '
+                || 'up. Nothing was posted. The machine was most likely offline '
+                || 'or busy with another run.',
+            updated_at = NOW()
+        WHERE post_requested_at IS NOT NULL
+          AND post_requested_at < NOW() - make_interval(mins => %s)
+        """,
+        (older_than_minutes, older_than_minutes),
+    )
+    return cur.rowcount or 0
+
+
+def pending_post_requests(
+    conn: psycopg.Connection, *, accounts: list[str], limit: int = 10
+) -> list[dict]:
+    """Live "Post now" requests for these accounts, oldest first."""
+    rows = conn.execute(
+        """
+        SELECT id, account, title, post_requested_at AS requested_at
+        FROM drafts
+        WHERE post_requested_at IS NOT NULL
+          AND post_requested_at > NOW() - make_interval(mins => %s)
+          AND status = 'queued'
+          AND account = ANY(%s)
+        ORDER BY post_requested_at
+        LIMIT %s
+        """,
+        (POST_REQUEST_TTL_MINUTES, accounts, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def stuck_claims(conn: psycopg.Connection) -> list[dict]:
     """Drafts currently held by a claim, newest first.
 
@@ -302,6 +381,7 @@ def claim_next(
     machine: str,
     candidate_accounts: list[str],
     now: datetime | None = None,
+    draft_id: int | None = None,
 ) -> dict:
     """Atomically hand out the next draft this machine should post.
 
@@ -309,6 +389,16 @@ def claim_next(
     the set that is eligible — eligibility is decided here. Among eligible
     accounts that actually have drafts, the one idle longest wins (decision 3),
     preserving the rotation fairness of the old `pick_next_account`.
+
+    `draft_id` pins the claim to one specific draft — the operator pressed
+    "Post now" on it. Everything else is identical: the same guardrails decide,
+    on the server, exactly as they do for a scheduled fire. What changes is only
+    *which* draft is considered, never *whether* it may go out.
+
+    The invariant that matters in that mode: a targeted claim either hands back
+    the draft that was asked for or hands back nothing. It must never fall
+    through to the next account in the rotation — the operator clicked one row
+    and a different ad publishing instead would be worse than not posting.
 
     Returns {"draft": {...}} or {"draft": None, "reasons": {...}}.
     """
@@ -324,6 +414,55 @@ def claim_next(
             f"released {rescued} stale draft claim(s) into needs_attention — "
             f"a machine claimed them and never reported an outcome"
         )
+    expire_post_requests(conn)
+
+    # Resolve a targeted claim before spending anything on eligibility, so the
+    # refusals that are about *this draft* read as such rather than arriving
+    # dressed up as a guardrail block.
+    target = None
+    if draft_id is not None:
+        target = conn.execute(
+            "SELECT id, account, status, post_requested_at FROM drafts WHERE id = %s",
+            (draft_id,),
+        ).fetchone()
+        if target is None:
+            return {
+                "draft": None,
+                "refused": "no_such_draft",
+                "detail": f"draft {draft_id} does not exist",
+            }
+        # The flag IS the authorisation, and this check is the whole of it.
+        # Without it a machine token could name any draft id and pull it out of
+        # order; with it, a machine can only execute something an operator
+        # already asked for from the dashboard. Do not drop this as redundant
+        # with the status check — it is not.
+        if target["post_requested_at"] is None:
+            return {
+                "draft": None,
+                "refused": "not_requested",
+                "detail": (
+                    f"draft {draft_id} has no live post request — it was "
+                    f"cancelled, already handled, or never requested"
+                ),
+            }
+        if target["account"] not in candidate_accounts:
+            return {
+                "draft": None,
+                "refused": "not_bound",
+                "detail": (
+                    f"draft {draft_id} belongs to {target['account']}, which is "
+                    f"not bound to this machine"
+                ),
+            }
+        if target["status"] != "queued":
+            return {
+                "draft": None,
+                "refused": "not_queued",
+                "detail": (
+                    f"draft {draft_id} is {target['status']}, not queued — "
+                    f"another machine may have claimed it first"
+                ),
+            }
 
     report = evaluate_eligibility(conn, candidate_accounts, now=now)
     eligible = [n for n, info in report["accounts"].items() if info["eligible"]]
@@ -335,19 +474,32 @@ def claim_next(
         last = report["accounts"][name]["last_post_at"]
         return last or datetime.min.replace(tzinfo=timezone.utc)
 
-    for account in sorted(eligible, key=_idle_key):
+    if target is not None:
+        # One account, one draft, no fallback. If its account is blocked the
+        # answer is "no", not "here is someone else's ad".
+        if target["account"] not in eligible:
+            return {"draft": None, "eligibility": report}
+        order = [target["account"]]
+    else:
+        order = sorted(eligible, key=_idle_key)
+
+    for account in order:
+        # Same row lock either way; the targeted form just pins the id instead
+        # of taking the head of the queue.
         row = conn.execute(
-            """
+            f"""
             SELECT * FROM drafts
             WHERE status = 'queued'
               AND account = %s
               AND (not_before IS NULL OR not_before <= NOW())
               AND (expires_at IS NULL OR expires_at > NOW())
+              {"AND id = %s AND post_requested_at IS NOT NULL"
+               if target is not None else ""}
             ORDER BY position
             LIMIT 1
             FOR UPDATE SKIP LOCKED
             """,
-            (account,),
+            (account, draft_id) if target is not None else (account,),
         ).fetchone()
         if row is None:
             continue
@@ -377,6 +529,20 @@ def claim_next(
             for i in images_svc.images_for_draft(conn, draft["id"])
         ]
         return {"draft": draft, "eligibility": report}
+
+    if target is not None:
+        # The account was eligible but the row did not come back: either another
+        # claim took it in the last few milliseconds, or it carries a not_before
+        # /expires_at window that excludes right now.
+        return {
+            "draft": None,
+            "refused": "unavailable",
+            "detail": (
+                f"draft {draft_id} could not be claimed — it is outside its "
+                f"not_before/expires_at window, or another machine took it first"
+            ),
+            "eligibility": report,
+        }
 
     # Every eligible account raced empty between the depth check and here.
     return {"draft": None, "eligibility": report}

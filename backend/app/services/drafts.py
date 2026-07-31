@@ -12,6 +12,7 @@ nothing.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -114,6 +115,85 @@ def update_draft(conn: psycopg.Connection, draft_id: int, payload: dict) -> dict
 def delete_draft(conn: psycopg.Connection, draft_id: int) -> bool:
     cur = conn.execute(
         "DELETE FROM drafts WHERE id = %s AND status <> 'claimed'", (draft_id,)
+    )
+    return (cur.rowcount or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# "Post now" — operator-triggered posting of one named draft
+#
+# The flag is the job. Setting `post_requested_at` is all that happens here; the
+# desktop's daemon poll picks it up within ~15s and runs the ordinary posting
+# path against that draft id. Nothing about *whether* posting is allowed moves
+# to the dashboard — `request_post` refuses up front on exactly the guardrails
+# the claim would apply anyway.
+# ---------------------------------------------------------------------------
+
+
+class NotEligible(Exception):
+    """Guardrails say this draft's account cannot post right now.
+
+    Carries the same reason strings `evaluate_eligibility` produces, so the
+    dashboard shows the operator the identical wording `cl status` prints.
+    """
+
+    def __init__(self, reasons: list[str]):
+        self.reasons = reasons
+        super().__init__("; ".join(reasons) or "not eligible")
+
+
+def request_post(
+    conn: psycopg.Connection,
+    draft_id: int,
+    *,
+    requested_by: str = "",
+    now: datetime | None = None,
+) -> dict:
+    """Ask the desktop to post this draft on its next poll.
+
+    Refuses synchronously rather than queueing a request that might fire hours
+    later. A click that cannot be honoured now is told so now — the operator is
+    standing in front of the screen, and a post appearing unattended at 3am
+    because a cooldown quietly expired is the opposite of what the button is
+    for.
+    """
+    from . import queue as queue_svc
+
+    draft = get_draft(conn, draft_id)
+    if draft is None:
+        return {}
+    if draft["status"] != "queued":
+        raise ValueError(f"draft is {draft['status']}, not queued")
+
+    report = queue_svc.evaluate_eligibility(conn, [draft["account"]], now=now)
+    info = report["accounts"][draft["account"]]
+    if not info["eligible"]:
+        raise NotEligible(info["reasons"])
+
+    row = conn.execute(
+        """
+        UPDATE drafts
+        SET post_requested_at = NOW(),
+            post_requested_by = %s,
+            post_request_error = NULL,
+            updated_at = NOW()
+        WHERE id = %s
+        RETURNING *
+        """,
+        ((requested_by or "")[:200], draft_id),
+    ).fetchone()
+    return {"draft": dict(row), "eligibility": report}
+
+
+def clear_post_request(conn: psycopg.Connection, draft_id: int) -> bool:
+    """Drop the flag. Used by operator cancel and by event ingest alike."""
+    cur = conn.execute(
+        """
+        UPDATE drafts
+        SET post_requested_at = NULL, post_requested_by = NULL, updated_at = NOW()
+        WHERE id = %s AND post_requested_at IS NOT NULL
+        """,
+        (draft_id,),
     )
     return (cur.rowcount or 0) > 0
 

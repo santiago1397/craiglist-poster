@@ -193,6 +193,50 @@ Settled in a second design interview. These supersede parts of 10-13.
     exists behind `image_topup_enabled`, defaulting false, because it spends
     money on prompts still being tuned. Same pattern as `edits_enabled`.
 
+### Posting on demand
+
+32. **"Post now" changes the timing, never the permission.** Posting was
+    time-triggered only: Task Scheduler at 9/13/17, server picks the draft. The
+    operator could not test a copy or image change without waiting for a slot.
+    The button sets a flag; the daemon's 15s poll spawns the ordinary `cl post`
+    with a draft id. Every guardrail still runs server-side at claim time, and a
+    manual post consumes one of the day's three slots like any other.
+
+33. **The request is refused synchronously, not queued.** A click that cannot be
+    honoured now says so now, with the reasons `cl status` would print. A
+    request that lingered until the guardrails happened to clear would publish
+    unattended at a time nobody chose — the opposite of what an on-demand button
+    is for. This is what removes the need for pending-state UI: there is a
+    20-minute TTL, but only as a backstop for the daemon being down, and it
+    writes its reason onto the draft so the dashboard can answer "I pressed it
+    and nothing happened".
+
+34. **The flag is the authorisation, not the draft id.** `claim_next(draft_id=)`
+    refuses unless that draft carries a live request. Without it, naming an id
+    would let any machine token pull any draft out of order — the id says
+    *which*, the flag says *may*. A targeted claim returns the requested draft
+    or nothing; it never falls through to the rotation, because the operator
+    clicked one row and a different ad publishing is worse than none.
+
+35. **An in-flight claim blocks its account.** Every guardrail counts rows in
+    `posts`, which ingest fills only once the attempt is reported — so during a
+    run the history is stale and a second claim is authorised against it. The
+    browser lease serialises the two Chromes but cancels neither, so both
+    publish. This predates "Post now" (a 12:59 fire and a 13:00 fire hit it),
+    but the button made it one click away. The claim itself is the only evidence
+    of a run in progress, so eligibility now reads it. Bounded by the existing
+    45-minute stale-claim reaper.
+
+36. **The daemon spawns `cl post` rather than posting in-thread.** That path —
+    machine binding, outbox flush, image fetch, the form, the failure taxonomy —
+    is the most carefully tested code here, and a second implementation would
+    have to be kept correct forever. The cost is one subprocess and one subtle
+    interaction: `cl post` decides whether it may claim by sampling the outbox,
+    and `flush_once` selects, POSTs and marks sent as three statements, so a
+    daemon flush in flight reads as a phantom backlog and gets the child's claim
+    refused. The daemon holds its flusher for the duration
+    (`reporter.pause_flushing`).
+
 ---
 
 ## Derived requirements

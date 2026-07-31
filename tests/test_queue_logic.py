@@ -71,11 +71,30 @@ assert d is not None and d["account"] == "craigs2" and d["title"] == "c2 first",
 assert d["status"] == "claimed" and d["attempts"] == 1
 ok.append("craigs1 idled longest but had no drafts -> claimed craigs2 head instead")
 
-# --- 4. a claimed draft is not claimable again -----------------------------
+# --- 4. a claim in flight blocks a second claim on that account ------------
+# Every count that would otherwise stop a double post — the cooldown, the daily
+# cap — reads the `posts` table, which ingest only fills once the attempt comes
+# back. While a run is in flight that history is stale, so the claim itself is
+# the only evidence it happened. Without this the 12:59 manual post and the
+# 13:00 scheduled fire both get authorised and both publish.
 with tx() as c:
     res2 = queue_svc.claim_next(c, machine="m1", candidate_accounts=ACCOUNTS, now=NOW)
-assert res2["draft"]["id"] != d["id"], "same draft claimed twice"
-assert res2["draft"]["title"] == "c2 second"
+assert res2["draft"] is None, "claimed a second draft while one was still in flight"
+assert any(
+    "in flight" in r for r in res2["eligibility"]["accounts"]["craigs2"]["reasons"]
+), res2["eligibility"]["accounts"]["craigs2"]["reasons"]
+ok.append("a claim in flight blocks a second claim on that account (no double post)")
+
+# --- 4b. once it resolves, the next claim advances and never re-serves -----
+with tx() as c:
+    # Post-upload failure: parks the draft and frees the account.
+    queue_svc.release_or_park(
+        c, draft_id=d["id"], failed_step="publish", failed_message="test"
+    )
+    res3 = queue_svc.claim_next(c, machine="m1", candidate_accounts=ACCOUNTS, now=NOW)
+assert res3["draft"] is not None, "nothing claimable after the in-flight one resolved"
+assert res3["draft"]["id"] != d["id"], "same draft claimed twice"
+assert res3["draft"]["title"] == "c2 second"
 ok.append("second claim advances to the next draft, never re-serves a claimed one")
 
 # --- 5. cooldown blocks an account that just posted ------------------------
