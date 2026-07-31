@@ -148,8 +148,178 @@ export default function SettingsPage() {
         />
       )}
 
+      <PhoneNumbers />
+
       <MachineTokens />
     </div>
+  );
+}
+
+type Phone = {
+  id: number;
+  number: string;
+  label: string;
+  active: boolean;
+  position: number;
+};
+
+/** The call-tracking numbers that go on ads.
+ *
+ * These lived in `reference.py` as a Python list, so adding one meant a code
+ * change and a redeploy — for something that changes when a campaign changes.
+ *
+ * Retiring is the normal way to stop using a number: drafts already carrying it
+ * keep it, so the record of what published under which number stays intact.
+ * Delete is for one added by mistake.
+ */
+function PhoneNumbers() {
+  const qc = useQueryClient();
+  const [number, setNumber] = useState("");
+  const [label, setLabel] = useState("");
+  const [editing, setEditing] = useState<Record<number, string>>({});
+
+  const q = useQuery({
+    queryKey: ["reference", "phones"],
+    queryFn: () => api.get<{ phones: Phone[] }>("/reference/phones"),
+  });
+
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ["reference"] });
+    // The composer reads this list; a stale copy would offer a retired number.
+    void qc.invalidateQueries({ queryKey: ["locations"] });
+  };
+
+  const add = useMutation({
+    mutationFn: () => api.post("/reference/phones", { number, label }),
+    onSuccess: () => {
+      setNumber("");
+      setLabel("");
+      refresh();
+    },
+  });
+  const patch = useMutation({
+    mutationFn: ({ id, ...body }: { id: number } & Partial<Phone>) =>
+      api.patch(`/reference/phones/${id}`, body),
+    onSuccess: refresh,
+  });
+  const remove = useMutation({
+    mutationFn: (id: number) => api.del(`/reference/phones/${id}`),
+    onSuccess: refresh,
+  });
+
+  const phones = q.data?.phones ?? [];
+  const activeCount = phones.filter((p) => p.active).length;
+  const err = add.error ?? patch.error ?? remove.error ?? q.error;
+  const errorText = err ? (err instanceof ApiError ? err.message : String(err)) : null;
+  const busy = add.isPending || patch.isPending || remove.isPending;
+
+  return (
+    <Section
+      title="Phone numbers"
+      description="The call-tracking numbers that go on ads. New drafts rotate across the active ones, least-used first, so a number you add here goes into circulation immediately."
+    >
+      {errorText && (
+        <p role="alert" className="text-sm text-danger-fg">
+          {errorText}
+        </p>
+      )}
+
+      {activeCount === 0 && phones.length > 0 && (
+        <p className="text-sm text-warn-fg border border-warn-border bg-warn/60 rounded px-2 py-1.5">
+          Every number is retired. New drafts fall back to whichever number their
+          seed row carries, and the composer offers none.
+        </p>
+      )}
+
+      <ul className="divide-y divide-border">
+        {phones.map((p) => {
+          const draft = editing[p.id];
+          const changed = draft !== undefined && draft !== p.number;
+          return (
+            <li key={p.id} className="py-2 flex items-center gap-2 flex-wrap">
+              <input
+                value={draft ?? p.number}
+                onChange={(e) => setEditing({ ...editing, [p.id]: e.target.value })}
+                className={cn(
+                  "bg-bg border border-border-strong rounded px-2 py-1 text-sm w-40",
+                  !p.active && "opacity-50 line-through",
+                )}
+              />
+              <input
+                value={p.label}
+                placeholder="label (optional)"
+                onChange={(e) => patch.mutate({ id: p.id, label: e.target.value })}
+                className="bg-bg border border-border-strong rounded px-2 py-1 text-sm w-40 text-fg-muted"
+              />
+              {changed && (
+                <button
+                  disabled={busy}
+                  onClick={() => {
+                    patch.mutate({ id: p.id, number: draft });
+                    setEditing((e) => {
+                      const { [p.id]: _drop, ...rest } = e;
+                      return rest;
+                    });
+                  }}
+                  className="text-xs px-2 py-1 rounded bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
+                >
+                  Save
+                </button>
+              )}
+              <button
+                disabled={busy}
+                onClick={() => patch.mutate({ id: p.id, active: !p.active })}
+                className="text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40 ml-auto"
+              >
+                {p.active ? "Retire" : "Reactivate"}
+              </button>
+              <button
+                disabled={busy}
+                onClick={() => {
+                  if (
+                    confirm(
+                      `Delete ${p.number}? Retiring keeps it on record instead. ` +
+                        `Drafts already using it keep it either way.`,
+                    )
+                  )
+                    remove.mutate(p.id);
+                }}
+                className="text-xs px-2 py-1 rounded border border-danger-border text-danger-fg hover:bg-danger disabled:opacity-40"
+              >
+                Delete
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+
+      <div className="flex gap-2 flex-wrap pt-1">
+        <input
+          value={number}
+          onChange={(e) => setNumber(e.target.value)}
+          placeholder="(954) 555-0123"
+          className="bg-bg border border-border-strong rounded px-2 py-1.5 text-sm w-44"
+        />
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="label (optional)"
+          className="bg-bg border border-border-strong rounded px-2 py-1.5 text-sm w-44"
+        />
+        <button
+          disabled={!number.trim() || busy}
+          onClick={() => add.mutate()}
+          className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
+        >
+          {add.isPending ? "Adding…" : "Add number"}
+        </button>
+      </div>
+      <p className="text-xs text-fg-subtle">
+        Written exactly as you type it — the format is part of how a number is
+        recognised in a call log, so it is never reformatted. Retiring one leaves
+        every existing draft untouched; change a queued draft's number in Review.
+      </p>
+    </Section>
   );
 }
 

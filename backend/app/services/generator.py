@@ -284,6 +284,25 @@ def build_draft(
         logger.warning("no routable seed ads available; cannot generate")
         return None
 
+    # Rotate the call-tracking number across the managed list rather than
+    # inheriting whichever one the seed row happened to carry — the workbook's
+    # numbers were themselves just a rotation, and a number added under
+    # Settings has to reach generated drafts or it reaches almost nothing.
+    #
+    # This has to happen before the model call: the phone is interpolated into
+    # the prompt and `_validate` asserts it appears in the body, so patching the
+    # field afterwards would leave the old number written into the copy.
+    from . import contacts
+
+    chosen_phone = contacts.pick(conn, rng)
+    if chosen_phone:
+        seed = {**seed, "phone_number": chosen_phone}
+    elif seed["phone_number"]:
+        logger.warning(
+            "no active contact numbers; falling back to the seed's number "
+            f"{seed['phone_number']}"
+        )
+
     angle = rng.choice(ANGLES)
     try:
         title, head = call_model(g, seed, angle)
