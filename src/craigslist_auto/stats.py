@@ -618,6 +618,12 @@ _POST_ID_PATTERNS = [
     re.compile(r"/(\d{8,})\.html"),           # /d/slug/1234567890.html
     re.compile(r"postingID=(\d{8,})", re.I),  # search?postingID=1234567890 (paid-category receipt fallback)
     re.compile(r"[?&]id=(\d{8,})", re.I),     # generic id=... form
+    # Craigslist's current share form: /view/d/<slug>/<token>, where the token
+    # is base62 rather than digits. Every pattern above wanted 8+ digits, so a
+    # real published post yielded no id at all — it went into history under a
+    # placeholder and could not be ghost-checked or tracked for stats. The
+    # 16-char floor keeps this from matching the numeric form above or a slug.
+    re.compile(r"/(?:view/)?d/[^/]+/([A-Za-z0-9_-]{16,})"),
 ]
 
 

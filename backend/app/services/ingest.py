@@ -104,15 +104,29 @@ def _did_insert(cur: psycopg.Cursor) -> bool:
 
 
 def _insert_post_attempt(conn: psycopg.Connection, ev: PostAttempt) -> bool:
-    if ev.outcome == "posted" and ev.post_id:
+    if ev.outcome == "posted":
+        # Every guardrail — the 24h cap, the per-account cooldown, the weekly
+        # cap — counts rows in `posts`. This used to require `ev.post_id`, so a
+        # post that published but could not be identified wrote no history at
+        # all and the account looked idle. That happened: a run captured a
+        # foreign /d/ link, yielded no post id, and left craigs1 free to post
+        # again immediately despite having just published.
+        #
+        # An ad on the internet we cannot name is still an ad on the internet.
+        # It gets a synthetic id derived from the event, which keeps the upsert
+        # idempotent across replays, and is filed as a problem so it is not
+        # only discoverable by reading this table.
+        post_id = ev.post_id or f"unidentified:{ev.event_id}"
         _upsert_post(
             conn,
-            post_id=ev.post_id,
+            post_id=post_id,
             account=ev.account,
             title=ev.ad_title,
             url=ev.post_url,
             posted_ts=ev.ts,
         )
+        if not ev.post_id:
+            _record_unidentified_post(conn, ev, post_id)
     cur = conn.execute(
         """
         INSERT INTO post_attempts (
@@ -146,6 +160,48 @@ def _insert_post_attempt(conn: psycopg.Connection, ev: PostAttempt) -> bool:
     if inserted and ev.draft_id is not None:
         _route_draft(conn, ev)
     return inserted
+
+
+def _record_unidentified_post(
+    conn: psycopg.Connection, ev: PostAttempt, synthetic_id: str
+) -> None:
+    """File a published-but-unidentifiable post as a problem.
+
+    It counts for the cooldowns now, which is the safety-critical part, but a
+    post with no id cannot be ghost-checked, cannot collect stats, and cannot
+    be edited from the dashboard. That is worth a human knowing about, and the
+    fix is usually to find the URL by hand and correct the row.
+    """
+    conn.execute(
+        """
+        INSERT INTO flow_errors (
+            event_id, ts, machine, flow, step, account,
+            error_type, error_message, context
+        )
+        VALUES (%s, %s, %s, 'post', 'extract_url', %s,
+                'post_unidentified', %s, %s::jsonb)
+        ON CONFLICT (event_id) DO NOTHING
+        """,
+        (
+            f"{ev.event_id}:unidentified",
+            ev.ts,
+            ev.machine,
+            ev.account,
+            (
+                f"{ev.account} published a post but no posting id could be read "
+                f"from the confirmation page. It is counted against the "
+                f"cooldowns under a placeholder id, but it cannot be "
+                f"ghost-checked, tracked for stats or edited until someone "
+                f"finds its real URL in the account and corrects it."
+            ),
+            json.dumps({
+                "draft_id": ev.draft_id,
+                "synthetic_post_id": synthetic_id,
+                "post_url": ev.post_url,
+                "ad_title": ev.ad_title,
+            }),
+        ),
+    )
 
 
 def _record_degradation(conn: psycopg.Connection, ev: PostAttempt) -> None:
