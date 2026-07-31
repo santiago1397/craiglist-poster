@@ -134,7 +134,9 @@ def run_once(
             logger.warning(f"hydrate skipped: unknown account {item['account']!r}")
             continue
         try:
-            result = editor.hydrate_post(account, item["post_id"], headless=headless)
+            result = editor.hydrate_post(
+                account, item["post_id"], url=item.get("url"), headless=headless
+            )
         except LeaseBusy as e:
             logger.info(f"hydrate deferred, browser busy: {e}")
             summary["skipped"] += 1

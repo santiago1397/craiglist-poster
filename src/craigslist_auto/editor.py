@@ -194,15 +194,63 @@ def _open_account_page(page: Page, account_name: str) -> None:
         raise LoginExpiredError(f"account {account_name} is not logged in (url={page.url})")
 
 
-def _find_row(page: Page, post_id: str):
-    """Locate the postings-row for this post_id. Observed DOM (stats.py:211)."""
+def _url_token(url: str | None) -> str | None:
+    """The distinctive last path segment of a posting URL.
+
+    For Craigslist's current share form — /view/d/<slug>/<token> — this is the
+    base62 token. For the older /d/<slug>/<digits>.html form it is the numeric
+    id with the extension stripped.
+    """
+    if not url:
+        return None
+    tail = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0].split("#")[0]
+    if tail.endswith(".html"):
+        tail = tail[: -len(".html")]
+    # Anything short enough to collide with an unrelated href is not worth
+    # matching on.
+    return tail if len(tail) >= 8 else None
+
+
+def _find_row(page: Page, post_id: str, url: str | None = None):
+    """Locate the postings-row for this post. Observed DOM (stats.py:211).
+
+    Three ways in, because `post_id` is not always the account page's id.
+    `stats.py` derives it from the posting URL, and Craigslist's current share
+    form carries a base62 token rather than the numeric posting id — so a post
+    recorded straight from a publish can hold something `data-postingid` will
+    never equal. The row is still there; it just has to be found by its link.
+    """
     row = page.locator(
         f"{SEL['posting_row']}:has({SEL['row_status_cell']}[data-postingid='{post_id}'])"
     )
-    if row.count() == 0:
-        # Fall back to the visible postingID column before declaring it gone.
-        row = page.locator(f"{SEL['posting_row']}:has-text('{post_id}')")
+    if row.count() > 0:
+        return row.first
+
+    token = _url_token(url)
+    if token:
+        row = page.locator(f'{SEL["posting_row"]}:has(a[href*="{token}"])')
+        if row.count() > 0:
+            logger.info(f"matched post {post_id} by its URL token rather than its id")
+            return row.first
+
+    # Fall back to the visible postingID column before declaring it gone.
+    row = page.locator(f"{SEL['posting_row']}:has-text('{post_id}')")
     return row.first if row.count() > 0 else None
+
+
+def _row_posting_id(row) -> str | None:
+    """The numeric id Craigslist itself uses for a matched row.
+
+    Worth reporting whenever it differs from what we stored: that difference is
+    the whole reason a row can be present and still not be found by id.
+    """
+    try:
+        cell = row.locator(f"{SEL['row_status_cell']}[data-postingid]")
+        if cell.count() == 0:
+            return None
+        return cell.first.get_attribute("data-postingid")
+    except Exception:  # pragma: no cover — defensive
+        return None
 
 
 def _count(page: Page, key: str) -> int:
@@ -267,7 +315,7 @@ def _live_images(page: Page) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def hydrate_post(
-    account: Account, post_id: str, *, headless: bool = False
+    account: Account, post_id: str, *, url: str | None = None, headless: bool = False
 ) -> dict:
     """Read a live posting's edit form. Never writes anything.
 
@@ -287,9 +335,11 @@ def hydrate_post(
         try:
             with log.step("open_account_page"):
                 _open_account_page(page, account.name)
+                rows = _count(page, "posting_row")
+                log.note("account_page", f"posting_row={rows}")
 
             with log.step("find_post_row"):
-                row = _find_row(page, post_id)
+                row = _find_row(page, post_id, url)
                 if row is None:
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_hydrate", label="post_row_missing",
@@ -297,10 +347,23 @@ def hydrate_post(
                     ))
                     result.update({
                         "error_type": "post_not_found",
-                        "error_message": "no postings row matched this post_id",
+                        "error_message": (
+                            f"no postings row matched {post_id!r}. The account "
+                            f"page listed {_count(page, 'posting_row')} posting(s) "
+                            f"— if the ad is visibly there, the id we hold is not "
+                            f"the one Craigslist uses for it."
+                        ),
                         "live_status": "gone", "editable": False,
                     })
                     return result
+                real_id = _row_posting_id(row)
+                if real_id and real_id != post_id:
+                    log.note("post_id", f"craigslist calls this {real_id}")
+                    logger.warning(
+                        f"post {post_id} is {real_id} on the account page — "
+                        f"stored id came from the URL, not from data-postingid"
+                    )
+                result["craigslist_post_id"] = real_id
 
             with log.step("open_edit_form"):
                 edit = row.locator(SEL["row_edit_button"])
@@ -490,9 +553,11 @@ def reconcile_post(
         try:
             with log.step("open_account_page"):
                 _open_account_page(page, account.name)
+                rows = _count(page, "posting_row")
+                log.note("account_page", f"posting_row={rows}")
 
             with log.step("find_post_row"):
-                row = _find_row(page, post_id)
+                row = _find_row(page, post_id, desired.get("url"))
                 if row is None:
                     return _result(
                         "failed_gone", failed_step="find_post_row",
