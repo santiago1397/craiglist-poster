@@ -206,10 +206,18 @@ def post(
     _setup_logging(verbose=verbose)
     machine = _machine_name()
 
+    # Misconfiguration exits report to the server before quitting. A wrong
+    # CL_MACHINE used to stop posting forever with no server-side trace: every
+    # fire exited here silently, the dashboard showed the last successful post
+    # ageing, and nothing ever said why.
     bound = [a.name for a in ACCOUNTS if a.allowed_machine == machine]
     if account:
         if account not in ACCOUNTS_BY_NAME:
             typer.echo(f"Unknown account: {account}")
+            reporter_mod.report_flow_error(
+                "post", f"unknown account {account!r}", step="machine_binding",
+                context={"machine": machine, "known": list(ACCOUNTS_BY_NAME)},
+            )
             raise typer.Exit(1)
         if account not in bound:
             typer.echo(
@@ -217,10 +225,26 @@ def post(
                 f"'{ACCOUNTS_BY_NAME[account].allowed_machine}', but this machine is "
                 f"'{machine}'. Set CL_MACHINE or run on the correct machine."
             )
+            reporter_mod.report_flow_error(
+                "post",
+                f"account {account} is bound to "
+                f"{ACCOUNTS_BY_NAME[account].allowed_machine!r}, not this machine",
+                step="machine_binding", account=account,
+                context={"machine": machine},
+            )
             raise typer.Exit(2)
         bound = [account]
     if not bound:
         typer.echo(f"No accounts are bound to this machine ({machine}).")
+        reporter_mod.report_flow_error(
+            "post",
+            f"no accounts bound to machine {machine!r} — posting cannot run here",
+            step="machine_binding",
+            context={
+                "machine": machine,
+                "configured": {a.name: a.allowed_machine for a in ACCOUNTS},
+            },
+        )
         raise typer.Exit(1)
 
     # The server owns post history, so it must not authorise a post while we
@@ -268,28 +292,52 @@ def post(
                                        account=acct.name, context={"draft_id": draft_id})
         photos = []
 
-    ad = content_mod.ad_from_draft(draft, photos)
+    # Building the Ad used to be unguarded. A malformed draft raised here, the
+    # traceback went to a Task Scheduler window nobody sees, and the draft sat
+    # 'claimed' on the server forever — invisible to queue depth, so the account
+    # silently reported "queue empty" and stopped posting. 'build_ad' is a
+    # pre-upload step, so reporting it returns the draft to the queue.
+    try:
+        ad = content_mod.ad_from_draft(draft, photos)
+    except Exception as e:
+        logger.exception(f"could not build an ad from draft {draft_id}")
+        _emit_post_failure(
+            machine, acct.name, "failed_other", repr(e),
+            started=_time.monotonic(), ad_title=draft.get("title"),
+            draft_id=draft_id, failed_step="build_ad",
+        )
+        typer.echo(f"Draft {draft_id} is malformed — returned to the queue. Check logs.")
+        raise typer.Exit(3)
+
     logger.info(
         f"draft {draft_id} for {acct.name}: {ad.title!r}  ({len(photos)} image(s))"
     )
 
     started = _time.monotonic()
     try:
-        url = post_ad(acct, ad, headless=headless, dry_run=dry_run)
+        run = post_ad(acct, ad, headless=headless, dry_run=dry_run)
     except PosterFailure as e:
         _emit_post_failure(
             machine, acct.name, _outcome_for_step(e.step), str(e.original),
-            started, ad.title, draft_id=draft_id, failed_step=e.step,
+            started, ad.title, draft_id=draft_id, failed_step=e.step, run=e.run,
         )
         typer.echo(f"Post failed at step '{e.step}' — check logs.")
+        _flush_evidence()
         raise typer.Exit(3)
     except Exception as e:
-        logger.exception("post_ad raised")
+        # Everything from the first page load onward is inside post_ad's own
+        # try, so an exception reaching here was raised by launch_account or
+        # ctx.new_page(): a held browser lease, a locked Chrome profile, a
+        # missing patchright install. Nothing touched Craigslist, so the step is
+        # 'launch' — and reporting it as such returns the draft to the queue
+        # instead of parking it for a human (DESIGN.md decision 16).
+        logger.exception("post_ad raised before the browser reached Craigslist")
         _emit_post_failure(
             machine, acct.name, "failed_other", repr(e),
-            started, ad.title, draft_id=draft_id, failed_step=None,
+            started, ad.title, draft_id=draft_id, failed_step="launch",
         )
-        typer.echo("Post failed — check logs.")
+        typer.echo("Post failed at launch — check logs.")
+        _flush_evidence()
         raise typer.Exit(3)
 
     duration = _time.monotonic() - started
@@ -303,35 +351,68 @@ def post(
             duration_seconds=duration,
             ad_title=ad.title,
             draft_id=draft_id,
+            warnings=run.warnings,
+            photos_confirmed=run.photos_confirmed,
+            artifact_ids=run.artifact_ids,
         ))
         typer.echo("Dry run complete (draft left in the queue).")
+        _flush_evidence()
         return
 
-    if url:
-        record_post(acct, ad.title, url)
+    if run.url:
+        record_post(acct, ad.title, run.url)
         reporter_mod.emit(PostAttempt(
             ts=_dt.now(_tz.utc),
             machine=machine,
             account=acct.name,
             outcome="posted",
             duration_seconds=duration,
-            post_id=extract_post_id(url),
-            post_url=url,
+            post_id=extract_post_id(run.url),
+            post_url=run.url,
             ad_title=ad.title,
             draft_id=draft_id,
             photos_attached=[p.name for p in ad.photos],
             cover_photo=ad.photos[0].name if ad.photos else None,
+            # The post published, so the outcome stays 'posted' and history is
+            # unaffected. These are what stop a green badge hiding a broken ad.
+            warnings=run.warnings,
+            photos_confirmed=run.photos_confirmed,
+            artifact_ids=run.artifact_ids,
         ))
-        typer.echo(f"Posted: {url}")
+        typer.echo(f"Posted: {run.url}")
+        for w in run.warnings:
+            typer.echo(f"  [!] {w}")
     else:
         # post_ad returned without a URL and without raising — the form was
         # submitted but the confirmation page gave us nothing to record.
         _emit_post_failure(
             machine, acct.name, "failed_form", "post_ad returned no url",
             started, ad.title, draft_id=draft_id, failed_step="confirmation",
+            run=run,
         )
         typer.echo("Post failed — check logs.")
+        _flush_evidence()
         raise typer.Exit(3)
+
+    _flush_evidence()
+
+
+def _flush_evidence() -> None:
+    """Push screenshots and events up now rather than on the daemon's next beat.
+
+    `cl post` is a short-lived process fired by Task Scheduler. Without this,
+    evidence for a 9am failure waits on the reporter daemon — and if the daemon
+    is not running, which is exactly the situation worth debugging, it waits
+    forever. Never raises: this runs on the way out of a failure path.
+    """
+    try:
+        artifacts_mod.flush_once(limit=10)
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning(f"artifact flush failed: {e}")
+    try:
+        reporter_mod.flush_once()
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning(f"event flush failed: {e}")
 
 
 def _peek_draft(accounts: list[str]) -> dict | None:
@@ -356,12 +437,21 @@ def _emit_post_failure(
     account_name: str,
     error_type: str,
     error_message: str,
-    started_monotonic: float,
+    started: float,
     ad_title: str | None,
     *,
     draft_id: int | None = None,
     failed_step: str | None = None,
+    run=None,
 ) -> None:
+    """Report a failed post.
+
+    `failed_step` is load-bearing, not decoration: the server routes the draft
+    on it (DESIGN.md decision 16). A pre-upload step returns the draft to the
+    queue; anything else parks it for a human because images were burned. Never
+    pass None — an unknown step is treated as post-upload, so a launch failure
+    that consumed nothing would still cost you a manual rescue.
+    """
     import time as _time
     from datetime import datetime as _dt, timezone as _tz
     reporter_mod.emit(PostAttempt(
@@ -369,12 +459,15 @@ def _emit_post_failure(
         machine=machine,
         account=account_name,
         outcome=error_type,  # type: ignore[arg-type]
-        duration_seconds=_time.monotonic() - started_monotonic,
+        duration_seconds=_time.monotonic() - started,
         ad_title=ad_title,
         draft_id=draft_id,
         error_type=error_type,
         error_message=error_message[:500],
         failed_step=failed_step,
+        warnings=list(getattr(run, "warnings", []) or []),
+        photos_confirmed=getattr(run, "photos_confirmed", None),
+        artifact_ids=list(getattr(run, "artifact_ids", []) or []),
     ))
 
 

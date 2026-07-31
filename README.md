@@ -202,6 +202,30 @@ Get-ScheduledTaskInfo -TaskName "CL Auto Post"   # last run time, result
 
 ---
 
+## When something breaks
+
+Open **Diagnostics** in the dashboard. It merges everything that can go wrong —
+failed posting runs, background job failures, drafts stuck in a claim, and
+machines that have stopped reporting — each with a plain-English explanation and
+the screenshot of the page Craigslist actually served.
+
+See [DIAGNOSTICS.md](DIAGNOSTICS.md) for how to read it. The short version:
+
+- **Every failure reports itself**, over a durable outbox that survives outages.
+  If it isn't in Diagnostics, the desktop never got that far.
+- **A posting failure names the step it died on.** Before `photo_upload` nothing
+  was consumed and the draft returns to the queue automatically. At or after it,
+  images were burned and the draft parks in Review for you.
+- **A post can publish and still be wrong** — missing photos, a guessed county,
+  an unresolvable URL. Those stay `posted` so the cooldown maths is right, and
+  are flagged critical so a green badge never hides a broken ad.
+- **A machine that goes silent is itself a critical problem.** Nothing else
+  catches it, because every other signal needs the desktop to report it.
+
+From the desktop, `uv run cl status` answers the same question locally.
+
+---
+
 ## Verifying posts
 
 After the scheduler has run, use these to confirm posts went out and aren't ghosted.

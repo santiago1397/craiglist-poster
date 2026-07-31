@@ -73,6 +73,25 @@ class PostAttempt(_EventBase):
     # anything at or after "photo_upload" has already pushed images to CL.
     failed_step: str | None = None
 
+    # Non-fatal degradations seen during an otherwise successful run: a photo
+    # that never rendered a thumbnail, a county we had to guess, a post URL we
+    # could not resolve to a durable /d/ link.
+    #
+    # These deliberately do NOT change `outcome`. The ad published, so it must
+    # still count against the cooldowns — flipping the outcome would corrupt
+    # the history the server's eligibility maths depends on. They exist so a
+    # green "posted" badge can never hide a half-broken ad.
+    warnings: list[str] = Field(default_factory=list)
+    # Thumbnails Craigslist actually rendered. `photos_attached` is only what we
+    # intended to upload; a gap between the two is the signal that images were
+    # silently dropped.
+    photos_confirmed: int | None = None
+
+    # Screenshots / HTML dumps spooled for upload (DESIGN.md decision 17).
+    # Mirrors PostEditAttempt: an error string without the page behind it is not
+    # debuggable, and posting is the flow that runs unattended three times a day.
+    artifact_ids: list[str] = Field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # 2. snapshot_taken — mirrors one row of the local stats.sqlite `snapshots`

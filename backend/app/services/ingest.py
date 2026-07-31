@@ -118,24 +118,70 @@ def _insert_post_attempt(conn: psycopg.Connection, ev: PostAttempt) -> bool:
         INSERT INTO post_attempts (
             event_id, ts, machine, account, outcome, duration_seconds,
             post_id, post_url, ad_title, photos_attached, cover_photo,
-            error_type, error_message, draft_id, failed_step
+            error_type, error_message, draft_id, failed_step,
+            warnings, photos_confirmed, artifact_ids
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s,
+                %s::jsonb, %s, %s::jsonb)
         ON CONFLICT (event_id) DO NOTHING
         """,
         (
             ev.event_id, ev.ts, ev.machine, ev.account, ev.outcome, ev.duration_seconds,
             ev.post_id, ev.post_url, ev.ad_title, json.dumps(ev.photos_attached), ev.cover_photo,
             ev.error_type, ev.error_message, ev.draft_id, ev.failed_step,
+            json.dumps(ev.warnings), ev.photos_confirmed, json.dumps(ev.artifact_ids),
         ),
     )
     inserted = _did_insert(cur)
+
+    # A published-but-degraded post keeps outcome='posted' so the cooldown maths
+    # still counts it, which means nothing in the posting tables would ever draw
+    # attention to it. Mirror it into flow_errors so it lands in the same tray as
+    # every other problem instead of needing its own place to be looked for.
+    if inserted and ev.warnings:
+        _record_degradation(conn, ev)
 
     # Advance the draft's state machine — but only on first receipt. A replayed
     # event must not park a draft that has since been posted or re-queued.
     if inserted and ev.draft_id is not None:
         _route_draft(conn, ev)
     return inserted
+
+
+def _record_degradation(conn: psycopg.Connection, ev: PostAttempt) -> None:
+    """File a degraded post as a flow_error so one tray shows everything wrong.
+
+    Keyed off the attempt's event_id with a suffix, so it inherits the same
+    idempotency: a replayed batch cannot file the same degradation twice.
+    """
+    conn.execute(
+        """
+        INSERT INTO flow_errors (
+            event_id, ts, machine, flow, step, account,
+            error_type, error_message, context
+        )
+        VALUES (%s, %s, %s, 'post', %s, %s, 'degraded_post', %s, %s::jsonb)
+        ON CONFLICT (event_id) DO NOTHING
+        """,
+        (
+            f"{ev.event_id}:degraded",
+            ev.ts,
+            ev.machine,
+            ev.failed_step,
+            ev.account,
+            f"Published with {len(ev.warnings)} degradation(s): " + "; ".join(ev.warnings),
+            json.dumps({
+                "post_id": ev.post_id,
+                "post_url": ev.post_url,
+                "draft_id": ev.draft_id,
+                "outcome": ev.outcome,
+                "warnings": ev.warnings,
+                "photos_attached": len(ev.photos_attached),
+                "photos_confirmed": ev.photos_confirmed,
+                "artifact_ids": ev.artifact_ids,
+            }),
+        ),
+    )
 
 
 def _route_draft(conn: psycopg.Connection, ev: PostAttempt) -> None:

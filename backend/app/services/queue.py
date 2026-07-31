@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import psycopg
+from loguru import logger
 
 from ..config import get_settings
 
@@ -225,6 +226,75 @@ def expire_stale(conn: psycopg.Connection) -> int:
     return cur.rowcount or 0
 
 
+# The Windows Scheduled Task runs `cl post` with a 30-minute execution limit
+# (scripts/install-schedule.ps1), so a claim older than this cannot still be
+# in flight — the process that held it is gone.
+STALE_CLAIM_MINUTES = 45
+
+
+def release_stale_claims(
+    conn: psycopg.Connection, older_than_minutes: int = STALE_CLAIM_MINUTES
+) -> int:
+    """Rescue drafts a machine claimed and never reported on.
+
+    A claim is a promise to report an outcome. When the desktop dies between
+    the two — Task Scheduler hitting its execution limit mid-upload, a reboot,
+    a crash before the event is emitted — nothing ever moved the draft on. It
+    sat 'claimed' forever, invisible to `queue_depths` (which counts only
+    'queued'), so the account reported "queue empty: no drafts" and silently
+    stopped posting. The queue looked healthy because top-up kept refilling
+    around the corpse.
+
+    **These are parked, not requeued, and that is deliberate.** We do not know
+    what the dead run did. If it published and its `post_attempt` is still
+    sitting in the desktop's outbox, requeueing would post the same ad twice —
+    and the outbox is durable, so that event *will* arrive eventually. Parking
+    costs one click on Review; a duplicate live ad costs an account.
+
+    This is self-healing in the good case: `_route_draft` runs on first receipt
+    of the event whatever the draft's current status, so a late-arriving
+    `posted` flips the parked draft straight to 'posted' with no human involved.
+
+    Mirrors `edits.release_stale_claims`. Returns how many were rescued.
+    """
+    cur = conn.execute(
+        """
+        UPDATE drafts
+        SET status = 'needs_attention',
+            claimed_at = NULL,
+            failed_step = 'stale_claim',
+            failed_message = 'Machine ' || COALESCE(claimed_by_machine, '?')
+                || ' claimed this draft at ' || to_char(claimed_at, 'YYYY-MM-DD HH24:MI')
+                || ' UTC and never reported an outcome. It may or may not have '
+                || 'published — check the account on Craigslist before requeueing.',
+            updated_at = NOW()
+        WHERE status = 'claimed'
+          AND claimed_at IS NOT NULL
+          AND claimed_at < NOW() - make_interval(mins => %s)
+        """,
+        (older_than_minutes,),
+    )
+    return cur.rowcount or 0
+
+
+def stuck_claims(conn: psycopg.Connection) -> list[dict]:
+    """Drafts currently held by a claim, newest first.
+
+    A short list here is normal — it is a post in progress. A list that does not
+    drain is the reaper's queue.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, account, title, claimed_at, claimed_by_machine, attempts,
+               EXTRACT(EPOCH FROM (NOW() - claimed_at)) / 60 AS held_minutes
+        FROM drafts
+        WHERE status = 'claimed'
+        ORDER BY claimed_at
+        """
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def claim_next(
     conn: psycopg.Connection,
     *,
@@ -243,6 +313,16 @@ def claim_next(
     """
     now = now or datetime.now(timezone.utc)
     expire_stale(conn)
+    # Rescue anything a dead machine left mid-flight before deciding what to
+    # hand out. Runs here rather than on a timer because the posting slot is
+    # exactly when a stranded draft costs you something, and it is the one
+    # moment we know a machine is alive to ask.
+    rescued = release_stale_claims(conn)
+    if rescued:
+        logger.warning(
+            f"released {rescued} stale draft claim(s) into needs_attention — "
+            f"a machine claimed them and never reported an outcome"
+        )
 
     report = evaluate_eligibility(conn, candidate_accounts, now=now)
     eligible = [n for n, info in report["accounts"].items() if info["eligible"]]
@@ -423,6 +503,11 @@ def _next_fire(cursor: datetime, g: dict, tz) -> datetime:
 # these consumed nothing, so the draft can safely go back to the queue
 # (decision 16). Anything later burned assets and needs a human.
 PRE_UPLOAD_STEPS = frozenset({
+    # 'build_ad' happens on the desktop before the browser opens at all; 'launch'
+    # covers the browser lease and Chrome startup. Both are reported explicitly
+    # so a failure that touched nothing returns to the queue instead of costing
+    # a manual rescue — the desktop must never send None here.
+    "build_ad",
     "launch", "warmup", "login_check", "open_post_form", "dismiss_reuse_prompt",
     "advance_to_type", "type_service_offered", "category_skilled_trade",
     "advance_to_form", "form_title", "form_zip", "form_city", "form_license",

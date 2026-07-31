@@ -10,7 +10,13 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AlertTriangle, CheckCircle2, CircleSlash, PauseCircle } from "lucide-react";
+import {
+  AlertOctagon,
+  AlertTriangle,
+  CheckCircle2,
+  CircleSlash,
+  PauseCircle,
+} from "lucide-react";
 import { api } from "../lib/api";
 import { cn } from "../lib/cn";
 
@@ -18,8 +24,10 @@ type PostingState = { enabled: boolean; paused_reason: string | null };
 type Health = {
   needs_attention: number;
   unreviewed: number;
+  stuck_claims: number;
   accounts: Record<string, { queue_depth: number }>;
 };
+type DiagSummary = { counts: { critical: number; warning: number }; total: number };
 
 const POLL = 60_000;
 
@@ -44,25 +52,48 @@ export function StatusPill({ className }: { className?: string }) {
     refetchInterval: POLL,
   });
 
+  const diag = useQuery({
+    queryKey: ["diagnostics", "summary"],
+    queryFn: () => api.get<DiagSummary>("/diagnostics/summary"),
+    refetchInterval: POLL,
+  });
+
   // Nothing to say yet — render nothing rather than a flickering placeholder.
   if (posting.isLoading && !posting.data) return null;
 
   const paused = posting.data && !posting.data.enabled;
   const attention = health.data?.needs_attention ?? 0;
+  const critical = diag.data?.counts.critical ?? 0;
   const dryQueues = Object.entries(health.data?.accounts ?? {}).filter(
     ([, a]) => a.queue_depth === 0,
   ).length;
 
-  // Ordered by how much it costs you: a paused system posts nothing, a parked
-  // draft burned images, an empty queue silently posts nothing at the next slot.
-  const state = paused
-    ? { tone: "warn" as const, Icon: PauseCircle, label: "Paused", full: "Posting paused" }
-    : attention > 0
+  // Ordered by how much it costs you. A critical problem outranks everything
+  // because it is the only state that can mean "a live ad is wrong right now"
+  // or "the machine stopped reporting and no other signal will ever fire".
+  const state = critical > 0
+    ? {
+        tone: "danger" as const,
+        Icon: AlertOctagon,
+        label: `${critical} critical`,
+        full: `${critical} critical problem${critical === 1 ? "" : "s"}`,
+        to: "/diagnostics",
+      }
+    : paused
+    ? {
+        tone: "warn" as const,
+        Icon: PauseCircle,
+        label: "Paused",
+        full: "Posting paused",
+        to: "/review",
+      }
+      : attention > 0
       ? {
           tone: "warn" as const,
           Icon: AlertTriangle,
           label: `${attention} stuck`,
           full: `${attention} draft${attention === 1 ? "" : "s"} need attention`,
+          to: "/review",
         }
       : dryQueues > 0
         ? {
@@ -70,14 +101,21 @@ export function StatusPill({ className }: { className?: string }) {
             Icon: CircleSlash,
             label: "Queue empty",
             full: `${dryQueues} account${dryQueues === 1 ? "" : "s"} have no queued drafts`,
+            to: "/review",
           }
-        : { tone: "ok" as const, Icon: CheckCircle2, label: "Active", full: "Posting is active" };
+        : {
+            tone: "ok" as const,
+            Icon: CheckCircle2,
+            label: "Active",
+            full: "Posting is active",
+            to: "/review",
+          };
 
   const { Icon } = state;
 
   return (
     <Link
-      to="/review"
+      to={state.to}
       title={state.full}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium",

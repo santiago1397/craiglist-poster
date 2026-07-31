@@ -9,6 +9,7 @@ import ReviewPage from "./pages/ReviewPage";
 import EditsPage from "./pages/EditsPage";
 import ImagesPage from "./pages/ImagesPage";
 import PromptsPage from "./pages/PromptsPage";
+import DiagnosticsPage from "./pages/DiagnosticsPage";
 import SettingsPage from "./pages/SettingsPage";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -78,6 +79,14 @@ export default function App() {
             element={
               <Protected>
                 <PostDetailPage />
+              </Protected>
+            }
+          />
+          <Route
+            path="/diagnostics"
+            element={
+              <Protected>
+                <DiagnosticsPage />
               </Protected>
             }
           />
