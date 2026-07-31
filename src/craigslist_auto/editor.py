@@ -2,12 +2,24 @@
 
 DESIGN_EDITS.md decisions 23, 26, 32, 33, 36.
 
-    !!  THE EDIT FORM'S SELECTORS ARE STILL UNVERIFIED.  !!
+    Every selector in `SEL` is now OBSERVED against the real pages, captured by
+    hydration runs against a live posting on 2026-07-31. Each block cites the
+    artifact it came from.
 
-    The account-page selectors are now observed — see the OBSERVED block in
-    `SEL`, taken from a real page capture. Everything from the edit form itself
-    onward is still inferred from `poster.py`'s posting form, because no run has
-    got that far yet.
+    Editing is a hub, not a form. `/k/<token>` is a preview carrying a control
+    bar; the three sub-pages hang off it as plain GETs:
+
+        ?s=edit        the copy       (form#postingForm)
+        ?s=geoverify   the location   (not driven yet)
+        ?s=editimage   the gallery    (figure.imgbox, AJAX delete + upload)
+
+    Nothing reaches the live posting until the hub's publish. Every change
+    before that is a draft Craigslist will throw away on "cancel edit", which is
+    what makes reading safe and what bounds the damage from a failed reconcile.
+
+    What is still unproven is the *write*: no run has yet submitted the copy
+    page, replaced a gallery, or pressed publish. Until one has, treat the
+    reconcile path as observed-but-unexercised.
 
     `edits_enabled` is TRUE on the server as of migration 0015, so this module
     CAN reach a live posting. What keeps that safe is that failure is loud: the
@@ -124,14 +136,32 @@ SEL = {
     # Everything here takes `.first`, so that selector was one DOM reordering
     # away from discarding the operator's edit instead of saving it.
     "save_button": "form#postingForm button[name='go'][value='continue']",
-    # Image editor.
-    "image_thumb": ".swatch, .thumb, li.thumb",
-    "image_remove": "a:has-text('remove'), button:has-text('remove')",
+    # --- OBSERVED: the image sub-page, ?s=editimage (artifact 8d5419f4).
+    # --- Title "south florida | choose images". One figure per image:
+    # ---
+    # ---   <div class="images ui-sortable">
+    # ---     <figure class="imgbox" id="imgID_3:...">
+    # ---       <form class="delete ajax" action="/k/<token>" method="post">
+    # ---         <button class="imgbox-delete-image" name="go">X</button>
+    # ---       </form>
+    # ---       <button class="imgbox-rotate-image">…</button>
+    # ---       <div class="imgwrap ui-sortable-handle"><img src="..."></div>
+    # ---     </figure>
+    # ---   </div>
+    # ---
+    # --- Deleting is AJAX — the figure leaves the DOM without a page load — so
+    # --- the replace loop waits on the count rather than on a fixed sleep.
+    # --- `ui-sortable` also answers DESIGN_EDITS spike question 2: images can be
+    # --- reordered by drag. Full replace does not need it, but it is not a
+    # --- constraint we are working around.
+    "image_thumb": "figure.imgbox",
+    "image_remove": "button.imgbox-delete-image",
+    # Hidden by design (opacity 0, absolutely positioned) with a generated id,
+    # so it is matched on type and driven with set_input_files rather than by
+    # clicking "Add Images" — which is itself disabled while the 24 slots are
+    # full, and only becomes usable once the deletes have run.
     "file_input": "input[type='file']",
-    "images_done": (
-        "button:has-text('done with images'), a:has-text('done with images'), "
-        "input[type='submit'][value*='done' i]"
-    ),
+    "images_done": "button.done",
     # Confirmation that the edit landed.
     "publish_button": (
         "button[name='go'], button:has-text('publish'), "
@@ -607,6 +637,26 @@ def _fill(page: Page, key: str, value: str) -> None:
     sleep_jitter(0.4, 0.2)
 
 
+# Craigslist accepts 24 images, and the replace loop deletes then re-uploads,
+# so the ceiling on either half is that plus slack for a retry.
+MAX_IMAGE_OPS = 30
+
+# How long to wait for the gallery to catch up with a delete or an upload. Both
+# are asynchronous; uploads are the slow one, and a full 24-image set on a
+# domestic connection is minutes of real work.
+THUMB_TIMEOUT_S = 45
+
+
+def _wait_for_thumb_count(page: Page, expected: int, timeout_s: float = None) -> bool:
+    """Wait until the gallery shows exactly `expected` thumbnails."""
+    deadline = time.monotonic() + (timeout_s or THUMB_TIMEOUT_S)
+    while time.monotonic() < deadline:
+        if page.locator(SEL["image_thumb"]).count() == expected:
+            return True
+        page.wait_for_timeout(400)
+    return False
+
+
 def _replace_images(
     page: Page, log: StepLog, photos: list[Path], account_name: str, post_id: str
 ) -> tuple[int, list[str]]:
@@ -621,11 +671,15 @@ def _replace_images(
     with log.step("images_remove"):
         removed = 0
         # Removing shrinks the list, so always act on the first remaining thumb.
-        for _ in range(20):
-            thumbs = page.locator(SEL["image_thumb"])
-            if thumbs.count() == 0:
+        # The delete form is `class="delete ajax"` — the figure leaves the DOM
+        # with no page load — so each pass waits for the count to actually drop
+        # instead of sleeping and hoping. A fixed sleep here either raced the
+        # request or made a 24-image replace needlessly slow.
+        for _ in range(MAX_IMAGE_OPS):
+            before = page.locator(SEL["image_thumb"]).count()
+            if before == 0:
                 break
-            remove = thumbs.first.locator(SEL["image_remove"])
+            remove = page.locator(SEL["image_thumb"]).first.locator(SEL["image_remove"])
             if remove.count() == 0:
                 artifact_ids.extend(artifacts.capture_page(
                     page, flow="edit_reconcile", label="no_remove_control",
@@ -639,19 +693,38 @@ def _replace_images(
                     mutated=removed > 0,
                 )
             remove.first.click()
+            if not _wait_for_thumb_count(page, before - 1):
+                raise EditFailure(
+                    "images_remove",
+                    f"deleted an image but the gallery still shows {before}"
+                    f" after {THUMB_TIMEOUT_S}s",
+                    mutated=True,
+                )
             removed += 1
-            sleep_jitter(0.6, 0.2)
+            sleep_jitter(0.4, 0.15)
         log.note("images_remove", f"removed {removed} live image(s)")
 
     try:
         with log.step("images_upload"):
             if photos:
-                page.wait_for_selector(SEL["file_input"], timeout=30_000)
+                page.wait_for_selector(SEL["file_input"], state="attached", timeout=30_000)
                 file_input = page.locator(SEL["file_input"])
                 for i, photo in enumerate(photos, 1):
                     file_input.first.set_input_files(str(photo))
+                    # The uploader is asynchronous: the thumbnail appears when
+                    # Craigslist has accepted the bytes, which on a 24-image
+                    # posting is the difference between a real wait and a
+                    # guess. Mirrors poster._wait_for_thumb_increment.
+                    if not _wait_for_thumb_count(page, i):
+                        raise EditFailure(
+                            "images_upload",
+                            f"uploaded {photo.name} ({i}/{len(photos)}) but only "
+                            f"{page.locator(SEL['image_thumb']).count()} thumbnail(s) "
+                            f"appeared within {THUMB_TIMEOUT_S}s",
+                            mutated=True,
+                        )
                     logger.info(f"  [{i}/{len(photos)}] uploaded {photo.name}")
-                    sleep_jitter(1.0, 0.4)
+                    sleep_jitter(0.6, 0.25)
                 final = page.locator(SEL["image_thumb"]).count()
                 if final != len(photos):
                     raise EditFailure(
@@ -1051,11 +1124,11 @@ def _attempt_image_recovery(page: Page, photos: list[Path]) -> bool:
     if not photos:
         return True
     try:
-        page.wait_for_selector(SEL["file_input"], timeout=15_000)
+        page.wait_for_selector(SEL["file_input"], state="attached", timeout=15_000)
         file_input = page.locator(SEL["file_input"])
-        for photo in photos:
+        for i, photo in enumerate(photos, 1):
             file_input.first.set_input_files(str(photo))
-            sleep_jitter(1.0, 0.4)
+            _wait_for_thumb_count(page, i)
         ok = page.locator(SEL["image_thumb"]).count() == len(photos)
         logger.info(f"image recovery {'succeeded' if ok else 'did not restore full set'}")
         return ok
