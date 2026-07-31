@@ -146,7 +146,80 @@ export default function PostsPage() {
         </select>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border border-border">
+      {/* Below md the nine-column table becomes cards. It was in an
+          overflow-x-auto box, so it did not scroll the page — but swiping a
+          nine-column table sideways on a 390px screen is not usable either.
+          Sorting moves to a select, since there are no column headers to tap. */}
+      <div className="md:hidden flex items-center gap-2">
+        <label className="text-xs text-fg-muted" htmlFor="mobile-sort">
+          Sort by
+        </label>
+        <select
+          id="mobile-sort"
+          value={`${sort}:${sortDir}`}
+          onChange={(e) => {
+            const [k, dir] = e.target.value.split(":");
+            setSort(k);
+            setSortDir(dir as "asc" | "desc");
+            setPage(0);
+          }}
+          className="flex-1 rounded bg-surface border border-border px-2 py-1.5 text-sm"
+        >
+          <option value="posted_ts:desc">Newest first</option>
+          <option value="posted_ts:asc">Oldest first</option>
+          <option value="impressions:desc">Most impressions</option>
+          <option value="views:desc">Most views</option>
+          <option value="impressions_per_day:desc">Best impressions/day</option>
+          <option value="views_per_day:desc">Best views/day</option>
+        </select>
+      </div>
+
+      <ul className="md:hidden space-y-2">
+        {items.map((r) => (
+          <li key={r.post_id} className="rounded-lg border border-border bg-surface/40 p-3">
+            <div className="flex items-start justify-between gap-2">
+              <Link to={`/posts/${r.post_id}`} className="min-w-0 flex-1">
+                <p className="font-medium line-clamp-2">
+                  {r.title || <span className="text-fg-subtle">(no title)</span>}
+                </p>
+                <p className="text-xs text-fg-subtle mt-0.5">
+                  {r.account} · {formatDate(r.posted_ts)} · {r.post_id}
+                </p>
+              </Link>
+              <StatusChip status={r.status} ghosted={r.ghosted} />
+            </div>
+            <dl className="mt-2 grid grid-cols-4 gap-2 text-center">
+              {[
+                ["Impr", formatNumber(r.impressions)],
+                ["Views", formatNumber(r.views)],
+                ["Impr/d", formatRate(r.impressions_per_day)],
+                ["Views/d", formatRate(r.views_per_day)],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded bg-surface-2/60 py-1">
+                  <dt className="text-[11px] text-fg-subtle">{label}</dt>
+                  <dd className="text-sm tabular-nums">{value}</dd>
+                </div>
+              ))}
+            </dl>
+            {r.url && (
+              <a
+                href={r.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-flex items-center gap-1 text-xs text-info-fg hover:underline"
+              >
+                <ExternalLink size={12} aria-hidden="true" />
+                Open on Craigslist
+              </a>
+            )}
+          </li>
+        ))}
+        {items.length === 0 && !q.isLoading && (
+          <li className="text-center text-fg-subtle text-sm py-6">No posts match.</li>
+        )}
+      </ul>
+
+      <div className="hidden md:block overflow-x-auto rounded-lg border border-border">
         <table className="w-full text-sm">
           <thead className="bg-surface text-fg-muted">
             <tr>
