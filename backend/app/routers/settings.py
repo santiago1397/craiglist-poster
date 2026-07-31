@@ -121,6 +121,12 @@ class GenerationUpdate(BaseModel):
     photos_min: int | None = Field(default=None, ge=0, le=24)
     photos_max: int | None = Field(default=None, ge=0, le=24)
     imageless_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Background photo-stack refill. Ships off; turn it on once the image
+    # prompts are settled, since this is what spends money on them unattended.
+    image_topup_enabled: bool | None = None
+    image_stack_floor: int | None = Field(default=None, ge=0, le=100_000)
+    image_stack_target: int | None = Field(default=None, ge=0, le=100_000)
+    image_topup_batch: int | None = Field(default=None, ge=1, le=100)
 
 
 @router.get("/generation")
@@ -154,6 +160,14 @@ def put_generation(body: GenerationUpdate) -> dict:
                 detail=(
                     f"photos_min ({merged['photos_min']}) cannot exceed "
                     f"photos_max ({merged['photos_max']})"
+                ),
+            )
+        if merged["image_stack_floor"] > merged["image_stack_target"]:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"image_stack_floor ({merged['image_stack_floor']}) cannot "
+                    f"exceed image_stack_target ({merged['image_stack_target']})"
                 ),
             )
         return generator.update_generation_settings(c, patch)

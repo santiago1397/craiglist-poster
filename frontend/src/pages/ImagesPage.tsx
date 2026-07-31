@@ -1,14 +1,21 @@
-// The image stack.
+// The image stacks.
 //
-// Two shelves: PENDING holds freshly generated images nobody has looked at yet,
-// APPROVED is the pool drafts actually draw from. Nothing reaches Craigslist
-// without passing through your eyes.
+// Two of them, not one. Covers are hand-picked and become the Craigslist
+// thumbnail; photos are bulk and fill slots 2-24. They were always separate
+// ideas but shared a grid, so a cover with a phone number composited across it
+// could be drawn as an ordinary photo and nobody would see it happen.
+//
+// Within a stack, five buckets that cannot overlap: an image is pending review,
+// available, reserved by a queued draft, already published, or rejected.
 
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api";
 import { cn } from "../lib/cn";
 import { ConfirmDialog } from "../components/Modal";
+
+type Kind = "cover" | "photo";
+type Bucket = "pending" | "available" | "assigned" | "published" | "rejected";
 
 type Image = {
   id: number;
@@ -17,7 +24,9 @@ type Image = {
   bytes_size: number;
   source: string;
   status: string;
-  kind: string;
+  kind: Kind;
+  bucket: Bucket;
+  assigned_draft_id: number | null;
   owner_account: string | null;
   prompt: string | null;
   cost_usd: string | null;
@@ -25,18 +34,49 @@ type Image = {
   created_at: string;
 };
 
+type StackHealth = {
+  queued_drafts: number;
+  photos_per_draft: number;
+  photo_demand: number;
+  photos_available: number;
+  photos_short: number;
+  covers_available: number;
+};
+
 type Stats = {
   by_status: { status: string; kind: string; n: number }[];
   spend_usd: number;
   available: Record<string, number>;
+  buckets: Record<Kind, Record<Bucket, number>>;
+  stack_health: StackHealth;
   storage: { files: number; bytes: number };
 };
 
-const TABS = [
+const BUCKETS: { key: Bucket; label: string }[] = [
   { key: "pending", label: "Pending review" },
-  { key: "approved", label: "Stack" },
+  { key: "available", label: "Available" },
+  { key: "assigned", label: "Assigned" },
+  { key: "published", label: "Published" },
   { key: "rejected", label: "Rejected" },
-] as const;
+];
+
+const EMPTY_COPY: Record<Bucket, { cover: string; photo: string }> = {
+  pending: {
+    cover: "No covers waiting for review.",
+    photo: "No photos waiting for review.",
+  },
+  available: {
+    cover:
+      "No covers free. Any draft without a hand-picked cover will publish with a roof photo as its thumbnail.",
+    photo: "No photos free — drafts will autofill short.",
+  },
+  assigned: {
+    cover: "No cover is reserved by a queued draft.",
+    photo: "No photos are reserved by queued drafts.",
+  },
+  published: { cover: "No cover has gone out yet.", photo: "No photo has gone out yet." },
+  rejected: { cover: "Nothing rejected.", photo: "Nothing rejected." },
+};
 
 const BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -48,17 +88,15 @@ function mb(bytes: number): string {
 
 export default function ImagesPage() {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<(typeof TABS)[number]["key"]>("pending");
+  const [kind, setKind] = useState<Kind>("cover");
+  const [bucket, setBucket] = useState<Bucket>("available");
   const [count, setCount] = useState(4);
-  // Cover vs photo matters: covers get text composited on and are drawn from a
-  // separate prompt, so the distinction has to be made at upload and generate.
-  const [kind, setKind] = useState<"photo" | "cover">("photo");
   const [note, setNote] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const imagesQ = useQuery({
-    queryKey: ["images", tab],
-    queryFn: () => api.get<{ images: Image[] }>("/images", { status: tab, limit: 120 }),
+    queryKey: ["images", kind, bucket],
+    queryFn: () => api.get<{ images: Image[] }>("/images", { kind, bucket, limit: 120 }),
   });
   const statsQ = useQuery({
     queryKey: ["images", "stats"],
@@ -67,15 +105,17 @@ export default function ImagesPage() {
 
   const images = imagesQ.data?.images ?? [];
   const stats = statsQ.data ?? null;
+  const health = stats?.stack_health ?? null;
+  const counts = stats?.buckets?.[kind] ?? null;
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["images"] });
 
   // Per-image pending state. A single page-wide `busy` flag used to grey out
   // every button in the grid whenever one image was approved, with nothing to
   // say which one you had acted on.
-  const setStatus = useMutation({
-    mutationFn: ({ id, status }: { id: number; status: string }) =>
-      api.patch(`/images/${id}`, { status }),
+  const patch = useMutation({
+    mutationFn: ({ id, ...body }: { id: number; status?: string; kind?: Kind }) =>
+      api.patch(`/images/${id}`, body),
     onSuccess: refresh,
   });
   const remove = useMutation({
@@ -83,20 +123,22 @@ export default function ImagesPage() {
     onSuccess: refresh,
   });
 
+  // Generate and upload inherit the selected stack, so there is no way to
+  // generate a cover while looking at photos and wonder where it went.
   const generate = useMutation({
     mutationFn: () =>
-      api.post<{ created: number; cost_usd: number; error: string | null }>("/images/generate", {
-        count,
-        kind,
-      }),
+      api.post<{ created: number; cost_usd: number; error: string | null }>(
+        "/images/generate",
+        { count, kind },
+      ),
     onSuccess: (r) => {
       // Generation reports provider trouble in the body rather than failing, so
       // surface both outcomes: what arrived, and what went wrong.
       setNote(
-        `Generated ${r.created} image${r.created === 1 ? "" : "s"} · $${r.cost_usd.toFixed(4)}` +
+        `Generated ${r.created} ${kind}${r.created === 1 ? "" : "s"} · $${r.cost_usd.toFixed(4)}` +
           (r.error ? ` · stopped early: ${r.error}` : ""),
       );
-      setTab("pending");
+      setBucket("pending");
       void refresh();
     },
   });
@@ -108,8 +150,6 @@ export default function ImagesPage() {
       for (const f of files) {
         const form = new FormData();
         form.append("file", f);
-        // kind was never being sent, so every upload became a photo and a cover
-        // could not be uploaded at all.
         const res = await fetch(
           `${BASE.replace(/\/+$/, "")}/images/upload?kind=${encodeURIComponent(kind)}`,
           { method: "POST", credentials: "include", body: form },
@@ -124,11 +164,11 @@ export default function ImagesPage() {
     },
     onSuccess: ({ added, skipped }) => {
       setNote(
-        `Uploaded ${added} file${added === 1 ? "" : "s"}` +
+        `Uploaded ${added} file${added === 1 ? "" : "s"} to the ${kind} stack` +
           (skipped.length ? ` · skipped ${skipped.join(", ")}` : ""),
       );
       if (fileRef.current) fileRef.current.value = "";
-      setTab("approved");
+      setBucket("available");
       void refresh();
     },
   });
@@ -137,12 +177,12 @@ export default function ImagesPage() {
 
   /** Only the image being acted on is disabled, not the whole grid. */
   const pendingFor = (id: number) =>
-    (setStatus.isPending && setStatus.variables?.id === id) ||
+    (patch.isPending && patch.variables?.id === id) ||
     (remove.isPending && remove.variables === id);
 
   const busy = generate.isPending || upload.isPending;
   const error =
-    (imagesQ.error ?? statsQ.error ?? setStatus.error ?? remove.error ?? generate.error ??
+    (imagesQ.error ?? statsQ.error ?? patch.error ?? remove.error ?? generate.error ??
       upload.error) || null;
   const errorText = error
     ? error instanceof ApiError
@@ -150,14 +190,28 @@ export default function ImagesPage() {
       : String(error)
     : null;
 
-  const pendingCount = stats?.by_status
-    .filter((r) => r.status === "pending")
-    .reduce((a, r) => a + r.n, 0) ?? 0;
+  const other: Kind = kind === "cover" ? "photo" : "cover";
 
   return (
     <div className="p-4 space-y-4">
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <h1 className="text-lg font-semibold">Images</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-lg font-semibold">Images</h1>
+          <div className="flex rounded border border-border-strong overflow-hidden">
+            {(["cover", "photo"] as Kind[]).map((k) => (
+              <button
+                key={k}
+                onClick={() => setKind(k)}
+                className={cn(
+                  "px-3 py-1 text-sm capitalize",
+                  kind === k ? "bg-accent text-accent-fg" : "text-fg-muted hover:bg-surface-2",
+                )}
+              >
+                {k === "cover" ? "Covers" : "Photos"}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="flex items-center gap-2 flex-wrap">
           <input
             type="number"
@@ -173,21 +227,12 @@ export default function ImagesPage() {
             aria-label="How many images to generate (1-20)"
             className="w-16 bg-bg border border-border-strong rounded px-2 py-1 text-sm"
           />
-          <select
-            value={kind}
-            onChange={(e) => setKind(e.target.value as "photo" | "cover")}
-            className="bg-bg border border-border-strong rounded px-2 py-1 text-sm"
-            title="Covers get the phone number composited on and use their own prompt"
-          >
-            <option value="photo">photo</option>
-            <option value="cover">cover</option>
-          </select>
           <button
             disabled={busy}
             onClick={() => generate.mutate()}
             className="text-sm px-3 py-1 rounded bg-accent text-accent-fg hover:bg-accent-hover disabled:opacity-40"
           >
-            {generate.isPending ? "Generating…" : "Generate"}
+            {generate.isPending ? "Generating…" : `Generate ${kind}s`}
           </button>
           <input
             ref={fileRef}
@@ -230,6 +275,23 @@ export default function ImagesPage() {
         </div>
       )}
 
+      {/* Refill is manual, so being short is the normal state rather than an
+          alarm — it is stated continuously instead of raised once. */}
+      {health && health.photos_short > 0 && (
+        <div className="rounded border border-warn-border bg-warn px-3 py-2 text-sm text-warn-fg">
+          <strong>Photo stack short by {health.photos_short}.</strong>{" "}
+          {health.queued_drafts} queued draft{health.queued_drafts === 1 ? "" : "s"} want{" "}
+          {health.photo_demand} photos, {health.photos_available} available. Drafts fill with
+          what exists and publish thinner — nothing is blocked.
+        </div>
+      )}
+      {health && health.covers_available === 0 && (
+        <div className="rounded border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+          <strong>Cover stack is empty.</strong> Any draft you have not given a cover will
+          publish with an ordinary roof photo as its Craigslist thumbnail.
+        </div>
+      )}
+
       {stats && (
         <section className="rounded border border-border bg-surface/50 p-3 text-sm">
           <div className="flex gap-5 flex-wrap text-fg-muted">
@@ -239,27 +301,33 @@ export default function ImagesPage() {
             <span>
               Storage {stats.storage.files} files, {mb(stats.storage.bytes)}
             </span>
+            {health && (
+              <span>
+                {health.photos_per_draft} photos/post ×{" "}
+                {health.queued_drafts} queued
+              </span>
+            )}
             {Object.entries(stats.available).map(([acct, n]) => (
               <span key={acct}>
-                {acct} <strong className="text-fg">{n}</strong> available
+                {acct} <strong className="text-fg">{n}</strong> owned
               </span>
             ))}
           </div>
         </section>
       )}
 
-      <div className="flex gap-1">
-        {TABS.map((t) => (
+      <div className="flex gap-1 flex-wrap">
+        {BUCKETS.map((b) => (
           <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
+            key={b.key}
+            onClick={() => setBucket(b.key)}
             className={cn(
               "px-3 py-1.5 rounded text-sm",
-              tab === t.key ? "bg-surface-2 text-fg" : "text-fg-muted hover:bg-surface-2/60",
+              bucket === b.key ? "bg-surface-2 text-fg" : "text-fg-muted hover:bg-surface-2/60",
             )}
           >
-            {t.label}
-            {t.key === "pending" && pendingCount ? ` (${pendingCount})` : null}
+            {b.label}
+            {counts ? ` ${counts[b.key] ?? 0}` : null}
           </button>
         ))}
       </div>
@@ -279,11 +347,7 @@ export default function ImagesPage() {
         </ul>
       ) : images.length === 0 ? (
         <p className="text-fg-subtle text-sm py-10 text-center">
-          {tab === "pending"
-            ? "Nothing waiting for review. Generate some images to get started."
-            : tab === "approved"
-              ? "The stack is empty — drafts have no images to draw from."
-              : "Nothing rejected."}
+          {EMPTY_COPY[bucket][kind]}
         </p>
       ) : (
         <ul className="grid gap-3 grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
@@ -315,7 +379,14 @@ export default function ImagesPage() {
                       uploaded
                     </span>
                   )}
-                  {img.used_at && (
+                  {/* A live posting's desired set reserves images too, and it
+                      has no draft id — say "reserved" rather than "draft #null". */}
+                  {img.bucket === "assigned" && (
+                    <span className="px-1.5 py-0.5 rounded bg-warn text-warn-fg">
+                      {img.assigned_draft_id ? `draft #${img.assigned_draft_id}` : "reserved"}
+                    </span>
+                  )}
+                  {img.bucket === "published" && (
                     <span className="px-1.5 py-0.5 rounded bg-surface-2 text-fg-muted">
                       published
                     </span>
@@ -326,7 +397,7 @@ export default function ImagesPage() {
                   {img.status !== "approved" && (
                     <button
                       disabled={pendingFor(img.id)}
-                      onClick={() => setStatus.mutate({ id: img.id, status: "approved" })}
+                      onClick={() => patch.mutate({ id: img.id, status: "approved" })}
                       className="flex-1 text-xs px-2 py-1 rounded bg-ok-solid/90 text-on-solid hover:bg-ok-solid disabled:opacity-40"
                     >
                       Approve
@@ -335,7 +406,7 @@ export default function ImagesPage() {
                   {img.status === "pending" && (
                     <button
                       disabled={pendingFor(img.id)}
-                      onClick={() => setStatus.mutate({ id: img.id, status: "rejected" })}
+                      onClick={() => patch.mutate({ id: img.id, status: "rejected" })}
                       className="flex-1 text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
                     >
                       Reject
@@ -351,6 +422,22 @@ export default function ImagesPage() {
                     </button>
                   )}
                 </div>
+                {/* The escape hatch that makes the hard partition liveable: a
+                    generated shot that would make a good thumbnail is one click
+                    from being usable as one. Refused while a live draft holds
+                    it, since the slot it sits in is validated against its kind. */}
+                <button
+                  disabled={pendingFor(img.id) || img.bucket === "assigned"}
+                  onClick={() => patch.mutate({ id: img.id, kind: other })}
+                  title={
+                    img.bucket === "assigned"
+                      ? `Detach it from draft #${img.assigned_draft_id} first`
+                      : `Move to the ${other} stack`
+                  }
+                  className="w-full text-[11px] px-2 py-1 rounded text-fg-subtle hover:bg-surface-2 hover:text-fg disabled:opacity-30"
+                >
+                  Make this a {other}
+                </button>
               </div>
             </li>
           ))}

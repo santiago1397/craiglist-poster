@@ -276,48 +276,75 @@ the direct URL loads but the ad doesn't show up in search → it's ghosted.
 
 ---
 
-## Cover images
+## Images — the two stacks
 
-Each post's first image is what shows up as the Craigslist thumbnail — the
-highest-leverage visual on the ad. This project treats covers as a separate,
-one-shot pool of edited images kept isolated from the regular photo rotation.
+Images live on the **dashboard**, not on this machine. The desktop downloads
+whatever the server attached to the draft it claimed. The local
+`data/covers/` folders are from the retired model and are no longer read.
 
-### How the pool works
+There are two separate stacks, because they are two separate decisions:
 
-- Drop edited cover images (typically with a call-to-action overlay) into
-  `data/covers/unclaimed/`.
-- The first time an account posts and needs a cover, one is randomly picked
-  and physically **moved** to `data/covers/<account>/` (first-use claim — that
-  cover now belongs to that account forever).
-- On upload to Craigslist, the cover moves to `data/covers/<account>/used/`
-  and is never used again.
+| | Cover stack | Photo stack |
+|---|---|---|
+| Goes in | slot 1 — the Craigslist thumbnail | slots 2-24 |
+| Chosen | by hand, in Review | in bulk, by Autofill or generation |
+| Looks like | a photo with a CTA + phone composited on by Pillow | a plain roof shot |
+
+The split is enforced, not advisory: slot 1 refuses a photo and the photo slots
+refuse a cover. Use **Make this a cover / Make this a photo** on the Images page
+to move one across.
+
+### The five buckets
+
+Each stack shows the same five, and an image is in exactly one:
+
+| Bucket | Meaning |
+|---|---|
+| **Pending review** | freshly generated, unusable until approved |
+| **Available** | approved and free to be attached |
+| **Assigned** | reserved by a queued draft or a live posting's pending edit |
+| **Published** | Craigslist has seen it; blocked for a 30-day cooldown |
+| **Rejected** | you said no |
+
+**Assigned means reserved.** An image attached to a live draft is not offered to
+any other draft. You can still force it — the picker shows reserved images
+greyed with the draft holding them, and clicking asks you to confirm — but it
+can no longer happen by accident, which it used to do on every top-up run.
 
 ### Per-post logic
 
-- Each post gets **0 to 5 images** — count is uniformly random, unless the
-  Excel row's `photos_count` cell has a value (which is used as-is, clamped
-  to 0-5).
-- If the count is ≥ 1 and a cover is available, the cover fills slot 1 and
-  the rest come from `data/photos/<account>/` (30-day cooldown, unchanged).
-- If no cover is available for the account, `run.log` gets a WARN and all
-  slots come from the regular pool.
-- If the count is 0, no photos are uploaded.
+- Generation attaches **23 photos** and **no cover**, so every queued draft
+  visibly wants a thumbnail from you.
+- Roughly **1 in 10** drafts (`imageless_rate`) take no images at all, on
+  purpose, so accounts do not look mechanically identical. Those get no cover
+  either.
+- **Autofill 23 photos** on a draft in Review tops up empty photo slots. It
+  never replaces what you already chose and never touches slot 1.
+- If you never pick a cover, one is chosen **automatically at claim time** and
+  reported in Diagnostics. If the cover stack is empty, the first photo becomes
+  the thumbnail — which is why an empty cover stack is a critical problem.
 
-### Dry-run behavior
+### Keeping the stacks full
 
-`cl post --dry-run` **does** upload photos to CL (that's what dry-run tests)
-before bailing at the publish step — so **dry-run consumes covers**. If you
-dry-run often, keep the unclaimed pool deep.
+24-image posts need roughly **1,035 standing photos** and about **69 a day**.
+Generation is manual — press **Generate** on the Images page, or upload — and
+the Images page carries a running "photo stack short by N" line so the gap is
+never silent. Drafts fill with whatever exists and publish thinner; nothing
+blocks.
+
+A background refill loop exists and is **off by default**. Turn on
+`image_topup_enabled` under **Settings → Generation** once the image prompts are
+settled; it generates photos straight into Available (covers always stay manual)
+whenever depth drops below `image_stack_floor`. At $0.0035 an image, steady
+state is roughly $7/month.
 
 ## Where things live
 
 | Path | What |
 |---|---|
-| `data/ads.xlsx` | Your ad rows. |
-| `data/photos/<account>/` | Unique photos per account (regular pool, 30-day cooldown). |
-| `data/covers/unclaimed/` | Edited cover images awaiting first-use claim. |
-| `data/covers/<account>/` | Covers claimed to that account (not yet uploaded). |
-| `data/covers/<account>/used/` | Covers already uploaded — kept forever for audit. |
+| `data/ads.xlsx` | Your ad rows (seed briefs for generation). |
+| `data/image_cache/` | Images downloaded from the dashboard, named by sha256. Safe to delete. |
+| `data/photos/<account>/`, `data/covers/` | Retired local pools. The queue no longer reads these. |
 | `profiles/<account>/` | Persistent Chrome profile per account. Don't delete. |
 | `data/state.json` | Post history (used for cooldowns + ghost checks). |
 | `logs/run.log` | Rotating log of every run. |

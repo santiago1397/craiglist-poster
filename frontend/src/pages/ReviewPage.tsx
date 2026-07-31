@@ -104,6 +104,19 @@ type FilterKey = (typeof FILTERS)[number]["key"];
 // Craigslist accepts 24 images per posting: one thumbnail plus 23 more.
 const MAX_IMAGE_SLOTS = 24;
 
+// Slot 1 is the thumbnail and takes a cover; every other slot takes a photo.
+// The server enforces this — attaching the wrong kind is a 409.
+const COVER_SLOT = 1;
+
+// A candidate from one of the two stacks. `bucket` is computed server-side;
+// 'assigned' means a live draft already holds it.
+type PoolImage = {
+  id: number;
+  kind: "cover" | "photo";
+  bucket: string;
+  assigned_draft_id: number | null;
+};
+
 const IMG_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
 
 // Every other page renders timestamps in America/New_York with an explicit "ET"
@@ -1044,14 +1057,22 @@ function DraftRow(props: {
   );
 }
 
-// Attached images, plus a picker over the approved stack. Only images this
-// account may use are offered — one already claimed by another account would be
+// Attached images, plus pickers over the two stacks. Only images this account
+// may use are offered — one already claimed by another account would be
 // rejected by the server anyway, so it is never shown.
+//
+// The cover is a separate act from the photos, because they are separate
+// decisions: slot 1 is the Craigslist thumbnail and is chosen by hand, while
+// slots 2-24 are bulk and fill with one press.
 function DraftImages(props: { draftId: number; account: string; busy: boolean }) {
   const [attached, setAttached] = useState<{ id: number; slot: number }[]>([]);
-  const [pool, setPool] = useState<{ id: number; kind: string }[]>([]);
-  const [picking, setPicking] = useState(false);
+  const [pool, setPool] = useState<PoolImage[]>([]);
+  // Which stack the open picker is showing: covers for slot 1, photos for the
+  // rest. `null` means closed.
+  const [picking, setPicking] = useState<"cover" | "photo" | null>(null);
+  const [filling, setFilling] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -1068,16 +1089,19 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
     void load();
   }, [load]);
 
-  async function openPicker() {
+  async function openPicker(kind: "cover" | "photo") {
     setErr(null);
     try {
-      const r = await api.get<{ images: { id: number; kind: string }[] }>("/images", {
+      // Reserved images come back too, so they can be offered greyed rather
+      // than vanishing with no explanation of where they went.
+      const r = await api.get<{ images: PoolImage[] }>("/images", {
         status: "approved",
+        kind,
         account: props.account,
         limit: 60,
       });
       setPool(r.images);
-      setPicking(true);
+      setPicking(kind);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e));
     }
@@ -1093,28 +1117,88 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
     }
   }
 
-  // Slot 1 is the Craigslist thumbnail, so new attachments land at the end
-  // rather than silently displacing the cover.
-  const nextSlot = Math.min(MAX_IMAGE_SLOTS, (attached.length ? Math.max(...attached.map((a) => a.slot)) : 0) + 1);
+  async function autofill() {
+    setErr(null);
+    setNote(null);
+    setFilling(true);
+    try {
+      const r = await api.post<{ filled: number; requested: number }>(
+        `/images/draft/${props.draftId}/autofill`,
+        { count: MAX_IMAGE_SLOTS - 1 },
+      );
+      // A short fill is the ordinary case with manual refill, so it is reported
+      // plainly rather than as an error.
+      setNote(
+        r.filled === 0
+          ? "Nothing to add — the photo stack has nothing free for this account."
+          : r.filled < r.requested
+            ? `Filled ${r.filled} of ${r.requested} — the photo stack is short.`
+            : `Filled ${r.filled} slots.`,
+      );
+      await load();
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setFilling(false);
+    }
+  }
+
+  const cover = attached.find((a) => a.slot === COVER_SLOT) ?? null;
+  const photos = attached.filter((a) => a.slot !== COVER_SLOT);
+  // Photos land in the first free slot after the cover, so a detach in the
+  // middle is reused rather than pushing everything toward the 24-slot ceiling.
+  const taken = new Set(attached.map((a) => a.slot));
+  const nextPhotoSlot =
+    Array.from({ length: MAX_IMAGE_SLOTS - 1 }, (_, i) => i + 2).find((s) => !taken.has(s)) ??
+    MAX_IMAGE_SLOTS;
+  const targetSlot = picking === "cover" ? COVER_SLOT : nextPhotoSlot;
   const free = pool.filter((p) => !attached.some((a) => a.id === p.id));
 
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-xs text-fg-muted">
-          Images ({attached.length}/{MAX_IMAGE_SLOTS}){attached.length ? " — slot 1 is the thumbnail" : ""}
+          Images ({attached.length}/{MAX_IMAGE_SLOTS})
         </span>
-        {attached.length < MAX_IMAGE_SLOTS && (
-          <button
-            disabled={props.busy}
-            onClick={() => void openPicker()}
-            className="text-xs px-2 py-0.5 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
-          >
-            + Attach image
-          </button>
+        <button
+          disabled={props.busy}
+          onClick={() => void openPicker("cover")}
+          className={cn(
+            "text-xs px-2 py-0.5 rounded border disabled:opacity-40",
+            cover
+              ? "border-border-strong text-fg-muted hover:bg-surface-2"
+              : "border-warn-border bg-warn text-warn-fg hover:opacity-90",
+          )}
+        >
+          {cover ? "Change cover" : "Choose cover"}
+        </button>
+        {photos.length < MAX_IMAGE_SLOTS - 1 && (
+          <>
+            <button
+              disabled={props.busy || filling}
+              onClick={() => void autofill()}
+              className="text-xs px-2 py-0.5 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
+            >
+              {filling ? "Filling…" : `Autofill ${MAX_IMAGE_SLOTS - 1} photos`}
+            </button>
+            <button
+              disabled={props.busy}
+              onClick={() => void openPicker("photo")}
+              className="text-xs px-2 py-0.5 rounded border border-border-strong text-fg-muted hover:bg-surface-2 disabled:opacity-40"
+            >
+              + Add photo
+            </button>
+          </>
         )}
       </div>
       {err && <p className="text-xs text-danger-fg">{err}</p>}
+      {note && <p className="text-xs text-fg-muted">{note}</p>}
+      {!cover && attached.length > 0 && (
+        <p className="text-xs text-warn-fg">
+          No cover chosen. If this posts as-is, one gets picked automatically at claim time —
+          or a roof photo becomes the thumbnail if the cover stack is empty.
+        </p>
+      )}
 
       {attached.length === 0 ? (
         <p className="text-xs text-fg-subtle italic">
@@ -1157,10 +1241,14 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
         <div className="border border-border-strong rounded p-2 bg-bg/60">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs text-fg-muted">
-              Approved and available to {props.account}
+              {picking === "cover"
+                ? `Cover stack — becomes the Craigslist thumbnail`
+                : `Photo stack — attaches as slot ${targetSlot}`}
+              {" · "}
+              {props.account}
             </span>
             <button
-              onClick={() => setPicking(false)}
+              onClick={() => setPicking(null)}
               className="text-xs text-fg-muted hover:text-fg px-1"
             >
               close
@@ -1168,42 +1256,71 @@ function DraftImages(props: { draftId: number; account: string; busy: boolean })
           </div>
           {free.length === 0 ? (
             <p className="text-xs text-fg-subtle">
-              Nothing available. Generate and approve images on the Images page.
+              The {picking} stack is empty for this account. Generate or upload{" "}
+              {picking}s on the Images page.
             </p>
           ) : (
             <ul className="flex gap-2 flex-wrap max-h-44 overflow-auto">
-              {free.map((p) => (
-                <li key={p.id}>
-                  <button
-                    onClick={() =>
-                      act(async () => {
-                        await api.post(`/images/draft/${props.draftId}/attach`, {
-                          image_id: p.id,
-                          slot: nextSlot,
-                        });
-                        setPicking(false);
-                      })
-                    }
-                    className="block relative"
-                    title={`Attach as slot ${nextSlot}`}
-                  >
-                    <img
-                      src={`${IMG_BASE}/images/${p.id}/raw`}
-                      alt={`Image ${p.id}${p.kind === "cover" ? ", cover" : ""}`}
-                      loading="lazy"
-                      decoding="async"
-                      width={96}
-                      height={64}
-                      className="h-16 w-24 object-cover rounded border border-border-strong bg-surface-2 hover:border-ring"
-                    />
-                    {p.kind === "cover" && (
-                      <span className="absolute bottom-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-warn-fg">
-                        cover
-                      </span>
-                    )}
-                  </button>
-                </li>
-              ))}
+              {free.map((p) => {
+                // Reserved by another draft. Shown rather than hidden, because
+                // an image silently missing from the picker is impossible to
+                // reason about — and reuse is legitimate, just never accidental.
+                const held =
+                  p.bucket === "assigned" && p.assigned_draft_id !== props.draftId
+                    ? (p.assigned_draft_id ?? "a live posting")
+                    : null;
+                return (
+                  <li key={p.id}>
+                    <button
+                      onClick={() =>
+                        act(async () => {
+                          if (
+                            held !== null &&
+                            !window.confirm(
+                              `Image ${p.id} is already reserved by ` +
+                                `${typeof held === "number" ? `draft #${held}` : held}. ` +
+                                `Using it here means the same picture goes out twice on ` +
+                                `this account, which is what gets listings ghosted.\n\n` +
+                                `Attach it anyway?`,
+                            )
+                          )
+                            return;
+                          await api.post(`/images/draft/${props.draftId}/attach`, {
+                            image_id: p.id,
+                            slot: targetSlot,
+                            allow_double_book: held !== null,
+                          });
+                          setPicking(null);
+                        })
+                      }
+                      className="block relative"
+                      title={
+                        held !== null
+                          ? `Reserved by ${typeof held === "number" ? `draft #${held}` : held} — click to reuse anyway`
+                          : `Attach as slot ${targetSlot}`
+                      }
+                    >
+                      <img
+                        src={`${IMG_BASE}/images/${p.id}/raw`}
+                        alt={`Image ${p.id}${held !== null ? `, reserved` : ""}`}
+                        loading="lazy"
+                        decoding="async"
+                        width={96}
+                        height={64}
+                        className={cn(
+                          "h-16 w-24 object-cover rounded border border-border-strong bg-surface-2 hover:border-ring",
+                          held !== null && "opacity-40",
+                        )}
+                      />
+                      {held !== null && (
+                        <span className="absolute bottom-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-warn-fg">
+                          {typeof held === "number" ? `#${held}` : "live"}
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>

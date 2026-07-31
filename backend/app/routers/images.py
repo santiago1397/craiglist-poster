@@ -32,25 +32,40 @@ class GenerateImagesBody(BaseModel):
 
 
 class StatusBody(BaseModel):
-    status: str = Field(pattern="^(pending|approved|rejected)$")
+    # Either or both. `kind` moves an image between the two stacks.
+    status: str | None = Field(default=None, pattern="^(pending|approved|rejected)$")
+    kind: str | None = Field(default=None, pattern="^(photo|cover)$")
 
 
 class AttachBody(BaseModel):
     image_id: int
     slot: int = Field(ge=1, le=images_svc.MAX_SLOTS)
+    # Set only after the UI has told you which draft already holds this image.
+    allow_double_book: bool = False
+
+
+class AutofillBody(BaseModel):
+    # Defaults to filling every photo slot Craigslist allows.
+    count: int = Field(default=images_svc.MAX_SLOTS - 1, ge=1, le=images_svc.MAX_SLOTS - 1)
 
 
 @router.get("", dependencies=[admin])
 def list_images(
     status_filter: str | None = Query(default=None, alias="status"),
+    bucket: str | None = Query(default=None),
     account: str | None = Query(default=None),
     kind: str | None = Query(default=None),
     limit: int = Query(default=60, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
+    if bucket and bucket not in images_svc.BUCKETS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"bucket must be one of {', '.join(images_svc.BUCKETS)}",
+        )
     with conn() as c:
         return images_svc.list_images(
-            c, status=status_filter, account=account, kind=kind,
+            c, status=status_filter, bucket=bucket, account=account, kind=kind,
             limit=limit, offset=offset,
         )
 
@@ -160,9 +175,22 @@ def apply_overlay(image_id: int, body: OverlayBody) -> dict:
 
 
 @router.patch("/{image_id}", dependencies=[admin])
-def set_status(image_id: int, body: StatusBody) -> dict:
+def patch_image(image_id: int, body: StatusBody) -> dict:
+    """Approve/reject, and/or move the image between the cover and photo stacks."""
+    if body.status is None and body.kind is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="provide status, kind, or both",
+        )
     with tx() as c:
-        row = images_svc.set_status(c, image_id, body.status)
+        row = None
+        if body.status is not None:
+            row = images_svc.set_status(c, image_id, body.status)
+        if body.kind is not None:
+            try:
+                row = images_svc.set_kind(c, image_id, body.kind)
+            except ValueError as e:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image not found")
     return row
@@ -228,10 +256,62 @@ def attach(draft_id: int, body: AttachBody) -> dict:
     with tx() as c:
         try:
             return images_svc.attach(
-                c, draft_id=draft_id, image_id=body.image_id, slot=body.slot
+                c, draft_id=draft_id, image_id=body.image_id, slot=body.slot,
+                allow_double_book=body.allow_double_book,
             )
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
+@router.post("/draft/{draft_id}/autofill", dependencies=[admin])
+def autofill(draft_id: int, body: AutofillBody) -> dict:
+    """Fill the draft's empty photo slots from the photo stack.
+
+    Tops up; never replaces what you already chose, and never touches slot 1 —
+    the cover stays a manual decision. Returns fewer than asked when the stack
+    is short, which with manual refill is the ordinary case rather than a
+    failure, so `filled` and `requested` are both reported.
+    """
+    with tx() as c:
+        draft = c.execute(
+            "SELECT id, account FROM drafts WHERE id = %s", (draft_id,)
+        ).fetchone()
+        if draft is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        attached = images_svc.fill_photo_slots(
+            c, draft_id=draft_id, account=draft["account"], want=body.count
+        )
+        health = images_svc.stack_health(c)
+    return {
+        "filled": len(attached),
+        "requested": body.count,
+        "images": attached,
+        "stack_health": health,
+    }
+
+
+@router.post("/draft/{draft_id}/cover", dependencies=[admin])
+def auto_cover(draft_id: int) -> dict:
+    """Pick a cover from the stack for a draft that has none.
+
+    The same call `claim_next` makes as a backstop, exposed so you can take it
+    deliberately instead of letting the posting slot decide.
+    """
+    with tx() as c:
+        draft = c.execute(
+            "SELECT id, account FROM drafts WHERE id = %s", (draft_id,)
+        ).fetchone()
+        if draft is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+        chosen = images_svc.attach_cover(
+            c, draft_id=draft_id, account=draft["account"]
+        )
+    if chosen is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="no cover available — the draft already has one, or the cover stack is empty",
+        )
+    return chosen
 
 
 @router.delete("/draft/{draft_id}/attach/{image_id}", dependencies=[admin],

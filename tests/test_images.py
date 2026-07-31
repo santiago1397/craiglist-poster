@@ -63,7 +63,8 @@ with tx() as c:
 assert pending["status"] == "pending"
 with tx() as c:
     try:
-        images_svc.attach(c, draft_id=d_a["id"], image_id=pending["id"], slot=1)
+        # Slot 2: slot 1 takes a cover, and this is a photo.
+        images_svc.attach(c, draft_id=d_a["id"], image_id=pending["id"], slot=2)
         raise AssertionError("attached an unapproved image")
     except ValueError as e:
         assert "not approved" in str(e), e
@@ -72,7 +73,7 @@ ok.append("an image on the pending shelf cannot be attached to a draft")
 # --- attaching claims the image for that account, permanently --------------
 with tx() as c:
     images_svc.set_status(c, pending["id"], "approved")
-    r = images_svc.attach(c, draft_id=d_a["id"], image_id=pending["id"], slot=1)
+    r = images_svc.attach(c, draft_id=d_a["id"], image_id=pending["id"], slot=2)
 assert r["owner_account"] == "craigs1"
 with conn() as c:
     got = c.execute("SELECT owner_account FROM images WHERE id=%s", (pending["id"],)).fetchone()
@@ -82,19 +83,36 @@ ok.append("attaching binds the image to that draft's account")
 # --- and another account is refused ----------------------------------------
 with tx() as c:
     try:
-        images_svc.attach(c, draft_id=d_b["id"], image_id=pending["id"], slot=1)
+        images_svc.attach(c, draft_id=d_b["id"], image_id=pending["id"], slot=2)
         raise AssertionError("a second account reused a claimed image")
     except ValueError as e:
         assert "craigs1" in str(e), e
 ok.append("a claimed image is refused to any other account")
 
-# --- pick_for_draft respects ownership -------------------------------------
+# --- an image held by a live draft is out of the pool ----------------------
+# draft_images has no uniqueness on image_id, so without this the same photo
+# was handed to several queued drafts at once and both published it.
 with conn() as c:
     for_a = images_svc.pick_for_draft(c, account="craigs1", count=10)
-    for_b = images_svc.pick_for_draft(c, account="craigs2", count=10)
-assert pending["id"] in [i["id"] for i in for_a]
-assert pending["id"] not in [i["id"] for i in for_b], "claimed image offered to the wrong account"
-ok.append("the picker never offers another account's claimed image")
+assert pending["id"] not in [i["id"] for i in for_a], \
+    "an image attached to a queued draft was offered to another draft"
+with conn() as c:
+    assert images_svc.reserved_by(c, pending["id"]) == d_a["id"]
+ok.append("an image reserved by a live draft is never offered again")
+
+# --- but the reservation is bypassable on purpose --------------------------
+with tx() as c:
+    d_c = drafts_svc.create_draft(c, {"account": "craigs1", "title": "t", "body": "b"})
+    try:
+        images_svc.attach(c, draft_id=d_c["id"], image_id=pending["id"], slot=2)
+        raise AssertionError("double-booked an image without being asked")
+    except ValueError as e:
+        assert "already attached" in str(e), e
+    images_svc.attach(c, draft_id=d_c["id"], image_id=pending["id"], slot=2,
+                      allow_double_book=True)
+with tx() as c:
+    images_svc.detach(c, draft_id=d_c["id"], image_id=pending["id"])
+ok.append("double-booking is refused by default and possible on request")
 
 # --- detach releases only while unpublished --------------------------------
 with tx() as c:
@@ -104,7 +122,7 @@ with conn() as c:
 assert got["owner_account"] is None, "detach did not release an unpublished image"
 
 with tx() as c:
-    images_svc.attach(c, draft_id=d_a["id"], image_id=pending["id"], slot=1)
+    images_svc.attach(c, draft_id=d_a["id"], image_id=pending["id"], slot=2)
     images_svc.mark_used(c, [pending["id"]])
     images_svc.detach(c, draft_id=d_a["id"], image_id=pending["id"])
 with conn() as c:
