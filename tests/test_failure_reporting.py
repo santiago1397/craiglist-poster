@@ -46,7 +46,7 @@ PRE_UPLOAD_STEPS = {
     "launch", "warmup", "login_check", "open_post_form", "dismiss_reuse_prompt",
     "advance_to_type", "type_service_offered", "category_skilled_trade",
     "advance_to_form", "form_title", "form_zip", "form_city", "form_license",
-    "form_phone", "form_body", "map_confirm",
+    "form_phone", "form_body", "form_validation", "map_confirm",
 }
 
 
