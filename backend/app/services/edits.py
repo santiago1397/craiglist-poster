@@ -27,13 +27,23 @@ from typing import Any
 import psycopg
 
 from ..config import get_settings
+from . import drafts as drafts_svc
+from . import images as images_svc
 from .queue import get_guardrails
 
 # Fields the operator may set on a desired state. Images are not here: they are
 # rows in `post_desired_images`, managed through attach/detach so ownership and
 # reuse cooldowns stay owned by `services.images` rather than duplicated.
+#
+# `county` and `service_offered` are deliberately absent. Craigslist's edit form
+# does not expose them — `editor._read_form` reads back "" for both — so
+# `editor.reconcile_post` has no control to type them into. While they were
+# editable, changing one registered as a text change, started the mutation pass,
+# and then reported `applied` with `applied_rev` advanced having typed nothing:
+# a green badge for an edit that never happened. Restore them only alongside
+# real selectors from the DESIGN_EDITS phase-0 spike.
 _EDITABLE = (
-    "title", "body", "county", "city", "service_offered",
+    "title", "body", "city",
     "postal_code", "license_number", "phone_number",
     "image_set_managed",
 )
@@ -91,6 +101,13 @@ def upsert_desired(conn: psycopg.Connection, post_id: str, payload: dict) -> dic
         if existing is None:
             raise ValueError("no editable fields supplied")
         return existing
+
+    # The same cap the drafts path enforces. Without it a live posting could be
+    # staged with a body Craigslist refuses, and the failure would only surface
+    # on the desktop, mid-edit, against a real listing — the most expensive
+    # possible place to discover it.
+    if "body" in fields:
+        drafts_svc.check_body_length(fields["body"])
 
     existing = get_desired(conn, post_id)
     if existing is None:
@@ -151,45 +168,60 @@ def discard_desired(conn: psycopg.Connection, post_id: str) -> bool:
     return (cur.rowcount or 0) > 0
 
 
+def _ensure_desired(conn: psycopg.Connection, post_id: str) -> dict:
+    """The post's desired state, created from its live content if absent.
+
+    Staging images used to require a text edit first — `attach_image` refused
+    with "edit it first" when no row existed — which made "swap the photos on
+    this ad" impossible without also touching the copy. Seeding through
+    `upsert_desired` rather than inserting here keeps the two properties that
+    matter: the eight live text fields are copied across (so a later reconcile
+    does not blank them), and the hydration precondition still applies.
+    """
+    desired = get_desired(conn, post_id)
+    if desired is not None:
+        return desired
+    return upsert_desired(conn, post_id, {"image_set_managed": True})
+
+
 def attach_image(
-    conn: psycopg.Connection, *, post_id: str, image_id: int, slot: int
+    conn: psycopg.Connection,
+    *,
+    post_id: str,
+    image_id: int,
+    slot: int,
+    allow_double_book: bool = False,
 ) -> dict:
     """Bind an image to a slot of this post's desired set.
 
-    Mirrors `images.attach` for drafts, including decision 13's permanent claim:
-    an approved image with no owner becomes owned by this post's account, and an
-    image owned by a different account is refused rather than reused.
-    """
-    if not (1 <= slot <= 5):
-        raise ValueError("slot must be 1-5")
-    desired = get_desired(conn, post_id)
-    if desired is None:
-        raise ValueError("no desired state for this post — edit it first")
-    img = conn.execute("SELECT * FROM images WHERE id = %s", (image_id,)).fetchone()
-    if img is None:
-        raise ValueError("image not found")
-    if img["status"] != "approved":
-        raise ValueError("image is not approved yet")
-    if img["owner_account"] and img["owner_account"] != desired["account"]:
-        raise ValueError(
-            f"image belongs to {img['owner_account']} and cannot be reused by "
-            f"{desired['account']}"
-        )
+    Delegates every rule to `images.attach_to_post` so the live-post path cannot
+    drift from the draft path again — it previously capped at 5 slots, skipped
+    the cover/photo partition and skipped the reservation check, all of which
+    the drafts path had been hardened against.
 
-    conn.execute(
-        """
-        INSERT INTO post_desired_images (post_id, image_id, slot) VALUES (%s,%s,%s)
-        ON CONFLICT (post_id, slot) DO UPDATE SET image_id = EXCLUDED.image_id
-        """,
-        (post_id, image_id, slot),
+    Taking control of the images is itself a decision, so the first attach flips
+    `image_set_managed`. Without that the desktop ships `images: []` on the
+    claim (see `claim_reconcile`) and applies only the text — the operator would
+    stage a gallery, watch the edit report `applied`, and find the live post
+    unchanged with no error anywhere.
+    """
+    desired = _ensure_desired(conn, post_id)
+
+    out = images_svc.attach_to_post(
+        conn,
+        post_id=post_id,
+        account=desired["account"],
+        image_id=image_id,
+        slot=slot,
+        allow_double_book=allow_double_book,
     )
-    if img["owner_account"] is None:
+    if not desired["image_set_managed"]:
         conn.execute(
-            "UPDATE images SET owner_account = %s, updated_at = NOW() WHERE id = %s",
-            (desired["account"], image_id),
+            "UPDATE post_desired_state SET image_set_managed = TRUE WHERE post_id = %s",
+            (post_id,),
         )
     _touch_desired(conn, post_id)
-    return {"post_id": post_id, "image_id": image_id, "slot": slot}
+    return out
 
 
 def detach_image(conn: psycopg.Connection, *, post_id: str, image_id: int) -> bool:
@@ -215,15 +247,42 @@ def detach_image(conn: psycopg.Connection, *, post_id: str, image_id: int) -> bo
 
 
 def desired_images(conn: psycopg.Connection, post_id: str) -> list[dict]:
-    rows = conn.execute(
-        """
-        SELECT i.*, pdi.slot FROM post_desired_images pdi
-        JOIN images i ON i.id = pdi.image_id
-        WHERE pdi.post_id = %s ORDER BY pdi.slot
-        """,
-        (post_id,),
-    ).fetchall()
-    return [dict(r) for r in rows]
+    return images_svc.images_for_post(conn, post_id)
+
+
+def autofill_images(
+    conn: psycopg.Connection, *, post_id: str, want: int
+) -> dict:
+    """Top up this post's empty photo slots, mirroring the drafts autofill."""
+    desired = _ensure_desired(conn, post_id)
+    filled = images_svc.fill_post_photo_slots(
+        conn, post_id=post_id, account=desired["account"], want=want
+    )
+    if filled and not desired["image_set_managed"]:
+        conn.execute(
+            "UPDATE post_desired_state SET image_set_managed = TRUE WHERE post_id = %s",
+            (post_id,),
+        )
+    if filled:
+        _touch_desired(conn, post_id)
+    return {"filled": len(filled), "requested": want}
+
+
+def autofill_cover(conn: psycopg.Connection, *, post_id: str) -> dict | None:
+    """Pick a cover for slot 1 if it is empty."""
+    desired = _ensure_desired(conn, post_id)
+    chosen = images_svc.attach_post_cover(
+        conn, post_id=post_id, account=desired["account"]
+    )
+    if chosen is not None:
+        if not desired["image_set_managed"]:
+            conn.execute(
+                "UPDATE post_desired_state SET image_set_managed = TRUE "
+                "WHERE post_id = %s",
+                (post_id,),
+            )
+        _touch_desired(conn, post_id)
+    return chosen
 
 
 def _touch_desired(conn: psycopg.Connection, post_id: str) -> None:
@@ -316,9 +375,13 @@ def record_content(conn: psycopg.Connection, ev) -> bool:
         UPDATE posts
         SET title           = COALESCE(%s, title),
             body            = %s,
-            county          = %s,
+            -- Craigslist's edit form does not expose the subarea or the service
+            -- type, so hydration reads back "" for both. Writing that through
+            -- would erase what the posting flow recorded at publish time, which
+            -- is the only place these values are ever known.
+            county          = COALESCE(NULLIF(%s, ''), county),
             city            = %s,
-            service_offered = %s,
+            service_offered = COALESCE(NULLIF(%s, ''), service_offered),
             postal_code     = %s,
             license_number  = %s,
             phone_number    = %s,

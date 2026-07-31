@@ -15,21 +15,25 @@ from pydantic import BaseModel, Field
 from ..auth import require_admin
 from ..db import conn, tx
 from ..services import edits as edits_svc
+from ..services import images as images_svc
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class DesiredUpdate(BaseModel):
+    """What an operator may change about a live posting.
+
+    `county` and `service_offered` are absent on purpose — Craigslist's edit
+    form exposes no control for either, so accepting them would stage a change
+    the desktop can never apply. See `_EDITABLE` in services/edits.py.
+    """
+
     title: str | None = None
     body: str | None = None
-    county: str | None = None
     city: str | None = None
-    service_offered: str | None = None
     postal_code: str | None = None
     license_number: str | None = None
     phone_number: str | None = None
-    # Ordered [{sha256, slot}] — phase 3. Ignored unless image_set_managed.
-    image_set: list[dict] | None = None
     image_set_managed: bool | None = None
 
 
@@ -60,16 +64,25 @@ def get_post(post_id: str) -> dict:
             """
             SELECT p.*, d.status AS edit_status, d.desired_rev, d.live_rev,
                    d.title AS desired_title, d.body AS desired_body,
-                   d.county AS desired_county, d.city AS desired_city,
-                   d.service_offered AS desired_service_offered,
+                   d.city AS desired_city,
                    d.postal_code AS desired_postal_code,
                    d.license_number AS desired_license_number,
                    d.phone_number AS desired_phone_number,
-                   d.image_set AS desired_image_set, d.image_set_managed,
+                   d.image_set_managed,
                    d.failed_step, d.failed_message, d.attempts AS edit_attempts,
-                   d.last_attempt_at, d.base_hash
+                   d.last_attempt_at, d.base_hash,
+                   -- The draft this posting came from, if the queue produced it.
+                   -- `body_head` is what lets the editor split the ad copy from
+                   -- the byte-exact keyword tail, exactly as Review does; a post
+                   -- with no originating draft simply gets one plain textarea.
+                   src.body_head
             FROM posts p
             LEFT JOIN post_desired_state d ON d.post_id = p.post_id
+            LEFT JOIN LATERAL (
+                SELECT body_head FROM drafts
+                WHERE posted_post_id = p.post_id
+                ORDER BY posted_at DESC NULLS LAST LIMIT 1
+            ) src ON TRUE
             WHERE p.post_id = %s
             """,
             (post_id,),
@@ -151,7 +164,14 @@ def attempts(post_id: str, limit: int = Query(default=20, ge=1, le=100)) -> dict
 
 class AttachBody(BaseModel):
     image_id: int
-    slot: int = Field(ge=1, le=5)
+    # Same 24 slots a draft has. This was capped at 5 while editing was a
+    # phase-3 spike; the bound belongs to the image model, not to this router.
+    slot: int = Field(ge=1, le=images_svc.MAX_SLOTS)
+    allow_double_book: bool = False
+
+
+class AutofillBody(BaseModel):
+    count: int = Field(default=images_svc.MAX_SLOTS - 1, ge=1, le=images_svc.MAX_SLOTS - 1)
 
 
 @router.get("/{post_id}/images")
@@ -165,12 +185,33 @@ def attach_image(post_id: str, body: AttachBody) -> dict:
     with tx() as c:
         try:
             return edits_svc.attach_image(
-                c, post_id=post_id, image_id=body.image_id, slot=body.slot
+                c, post_id=post_id, image_id=body.image_id, slot=body.slot,
+                allow_double_book=body.allow_double_book,
             )
         except ValueError as e:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
-            )
+            # 409, matching the drafts attach route. One shared picker drives
+            # both, so it must not have to branch on which one it is talking to.
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
+@router.post("/{post_id}/images/autofill")
+def autofill_images(post_id: str, body: AutofillBody) -> dict:
+    """Top up empty photo slots. Never replaces a choice, never touches slot 1."""
+    with tx() as c:
+        try:
+            return edits_svc.autofill_images(c, post_id=post_id, want=body.count)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
+@router.post("/{post_id}/images/cover")
+def autofill_cover(post_id: str) -> dict:
+    with tx() as c:
+        try:
+            chosen = edits_svc.autofill_cover(c, post_id=post_id)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    return {"image": chosen}
 
 
 @router.delete("/{post_id}/images/{image_id}", status_code=status.HTTP_204_NO_CONTENT)

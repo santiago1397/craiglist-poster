@@ -54,6 +54,7 @@ PYTHONPATH=backend uv run python tests/test_accounts_list.py  # account picker o
 PYTHONPATH=backend uv run python tests/test_queue_http.py     # machine tokens over HTTP
 PYTHONPATH=backend uv run python tests/test_posting_switch.py # pause/resume actually stops claims
 PYTHONPATH=backend uv run python tests/test_edit_logic.py     # desired state, staleness, decision-16-style routing
+PYTHONPATH=backend uv run python tests/test_edit_images.py    # staging images on a live posting
 
 dropdb cl_scratch
 ```

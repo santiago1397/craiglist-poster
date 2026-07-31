@@ -26,6 +26,7 @@ and reports `degraded_live` if even that fails.
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -69,15 +70,57 @@ SEL = {
 
 # Steps that mutate nothing on Craigslist. Mirrors PRE_MUTATION_STEPS in
 # backend/app/services/edits.py — keep the two in sync.
+#
+# `unsupported_field` is deliberately NOT here, even though it is raised before
+# a single character is typed. `apply_attempt` routes an unmapped outcome with a
+# pre-mutation step back to 'pending', which for a selector that will never
+# match means retrying every 15 seconds forever. Excluding it parks the edit
+# instead, with the offending selector named in `failed_message`, which is the
+# only form of this failure anyone can act on.
 PRE_MUTATION_STEPS = frozenset({
     "launch", "lease", "login_check", "open_account_page", "find_post_row",
     "open_edit_form", "hydrate", "verify_hash", "diff",
 })
 
+# What the content hash covers: the fields the edit form actually exposes.
+#
+# `county` and `service_offered` used to be in here. Craigslist's edit form has
+# no control for either — `_read_form` could only ever return "" — so they
+# contributed a constant to every hash while making the diff believe they were
+# editable content. A change to one registered as a text change, started the
+# mutation pass, and reported `applied` having typed nothing.
 HASHED_FIELDS = (
-    "title", "body", "county", "city", "service_offered",
+    "title", "body", "city",
     "postal_code", "license_number", "phone_number",
 )
+
+# Which selector backs each editable field. The pre-flight check in `diff` uses
+# this to refuse a change it has no way to make, rather than silently skipping
+# it and calling the result a success.
+FIELD_SEL = {
+    "title": "edit_title",
+    "body": "edit_body",
+    "postal_code": "edit_postal",
+    "city": "edit_city",
+    "phone_number": "edit_phone",
+    "license_number": "edit_license",
+}
+
+# Emitted once per run, on the attempt's step trail. Every selector below is
+# unverified, so "which one matched nothing" is the first question of every
+# failure — and a count of 2 is as wrong as a count of 0, because `_fill` and
+# the click helpers all take `.first`.
+CENSUS_KEYS = (
+    "posting_row", "row_edit_button", "edit_title", "edit_body", "edit_postal",
+    "edit_city", "edit_phone", "edit_license", "save_button", "publish_button",
+    "file_input", "image_thumb", "images_done",
+)
+
+# Capture screenshots and HTML on success too, not only on failure. The most
+# useful artifact in this project right now is a healthy edit form: it is the
+# DOM needed to replace the guesses in SEL. Off by default so steady-state
+# upload volume stays flat once the selectors are settled.
+TRACE = os.environ.get("CL_EDIT_TRACE", "").strip().lower() in ("1", "true", "yes")
 
 
 class EditFailure(RuntimeError):
@@ -162,12 +205,33 @@ def _find_row(page: Page, post_id: str):
     return row.first if row.count() > 0 else None
 
 
+def _count(page: Page, key: str) -> int:
+    """How many elements this selector matches, logged.
+
+    Every lookup goes through here so a failure names the selector that missed
+    instead of surfacing as a bare timeout three steps later.
+    """
+    n = page.locator(SEL[key]).count()
+    logger.debug(f"selector {key}={SEL[key]!r} matched {n}")
+    return n
+
+
+def _census(page: Page) -> dict[str, int]:
+    return {k: _count(page, k) for k in CENSUS_KEYS}
+
+
 def _read_form(page: Page) -> dict:
-    """Scrape the edit form's current values."""
+    """Scrape the edit form's current values.
+
+    `county` and `service_offered` are absent rather than "": the form exposes
+    no control for them, and reporting an empty string reads as "Craigslist says
+    it is blank" — which then overwrote what the posting flow recorded at
+    publish time. Omitting them lets the server keep the values it already has.
+    """
     def _val(key: str) -> str:
-        loc = page.locator(SEL[key])
-        if loc.count() == 0:
+        if _count(page, key) == 0:
             return ""
+        loc = page.locator(SEL[key])
         try:
             return (loc.first.input_value() or "").strip()
         except Exception:
@@ -180,8 +244,6 @@ def _read_form(page: Page) -> dict:
         "city": _val("edit_city"),
         "phone_number": _val("edit_phone"),
         "license_number": _val("edit_license"),
-        "county": "",
-        "service_offered": "",
     }
 
 
@@ -258,7 +320,14 @@ def hydrate_post(
                 read_pause(900)
 
             with log.step("hydrate"):
-                if page.locator(SEL["edit_title"]).count() == 0:
+                # The census lands on the step trail, so the dashboard's History
+                # shows which selectors matched without anyone downloading an
+                # artifact. With every selector unverified that is the
+                # difference between a five-minute fix and an afternoon.
+                census = _census(page)
+                log.note("selectors", " ".join(f"{k}={v}" for k, v in census.items()))
+                logger.info(f"[{account.name}] selector census post {post_id}: {census}")
+                if census["edit_title"] == 0:
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_hydrate", label="edit_form_unrecognised",
                         post_id=post_id, account=account.name,
@@ -273,6 +342,11 @@ def hydrate_post(
                     return result
                 fields = _read_form(page)
                 images = _live_images(page)
+                if TRACE:
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_hydrate", label="form_loaded",
+                        post_id=post_id, account=account.name,
+                    ))
 
             result.update(fields)
             result.update({
@@ -443,7 +517,10 @@ def reconcile_post(
                 read_pause(900)
 
             with log.step("hydrate"):
-                if page.locator(SEL["edit_title"]).count() == 0:
+                census = _census(page)
+                log.note("selectors", " ".join(f"{k}={v}" for k, v in census.items()))
+                logger.info(f"[{account.name}] selector census post {post_id}: {census}")
+                if census["edit_title"] == 0:
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_reconcile", label="edit_form_unrecognised",
                         post_id=post_id, account=account.name,
@@ -455,6 +532,11 @@ def reconcile_post(
                     )
                 live = _read_form(page)
                 live_images = _live_images(page)
+                if TRACE:
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_reconcile", label="form_loaded",
+                        post_id=post_id, account=account.name,
+                    ))
 
             with log.step("verify_hash"):
                 live_hash = content_hash(live)
@@ -485,6 +567,31 @@ def reconcile_post(
                 images_differ = manage_images and len(photos) != len(live_images)
                 log.note("diff", f"{len(text_changes)} text field(s), images={images_differ}")
 
+                # Refuse a change we have no control to make, *before* typing
+                # anything. Without this the fill loop skipped the field, the
+                # run clicked save, and the attempt came back `applied` with
+                # `live_rev` advanced — the operator's change recorded as done,
+                # forever, having done nothing. Running here keeps the posting
+                # untouched, so this is a clean failure rather than a partial
+                # edit.
+                unreachable = sorted(k for k in text_changes if _count(page, FIELD_SEL[k]) == 0)
+                if unreachable:
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_reconcile", label="unsupported_field",
+                        post_id=post_id, account=account.name,
+                    ))
+                    return _result(
+                        "failed_form", failed_step="unsupported_field",
+                        error_type="field_not_reachable",
+                        error_message=(
+                            "cannot edit " + ", ".join(unreachable)
+                            + " — no element matched "
+                            + ", ".join(f"{k}={SEL[FIELD_SEL[k]]!r}" for k in unreachable)
+                        )[:500],
+                        images_live_count=len(live_images),
+                        images_desired_count=len(photos),
+                    )
+
             if not text_changes and not images_differ:
                 return _result(
                     "no_change", applied_rev=desired.get("desired_rev"),
@@ -509,6 +616,18 @@ def reconcile_post(
                 )
 
             # ---------------- mutation begins here ----------------
+            # Say what is about to change before changing it. The dry-run branch
+            # logged its plan; the real path logged nothing until after the fact,
+            # which is the wrong way round when something goes wrong mid-edit.
+            logger.info(
+                f"[{account.name}] applying to post {post_id}: "
+                f"fields={sorted(text_changes)} images="
+                f"{len(live_images)}->"
+                f"{len(photos) if manage_images else len(live_images)}"
+            )
+            # Every field here is known reachable — the diff step refused the
+            # whole attempt otherwise — so `_fill` raising is a genuine surprise
+            # rather than the ordinary "this form has no phone box" case.
             for key in ("title", "body"):
                 if key in text_changes:
                     with log.step(f"fill_{key}"):
@@ -517,7 +636,7 @@ def reconcile_post(
                 ("postal_code", "edit_postal"), ("city", "edit_city"),
                 ("phone_number", "edit_phone"), ("license_number", "edit_license"),
             ):
-                if key in text_changes and page.locator(SEL[sel_key]).count() > 0:
+                if key in text_changes:
                     with log.step(f"fill_{key}"):
                         _fill(page, sel_key, desired[key])
 
@@ -564,13 +683,13 @@ def reconcile_post(
 
             with log.step("save"):
                 done = page.locator(SEL["images_done"])
-                if done.count() > 0:
+                if _count(page, "images_done") > 0:
                     done.first.click()
                     page.wait_for_load_state("domcontentloaded")
                     sleep_jitter(1.2)
                 save = page.locator(SEL["save_button"])
                 publish = page.locator(SEL["publish_button"])
-                target = publish if publish.count() > 0 else save
+                target = publish if _count(page, "publish_button") > 0 else save
                 if target.count() == 0:
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_reconcile", label="no_save_control",
@@ -580,6 +699,13 @@ def reconcile_post(
                 target.first.click()
                 page.wait_for_load_state("domcontentloaded")
                 sleep_jitter(2.0)
+                if TRACE:
+                    # Proof the write landed, captured while the page that
+                    # accepted it is still on screen.
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_reconcile", label="after_save",
+                        post_id=post_id, account=account.name,
+                    ))
 
             logger.info(f"[{account.name}] applied edit to post {post_id}")
             return _result(

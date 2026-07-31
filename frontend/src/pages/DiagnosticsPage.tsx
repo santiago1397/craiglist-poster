@@ -11,6 +11,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { EditHealthCard } from "../components/EditHealthCard";
 import {
   AlertOctagon,
   AlertTriangle,
@@ -229,6 +230,12 @@ export default function DiagnosticsPage() {
   const [showAcknowledged, setShowAcknowledged] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
+  const accountsQ = useQuery({
+    queryKey: ["accounts"],
+    queryFn: () => api.get<{ accounts: string[] }>("/accounts"),
+    staleTime: 5 * 60_000,
+  });
+
   const feed = useQuery({
     queryKey: ["diagnostics", hours, showAcknowledged],
     queryFn: () =>
@@ -272,6 +279,8 @@ export default function DiagnosticsPage() {
           severe first. Screenshots and page dumps are attached where they exist.
         </p>
       </header>
+
+      <EditHealthCard accounts={accountsQ.data?.accounts ?? []} />
 
       {/* Severity counts double as filters — the number and the way to see what
           it refers to should not be two separate controls. */}

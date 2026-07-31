@@ -6,7 +6,6 @@ import DashboardPage from "./pages/DashboardPage";
 import PostsPage from "./pages/PostsPage";
 import PostDetailPage from "./pages/PostDetailPage";
 import ReviewPage from "./pages/ReviewPage";
-import EditsPage from "./pages/EditsPage";
 import ImagesPage from "./pages/ImagesPage";
 import PromptsPage from "./pages/PromptsPage";
 import DiagnosticsPage from "./pages/DiagnosticsPage";
@@ -42,14 +41,11 @@ export default function App() {
               </Protected>
             }
           />
-          <Route
-            path="/edits"
-            element={
-              <Protected>
-                <EditsPage />
-              </Protected>
-            }
-          />
+          {/* Editing moved onto each post's own page. Redirect rather than
+              letting the catch-all send old bookmarks to the dashboard with no
+              explanation — the pending filter is the closest equivalent to what
+              this page used to open on. */}
+          <Route path="/edits" element={<Navigate to="/posts?edit=pending" replace />} />
           <Route
             path="/images"
             element={

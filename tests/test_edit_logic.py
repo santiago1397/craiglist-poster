@@ -321,6 +321,27 @@ check("hydration clears the pending request",
 
 reset()
 
+# --- a live posting is held to the same body limit as a draft ---------------
+# `upsert_desired` used to accept any length, so a body Craigslist refuses could
+# be staged on a live ad and only fail on the desktop, mid-edit, against the
+# real listing — the most expensive place to find out.
+from app.services.drafts import POSTING_BODY_LIMIT  # noqa: E402
+
+add_post("8100")
+hydrate("8100")
+with tx() as c:
+    try:
+        edits_svc.upsert_desired(c, "8100", {"body": "x" * (POSTING_BODY_LIMIT + 1)})
+        check("an over-length body is refused on a live post", False, "no error")
+    except ValueError as e:
+        check("an over-length body is refused on a live post",
+              "limit is" in str(e), str(e))
+with tx() as c:
+    d = edits_svc.upsert_desired(c, "8100", {"body": "y" * (POSTING_BODY_LIMIT - 10)})
+check("a body inside the limit is accepted", d["body"].startswith("y"))
+
+reset()
+
 print(f"{len(ok)} checks passed")
 if failures:
     print("FAILURES:")

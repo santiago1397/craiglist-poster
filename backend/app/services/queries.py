@@ -213,12 +213,21 @@ _BASE_CTES = """
             GREATEST(1,
                 COALESCE(al.last_active_date, s.snapshot_date, CURRENT_DATE)
                 - p.posted_ts::date
-            ) AS days_active
+            ) AS days_active,
+            -- Editing state, so the Posts page can say which ads have a change
+            -- waiting and which need rescuing. Named `edit_status` rather than
+            -- `status`, which is already taken by the snapshot's own column.
+            p.hydrated_at,
+            p.hydrate_requested_at,
+            p.editable,
+            d.status AS edit_status,
+            (d.post_id IS NOT NULL AND d.desired_rev > d.live_rev) AS has_pending_edit
         FROM posts p
         LEFT JOIN latest_snapshot s ON s.post_id = p.post_id
         LEFT JOIN active_life al ON al.post_id = p.post_id
         LEFT JOIN account_sync asy ON asy.account = p.account
         LEFT JOIN latest_ghost g ON g.post_id = p.post_id
+        LEFT JOIN post_desired_state d ON d.post_id = p.post_id
     ),
     base_rated AS (
         SELECT
@@ -243,6 +252,7 @@ def _build_where(
     since: str | None,
     search: str | None,
     exclude_young_posts: bool,
+    edit_filter: str | None = None,
 ) -> tuple[str, list[Any]]:
     where: list[str] = []
     params: list[Any] = []
@@ -284,6 +294,15 @@ def _build_where(
     elif ghost_filter == "unchecked":
         where.append("ghosted IS NULL")
 
+    # Same buckets the retired Edits page offered as tabs. `degraded` first
+    # because a live posting sitting there with no images is an emergency.
+    if edit_filter == "degraded":
+        where.append("edit_status = 'degraded_live'")
+    elif edit_filter == "parked":
+        where.append("edit_status = ANY(ARRAY['parked_stale','parked_gone','failed'])")
+    elif edit_filter == "pending":
+        where.append("has_pending_edit")
+
     if exclude_young_posts:
         where.append(f"(CURRENT_DATE - posted_ts::date) >= {MIN_AGE_DAYS_FOR_RATE}")
 
@@ -299,6 +318,7 @@ def posts_page(
     ghost_filter: str | None = None,
     since: str | None = None,
     search: str | None = None,
+    edit_filter: str | None = None,
     sort: str = "posted_ts",
     sort_dir: str = "desc",
     limit: int = 50,
@@ -317,6 +337,7 @@ def posts_page(
         since=since,
         search=search,
         exclude_young_posts=exclude_young,
+        edit_filter=edit_filter,
     )
 
     total = conn.execute(
@@ -354,12 +375,28 @@ def posts_page(
         count_params,
     ).fetchall()
 
+    # Edit-state tallies are deliberately unfiltered by the date window: a
+    # degraded posting is an emergency whether or not it falls inside the 90 days
+    # you happen to be looking at, and a count that hides behind a filter is a
+    # count nobody acts on.
+    edit_tallies = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'degraded_live') AS degraded,
+            COUNT(*) FILTER (WHERE status IN ('parked_stale','parked_gone','failed'))
+                AS parked,
+            COUNT(*) FILTER (WHERE desired_rev > live_rev) AS pending
+        FROM post_desired_state
+        """
+    ).fetchone()
+
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
         "items": list(rows),
         "counts": {r["liveness"]: r["n"] for r in tallies},
+        "edit_counts": dict(edit_tallies),
         "sync": sync_freshness(conn, account=account),
     }
 

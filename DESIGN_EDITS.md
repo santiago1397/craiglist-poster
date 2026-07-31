@@ -225,23 +225,50 @@ Write the findings up before starting phase 1.
 | 2 | Image store + upload UI. | **already existed** (migration 0005, decision 34) |
 | 3 | Full-replace image reconcile (decision 33). | built, selectors unverified |
 | 4 | Polish: diff view on parked edits, `degraded_live` alerting. | partial — statuses surface in the UI |
+| 5 | Editing folded into the post's own page; the Edits tab retired. Full draft-parity form and 24-slot image picker (migration 0015). | built |
 
 Phase 2 turned out to be already done, so what shipped is phases 1, 3 and part
 of 4, hanging off the existing image stack.
 
-**Phase 0 still gates turning this on.** `edits_enabled` defaults FALSE in both
-the migration and `config.py`, and `clamp_guardrails` leaves it FALSE when the
-server says nothing — so a machine that has not been told otherwise will not
-touch a live posting. The selectors in `editor.SEL` are inferred, never
+**Phase 0 has not been done, and editing is now on anyway.** Migration 0015
+flips `edits_enabled` to TRUE at the operator's direction, to iterate against
+production. `config.py`'s compiled default stays FALSE — it governs only when
+the server says nothing, so a desktop that cannot reach the VPS still will not
+edit on its own initiative. The selectors in `editor.SEL` are inferred, never
 observed; every one of them is a guess until the spike replaces it.
+
+What changed to make running without the spike survivable:
+
+- A field the form cannot reach now **fails the attempt** at
+  `failed_step="unsupported_field"`, before anything is typed, naming the
+  selector that missed. It used to be skipped silently and reported `applied`.
+  That step is deliberately absent from `PRE_MUTATION_STEPS`, so it parks
+  instead of retrying a selector that will never match.
+- `county` and `service_offered` are no longer editable at all. The form has no
+  control for either, so they were guaranteed to hit the case above.
+- Every attempt records a **selector census** — what each selector matched — on
+  its step trail, visible in the post's Edit history without downloading an
+  artifact. A count of 2 matters as much as a count of 0: the fill helpers all
+  take `.first`.
+- `CL_EDIT_TRACE=1` captures the form on success as well as failure.
 
 Recommended order once you can log in again:
 
 1. `uv sync` and `cl init-account` for all three accounts — the accounts have
    been logged out since 2026-07-01 and nothing here works without that.
-2. Run the spike. Answer the six questions. Update `editor.SEL`.
-3. `cl edit --dry-run` against a real post. It types nothing, so this is safe
-   even with wrong selectors, and the artifacts show you the real form.
-4. Enable editing in Settings, then `cl edit-canary <post_id>` on a disposable
-   posting with `CL_CANARY_POSTS` set.
+2. Run the spike. Answer the six questions — above all, *can images be removed
+   from a live post's edit form?* Decision 33 and the whole image half depend on
+   it. Update `editor.SEL`.
+3. `CL_EDIT_TRACE=1 cl edit --dry-run` against a real post. It types nothing, so
+   this is safe even with wrong selectors, and the artifacts show you the real
+   form. Iterate until every census entry for a field you intend to edit reads
+   exactly 1, and until an unchanged post reports `no_change` — if it does not,
+   `content_hash` disagrees with itself and every real edit will park as
+   `failed_stale`.
+4. `cl edit-canary <post_id>` on a disposable posting with `CL_CANARY_POSTS`
+   set. Text first, with images unmanaged; only then images.
 5. Only then let the daemon's edit worker run against real inventory.
+
+Rollback needs no deploy: `UPDATE guardrail_settings SET edits_enabled = FALSE,
+edits_paused_reason = '<why>'`. It takes effect on the desktop's next config
+fetch, and the reason shows up verbatim under Diagnostics → Editing live posts.

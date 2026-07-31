@@ -1,7 +1,13 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { formatDate, formatDateTime, formatNumber } from "../lib/format";
+import { PostEditPanel } from "../components/post/PostEditPanel";
+import { PostEditHistory } from "../components/post/PostEditHistory";
+import { PostRecovery } from "../components/post/PostRecovery";
+import type { LocationRef } from "../lib/posting";
+import type { EditablePost } from "../lib/edits";
 
 type Post = {
   post_id: string;
@@ -33,16 +39,45 @@ type Detail = { post: Post; snapshots: Snapshot[]; ghost_history: GhostEntry[] }
 
 export default function PostDetailPage() {
   const { postId } = useParams<{ postId: string }>();
+  const [error, setError] = useState<string | null>(null);
+
   const q = useQuery({
     queryKey: ["post", postId],
     queryFn: () => api.get<Detail>(`/posts/${postId}`),
     enabled: !!postId,
   });
 
+  // The editing half. Polls only while something is actually in flight — a
+  // detail page that refetches every 15 seconds forever is noise, but a
+  // hydration you are sat waiting for needs to arrive on its own.
+  const editQ = useQuery({
+    queryKey: ["edits", postId],
+    queryFn: () => api.get<EditablePost>(`/edits/${postId}`),
+    enabled: !!postId,
+    refetchInterval: (query) =>
+      query.state.data?.hydrate_requested_at || query.state.data?.edit_status === "applying"
+        ? 15_000
+        : false,
+  });
+
+  // Both feed the form's selects. Same query keys Review uses, so arriving from
+  // that page costs nothing.
+  const accountsQ = useQuery({
+    queryKey: ["accounts"],
+    queryFn: () => api.get<{ accounts: string[] }>("/accounts"),
+    staleTime: 5 * 60_000,
+  });
+  const locationsQ = useQuery({
+    queryKey: ["reference", "locations"],
+    queryFn: () => api.get<LocationRef>("/reference/locations"),
+    staleTime: Infinity,
+  });
+
   if (q.isLoading) return <div className="p-6 text-fg-muted">Loading…</div>;
   if (q.isError || !q.data) return <div className="p-6 text-danger-fg">Not found.</div>;
 
   const { post, snapshots, ghost_history } = q.data;
+  const editable = editQ.data;
 
   return (
     <div className="p-4 sm:p-6 space-y-6 max-w-5xl">
@@ -51,6 +86,16 @@ export default function PostDetailPage() {
           ← All posts
         </Link>
       </div>
+
+      {error && (
+        <div className="rounded border border-danger-border bg-danger/10 px-3 py-2 text-sm text-danger-fg">
+          {error}{" "}
+          <button onClick={() => setError(null)} className="underline">
+            dismiss
+          </button>
+        </div>
+      )}
+
 
       <div className="rounded-lg border border-border bg-surface p-4 space-y-3">
         <div className="flex items-start justify-between gap-3">
@@ -73,6 +118,25 @@ export default function PostDetailPage() {
         )}
         <div className="text-xs text-fg-subtle">post_id: {post.post_id} · source: {post.source}</div>
       </div>
+
+      {/* Recovery first: a degraded live posting is the one thing on this page
+          that cannot wait, and burying it under the editor would be wrong. */}
+      {editable && <PostRecovery post={editable} onError={setError} />}
+
+      {editQ.isError ? (
+        <p className="text-sm text-fg-subtle">
+          Could not load this post's editing state.
+        </p>
+      ) : editable ? (
+        <PostEditPanel
+          post={editable}
+          accounts={accountsQ.data?.accounts ?? []}
+          locations={locationsQ.data ?? null}
+          onError={setError}
+        />
+      ) : null}
+
+      {editable && <PostEditHistory attempts={editable.attempts ?? []} />}
 
       <section className="space-y-2">
         <h2 className="text-sm font-semibold text-fg-muted">Snapshot history</h2>

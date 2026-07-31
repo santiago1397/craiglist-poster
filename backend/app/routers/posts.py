@@ -16,6 +16,10 @@ def list_posts(
     ghost_filter: str | None = Query(default=None, alias="ghost"),
     since: str | None = Query(default=None, description="'all' | 'YYYY-MM-DD' | omit for 90d"),
     search: str | None = Query(default=None),
+    edit_filter: str | None = Query(
+        default=None, alias="edit",
+        description="'degraded' | 'parked' | 'pending'",
+    ),
     sort: str = Query(default="posted_ts"),
     sort_dir: str = Query(default="desc"),
     limit: int = Query(default=50, ge=1, le=200),
@@ -29,6 +33,7 @@ def list_posts(
             ghost_filter=ghost_filter,
             since=since,
             search=search,
+            edit_filter=edit_filter,
             sort=sort,
             sort_dir=sort_dir,
             limit=limit,
