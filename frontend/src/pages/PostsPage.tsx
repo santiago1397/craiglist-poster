@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Circle, ExternalLink, EyeOff } from "lucide-react";
+import { AlertTriangle, Circle, CircleOff, ExternalLink, EyeOff, HelpCircle } from "lucide-react";
 import { api } from "../lib/api";
 import { formatDate, formatNumber, formatRate } from "../lib/format";
 import { cn } from "../lib/cn";
+
+type Liveness = "live" | "ended" | "unknown";
 
 type PostRow = {
   post_id: string;
@@ -13,6 +15,10 @@ type PostRow = {
   url: string | null;
   posted_ts: string | null;
   status: string | null;
+  liveness: Liveness;
+  snapshot_date: string | null;
+  last_sync_date: string | null;
+  sync_age_days: number | null;
   impressions: number | null;
   views: number | null;
   shares: number | null;
@@ -23,7 +29,22 @@ type PostRow = {
   impressions_per_day: number | null;
 };
 
-type Resp = { total: number; limit: number; offset: number; items: PostRow[] };
+type SyncAccount = {
+  account: string;
+  last_sync_date: string | null;
+  age_days: number | null;
+  stale: boolean;
+};
+type SyncInfo = { accounts: SyncAccount[]; stale: boolean; stale_after_days: number };
+
+type Resp = {
+  total: number;
+  limit: number;
+  offset: number;
+  items: PostRow[];
+  counts: Partial<Record<Liveness, number>>;
+  sync: SyncInfo;
+};
 type AccountsResp = { accounts: string[] };
 
 const PAGE_SIZE = 50;
@@ -67,6 +88,8 @@ export default function PostsPage() {
 
   const items = q.data?.items ?? [];
   const total = q.data?.total ?? 0;
+  const counts = q.data?.counts ?? {};
+  const sync = q.data?.sync;
   const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
 
   const clickSort = (key: string) => {
@@ -81,7 +104,17 @@ export default function PostsPage() {
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
-      <h1 className="text-lg font-semibold">Posts</h1>
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <h1 className="text-lg font-semibold">Posts</h1>
+        <p className="text-sm text-fg-muted">
+          <span className="text-ok-fg">{formatNumber(counts.live ?? 0)} live</span>
+          {" · "}
+          {formatNumber(counts.ended ?? 0)} ended
+          {counts.unknown ? ` · ${formatNumber(counts.unknown)} never checked` : null}
+        </p>
+      </div>
+
+      {sync?.stale && <StaleSyncBanner sync={sync} />}
 
       <div className="grid gap-3 grid-cols-1 md:grid-cols-2 lg:grid-cols-6">
         <input
@@ -116,9 +149,10 @@ export default function PostsPage() {
           }}
           className="rounded bg-surface border border-border px-2 py-1.5 text-sm"
         >
-          <option value="">Any status</option>
-          <option value="active">Active</option>
-          <option value="inactive">Inactive</option>
+          <option value="">Live and ended</option>
+          <option value="active">Live only</option>
+          <option value="inactive">Ended only</option>
+          <option value="unknown">Never checked</option>
         </select>
         <select
           value={ghost}
@@ -186,7 +220,7 @@ export default function PostsPage() {
                   {r.account} · {formatDate(r.posted_ts)} · {r.post_id}
                 </p>
               </Link>
-              <StatusChip status={r.status} ghosted={r.ghosted} />
+              <StatusChip liveness={r.liveness} ghosted={r.ghosted} staleDays={r.sync_age_days} />
             </div>
             <dl className="mt-2 grid grid-cols-4 gap-2 text-center">
               {[
@@ -252,7 +286,11 @@ export default function PostsPage() {
                   {formatDate(r.posted_ts)}
                 </td>
                 <td className="px-3 py-2">
-                  <StatusChip status={r.status} ghosted={r.ghosted} />
+                  <StatusChip
+                  liveness={r.liveness}
+                  ghosted={r.ghosted}
+                  staleDays={r.sync_age_days}
+                />
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.impressions)}</td>
                 <td className="px-3 py-2 text-right tabular-nums">{formatNumber(r.views)}</td>
@@ -346,7 +384,48 @@ function SortHeader({
   );
 }
 
-function StatusChip({ status, ghosted }: { status: string | null; ghosted: boolean | null }) {
+function StaleSyncBanner({ sync }: { sync: SyncInfo }) {
+  const worst = [...sync.accounts].sort((a, b) => (b.age_days ?? 0) - (a.age_days ?? 0))[0];
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-warn-border bg-warn px-3 py-2 text-sm text-warn-fg">
+      <AlertTriangle size={16} className="mt-0.5 shrink-0" aria-hidden="true" />
+      <div>
+        <p className="font-medium">
+          Stats are {worst?.age_days ?? "?"} days stale — nothing below is confirmed current.
+        </p>
+        <p className="text-xs opacity-90 mt-0.5">
+          The daily scrape last ran{" "}
+          {sync.accounts.map((a) => `${a.account}: ${a.last_sync_date ?? "never"}`).join(" · ")}.
+          Until it runs again, "live" only means the post was up on that date.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+const LIVENESS_STYLE: Record<Liveness, { label: string; cls: string; Icon: typeof Circle }> = {
+  live: { label: "live", cls: "bg-ok text-ok-fg border-ok-border", Icon: Circle },
+  ended: {
+    label: "ended",
+    cls: "bg-surface-2 text-fg-muted border-border-strong",
+    Icon: CircleOff,
+  },
+  unknown: {
+    label: "not checked",
+    cls: "bg-surface-2 text-fg-subtle border-border",
+    Icon: HelpCircle,
+  },
+};
+
+function StatusChip({
+  liveness,
+  ghosted,
+  staleDays,
+}: {
+  liveness: Liveness;
+  ghosted: boolean | null;
+  staleDays: number | null;
+}) {
   if (ghosted === true) {
     return (
       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-danger text-danger-fg border border-danger-border">
@@ -355,23 +434,25 @@ function StatusChip({ status, ghosted }: { status: string | null; ghosted: boole
       </span>
     );
   }
-  // Craigslist reports "active" lowercase and event ingest stores it verbatim,
-  // so the old `status === "Active"` never matched: every live post rendered in
-  // the grey "unknown" style instead of green.
-  const active = (status ?? "").toLowerCase() === "active";
+  // Reads the derived `liveness`, not Craigslist's raw status string. The raw
+  // one arrives as both "Active" and "active", and — more importantly — it is
+  // whatever the last scrape saw, so it keeps asserting "Active" forever once
+  // the scrape stops. A post that has dropped off the active tab has no row at
+  // all, which is an absence only the server-side derivation can read.
+  const { label, cls, Icon } = LIVENESS_STYLE[liveness] ?? LIVENESS_STYLE.unknown;
+  // A "live" badge backed by a week-old scrape is qualified rather than shown
+  // plain, so staleness is visible on the row and not only in the banner.
+  const unconfirmed = liveness === "live" && staleDays != null && staleDays > 2;
   return (
     <span
-      className={cn(
-        "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border",
-        active
-          ? "bg-ok text-ok-fg border-ok-border"
-          : "bg-surface-2 text-fg-muted border-border-strong",
-      )}
+      className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs border", cls)}
+      title={unconfirmed ? `Last confirmed ${staleDays} days ago` : undefined}
     >
       {/* An icon as well as a colour: red-vs-green alone excludes the ~8% of
           men with red-green colour blindness. */}
-      {active ? <Circle size={12} aria-hidden="true" /> : null}
-      {status || "unknown"}
+      <Icon size={12} aria-hidden="true" />
+      {label}
+      {unconfirmed && <span className="opacity-70">({staleDays}d ago)</span>}
     </span>
   );
 }
