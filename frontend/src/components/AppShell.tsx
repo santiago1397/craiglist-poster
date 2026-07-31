@@ -2,9 +2,13 @@
 //
 // The previous NavBar was a single non-wrapping flex row of five links plus an
 // email plus a logout button. At 390px it forced the document to 649px, so
-// every page scrolled sideways. Below md the links move into a drawer and the
-// header keeps only what matters on a phone: where you are, whether the system
-// is healthy, and a way out.
+// every page scrolled sideways. Below lg the links move into a drawer and the
+// header keeps only what matters on a small screen: where you are, whether the
+// system is healthy, and a way out.
+//
+// The split is lg, not md. Six nav links plus the status pill and the theme
+// toggle measured 836px, so at exactly 768 the header overflowed again — the
+// original bug, moved rather than fixed.
 
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
@@ -99,16 +103,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Dialog.Root open={drawer} onOpenChange={setDrawer}>
             <Dialog.Trigger
               aria-label="Open navigation menu"
-              className="md:hidden rounded p-2 -ml-1 text-fg-muted hover:text-fg hover:bg-surface-2"
+              className="lg:hidden rounded p-2 -ml-1 text-fg-muted hover:text-fg hover:bg-surface-2"
             >
               <Menu size={20} aria-hidden="true" />
             </Dialog.Trigger>
 
             <Dialog.Portal>
-              <Dialog.Overlay className="fixed inset-0 bg-black/60 z-40 md:hidden" />
+              <Dialog.Overlay className="fixed inset-0 bg-black/60 z-40 lg:hidden" />
               <Dialog.Content
                 className={cn(
-                  "fixed z-50 inset-y-0 left-0 w-72 max-w-[85vw] md:hidden",
+                  "fixed z-50 inset-y-0 left-0 w-72 max-w-[85vw] lg:hidden",
                   "bg-surface border-r border-border flex flex-col focus:outline-none",
                 )}
               >
@@ -165,7 +169,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <span className="sm:hidden">CL</span>
           </Link>
 
-          <nav className="hidden md:flex items-center gap-1">
+          <nav className="hidden lg:flex items-center gap-1">
             {NAV.map(({ to, label }) => (
               <Link
                 key={to}
@@ -185,19 +189,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
           <div className="ml-auto flex items-center gap-2 sm:gap-3 min-w-0">
             <StatusPill />
-            <div className="hidden md:block">
+            <div className="hidden lg:block">
               <ThemeToggle />
             </div>
-            <span className="hidden lg:inline text-sm text-fg-muted truncate max-w-[14rem]">
+            <span className="hidden xl:inline text-sm text-fg-muted truncate max-w-[14rem]">
               {user.email}
             </span>
             <button
               onClick={logout}
               aria-label="Log out"
-              className="hidden md:inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-sm text-fg-muted hover:bg-surface-2 hover:text-fg"
+              className="hidden lg:inline-flex items-center gap-1.5 rounded px-2 py-1.5 text-sm text-fg-muted hover:bg-surface-2 hover:text-fg"
             >
               <LogOut size={16} aria-hidden="true" />
-              <span className="hidden xl:inline">Log out</span>
+              <span className="sr-only">Log out</span>
             </button>
           </div>
         </div>
