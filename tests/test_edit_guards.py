@@ -141,6 +141,27 @@ if _url_token is not None:
             failures.append(f"url token ({label}): expected {want!r}, got {got!r}")
 
 
+# --- the gallery's hidden template must never be counted -------------------
+# ?s=editimage renders a 25th <figure class="imgbox template"> with no id and no
+# <img>, cloned by the uploader for each new image. If the thumbnail selector
+# counts it, a 24-image replace deletes 24 real photos and then fails its own
+# "thumbnails == photos" assertion at 25 vs 24 — raising with mutated=True,
+# which is `degraded_live`, on a posting that was healthy a minute earlier.
+try:
+    from craigslist_auto.editor import SEL as _SEL
+except Exception as e:  # pragma: no cover
+    _SEL = None
+    print(f"(skipping gallery-selector checks: {e})")
+
+if _SEL is not None:
+    if ".template" not in _SEL["image_thumb"]:
+        failures.append(
+            "image_thumb no longer excludes the gallery's hidden template figure"
+        )
+    if "imgbox" not in _SEL["image_thumb"]:
+        failures.append("image_thumb no longer targets the observed figure.imgbox")
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
