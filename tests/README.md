@@ -14,6 +14,7 @@ uv run python tests/test_outbox_guard.py     # only unsent *posted* attempts blo
 uv run python tests/test_browser_lease.py    # two flows can't share one Chrome profile
 uv run python tests/test_edit_guards.py      # content hash, edit clamps, posting-slot guard
 uv run python tests/test_failure_reporting.py # every failure reaches the VPS debuggable
+uv run python tests/test_queue_retry.py      # reads retry, claims never do
 PYTHONPATH=backend uv run python tests/test_agent_api.py  # agent auth boundaries + the caveats in every answer
 PYTHONPATH=backend uv run python tests/test_agent_tools.py # the CLI and MCP wrappers in tools/
 ```
@@ -41,6 +42,16 @@ on is classified pre- or post-upload, and a degraded post keeps
 `poster.py` and this test fails until you classify it** in
 `PRE_UPLOAD_STEPS` — which is the point, because an unclassified step parks a
 draft that did not need parking. See [DIAGNOSTICS.md](../DIAGNOSTICS.md).
+
+`test_queue_retry.py` covers the half of the retry policy that is easy to get
+wrong. Reads retry, because one dropped TCP connection used to end a whole
+posting run — two were observed in a single day, one landing exactly on the
+09:00 slot, and every VPS container restart did the same thing because Traefik
+answers 404 or 502 while the API is being recreated. **Claims must never
+retry**: if the server handled a claim and the response was lost coming back, a
+second attempt takes a second draft while the first sits `claimed` until the
+stale-claim reaper frees it. A missed read costs seconds; a duplicated claim
+costs a draft.
 
 `test_events_schema.py` covers the thing most likely to break silently: an
 outbox written by an older build must still validate after a schema change, or

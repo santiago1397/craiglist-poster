@@ -7,10 +7,14 @@
 # poster requires an interactive desktop (Chrome) and posts run under the
 # same user session anyway, this piggybacks on that assumption.
 #
-# Usage:  Right-click → Run with PowerShell
+# Usage:  Right-click -> Run with PowerShell
 #         (or: powershell -ExecutionPolicy Bypass -File install-reporter-daemon.ps1)
 
 $ErrorActionPreference = "Stop"
+
+# Registration goes through the shared helper, which verifies the task actually
+# landed instead of trusting the cmdlet. See _scheduled_task.ps1.
+. "$PSScriptRoot\_scheduled_task.ps1"
 
 $TaskName = "CL Reporter Daemon"
 
@@ -22,11 +26,6 @@ if (-not $uv) {
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Write-Host "Project root: $projectRoot"
-
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Write-Host "Removing existing task '$TaskName'..."
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-}
 
 $action = New-ScheduledTaskAction `
     -Execute $uv `
@@ -46,19 +45,30 @@ $settings = New-ScheduledTaskSettingsSet `
 
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
-Register-ScheduledTask `
+Install-ClScheduledTask `
     -TaskName $TaskName `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Drains the reporter outbox to the VPS and emits AccountState heartbeats." | Out-Null
+    -Description "Drains the reporter outbox to the VPS and emits AccountState heartbeats." `
+    -ExpectedExecute $uv `
+    -ExpectedWorkingDirectory $projectRoot
 
-# Start it right now too so we don't have to wait for a re-logon
+# Start it right now too so we don't have to wait for a re-logon. Checked
+# rather than assumed: this daemon is what drains the outbox, so a silent
+# failure to start looks exactly like "nothing has gone wrong yet".
 Start-ScheduledTask -TaskName $TaskName
+Start-Sleep -Seconds 2
+$state = (Get-ScheduledTask -TaskName $TaskName).State
+if ($state -eq "Running") {
+    Write-Host "  Started, and running now." -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: started it, but the task reports '$state', not 'Running'." -ForegroundColor Yellow
+    Write-Host "           Until it runs, nothing drains the outbox to the dashboard."
+    Write-Host "           Check:  Get-ScheduledTaskInfo -TaskName '$TaskName'"
+}
 
-Write-Host ""
-Write-Host "Task '$TaskName' installed and started." -ForegroundColor Green
 Write-Host "  Auto-restarts every minute if it exits."
 Write-Host "  To stop:    Stop-ScheduledTask -TaskName '$TaskName'"
 Write-Host "  To pause:   Disable-ScheduledTask -TaskName '$TaskName'"

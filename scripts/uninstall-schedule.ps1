@@ -1,6 +1,6 @@
 # Removes the "CL Auto Post" Scheduled Task.
 #
-# Usage:  Right-click → Run with PowerShell
+# Usage:  Right-click -> Run with PowerShell
 #         (or: powershell -ExecutionPolicy Bypass -File uninstall-schedule.ps1)
 
 $ErrorActionPreference = "Stop"
