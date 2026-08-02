@@ -118,6 +118,16 @@ def _account_names(conn: psycopg.Connection) -> list[str]:
     return [r["account"] for r in rows]
 
 
+def known_accounts(conn: psycopg.Connection) -> list[str]:
+    """Public name for the account list, for callers outside this module.
+
+    The compose surface validates a draft's account against it — a typo would
+    otherwise create a draft in an account no machine is bound to, which sits in
+    the queue looking healthy and never posts.
+    """
+    return _account_names(conn)
+
+
 def _machines(conn: psycopg.Connection, now: datetime) -> list[dict]:
     rows = conn.execute(
         """
@@ -994,4 +1004,119 @@ def render_inventory(d: dict) -> str:
         "",
         f"Lifetime image generation spend: ${d['spend_usd']:.2f}.",
     ]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# /agent/locations
+# ---------------------------------------------------------------------------
+
+def locations_report(conn: psycopg.Connection) -> dict:
+    """Where an ad may be placed, and where the existing ones already are.
+
+    Two things an agent composing a draft cannot work out for itself:
+
+    The county list is closed. `poster._select_subarea()` picks the Craigslist
+    subarea radio by substring-matching the county string, and an unrecognised
+    value does not raise — it falls through to "pick the first radio" and the ad
+    publishes under the wrong subarea with nothing anywhere reporting it. So the
+    valid set has to be stated, and `subarea_supported` has to travel with it.
+
+    "Somewhere we are not already posting" is a fact about current inventory,
+    not a judgement. Reported here so the agent reads it instead of guessing —
+    and so a city that has three live ads is visibly not a fresh location.
+    """
+    from ..reference import as_payload
+
+    payload = as_payload(conn)
+
+    rows = conn.execute(
+        """
+        SELECT county, city, COUNT(*) AS n FROM (
+            SELECT county, city FROM drafts
+            WHERE status IN ('queued', 'claimed', 'needs_attention')
+            UNION ALL
+            SELECT county, city FROM posts
+            WHERE posted_ts IS NOT NULL AND posted_ts >= NOW() - INTERVAL '90 days'
+        ) AS both
+        WHERE COALESCE(city, '') <> ''
+        GROUP BY county, city
+        """
+    ).fetchall()
+    in_use = {(r["county"] or "", r["city"] or ""): r["n"] for r in rows}
+
+    counties: list[dict] = []
+    for county in payload["counties"]:
+        cities = [
+            {
+                "city": c["city"],
+                "zip": c["zip"],
+                "in_use": in_use.get((county["name"], c["city"]), 0),
+            }
+            for c in county["cities"]
+        ]
+        counties.append({
+            "name": county["name"],
+            "subarea_supported": county["subarea_supported"],
+            "cities": cities,
+            "unused_cities": [c["city"] for c in cities if not c["in_use"]],
+        })
+
+    return {
+        "now": datetime.now(timezone.utc),
+        "counties": counties,
+        "phone_numbers": payload["phone_numbers"],
+        "license_number": payload["license_number"],
+        "service_offered": payload["service_offered"],
+        "total_cities": sum(len(c["cities"]) for c in counties),
+        "unused_total": sum(len(c["unused_cities"]) for c in counties),
+    }
+
+
+def render_locations(d: dict) -> str:
+    lines = [
+        "LOCATIONS — where an ad may be placed",
+        f"As of {_dt(d['now'])}.",
+        "",
+        "This list is closed, not a suggestion. The posting desktop picks the "
+        "Craigslist subarea by matching the county name; a county that is not "
+        "below does not fail, it silently files the ad under the wrong subarea. "
+        "Use these spellings exactly.",
+        "",
+        f"'in use' counts queued drafts plus posts published in the last 90 "
+        f"days. {d['unused_total']} of {d['total_cities']} cities currently "
+        f"carry nothing — those are the ones to pick from if you were asked for "
+        f"somewhere we are not already advertising.",
+    ]
+
+    for county in d["counties"]:
+        lines += ["", f"{county['name']}:"]
+        if not county["subarea_supported"]:
+            lines.append(
+                "  NOT USABLE — the desktop has no subarea mapping for this "
+                "county. Do not place an ad here; it would publish under the "
+                "wrong subarea."
+            )
+        for c in county["cities"]:
+            used = (
+                f"in use by {c['in_use']} ad{'s' if c['in_use'] != 1 else ''}"
+                if c["in_use"] else "free"
+            )
+            lines.append(f"  {c['city']:24s} zip {c['zip']:6s}  {used}")
+
+    lines += [
+        "",
+        "Licence and phone are not free text either — an ad carries a real "
+        "contractor licence and a tracked number.",
+        f"  Licence number: {d['license_number']}",
+        f"  Service offered: {d['service_offered']}",
+        "  Active phone numbers (any one of these is valid):",
+    ]
+    for phone in d["phone_numbers"]:
+        lines.append(f"    {phone}")
+    if not d["phone_numbers"]:
+        lines.append(
+            "    (none active — every number has been retired. Ask the operator "
+            "before writing a draft with no contact number.)"
+        )
     return "\n".join(lines)

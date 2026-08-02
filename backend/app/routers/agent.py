@@ -19,20 +19,25 @@ agent than no manual, because it will follow it.
 from __future__ import annotations
 
 import inspect
+import typing
 
 import fastapi.params
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from ..db import conn, tx
-from ..security import require_agent_post, require_agent_read
+from ..reference import LOCATIONS, subarea_supported
+from ..security import (
+    require_agent_compose, require_agent_post, require_agent_read,
+)
 from ..services import agent as agent_svc
 from ..services import drafts as drafts_svc
+from ..services import images as images_svc
 
 router = APIRouter()
 
@@ -42,6 +47,7 @@ router = APIRouter()
 _limiter = Limiter(key_func=get_remote_address)
 
 _READ = Depends(require_agent_read)
+_COMPOSE = Depends(require_agent_compose)
 
 
 def _respond(data: dict, text: str, fmt: str):
@@ -69,12 +75,19 @@ HOW TO CALL IT
   Responses are plain English by default. Add `&format=json` if you need to
   parse one.
 
-WHAT YOU CAN AND CANNOT DO
-  Everything here is read-only except POST /agent/post-now, which publishes a
-  draft you have already had a human approve. You cannot create drafts, write
-  ad copy, change guardrails, edit live ads, or spend money on image
-  generation. If you were asked to do one of those, say it is not available
-  through this API rather than trying to find another route.
+WHAT NOBODY CAN DO THROUGH THIS API
+  Change the guardrails, edit an ad that is already live, mark a draft as
+  reviewed, or manage keys and accounts. Those are dashboard-only, whatever
+  your key says. If you were asked to do one of them, say it is not available
+  here rather than looking for another route.
+
+THE ONE RULE THAT MATTERS
+  A draft is created UNREVIEWED and cannot publish until a human opens the
+  dashboard and marks it reviewed. Nothing in this API can set that flag. So
+  you may be able to write an ad, but a person decides whether its words go
+  out on a live listing under a real contractor licence. Do not describe a
+  draft you created as "posted", "live" or "scheduled" — it is none of those
+  until someone reviews it.
 
 THREE THINGS THAT WILL MISLEAD YOU IF YOU DO NOT KNOW THEM
   1. View and impression counters come from a scrape that runs ONCE A DAY at
@@ -116,34 +129,93 @@ EXAMPLES
 """
 
 
+def _type_name(annotation) -> str:
+    """A readable type for the manual, not a repr.
+
+    `str | None` arrives as `typing.Optional[str]` and renders as
+    "typing.Optional[str]" unless something intervenes. An agent reading that
+    learns less than it would from "string".
+    """
+    simple = {str: "string", int: "integer", float: "number", bool: "boolean"}
+    if annotation in simple:
+        return simple[annotation]
+    args = [a for a in getattr(annotation, "__args__", ()) if a is not type(None)]
+    if len(args) == 1:
+        return _type_name(args[0])
+    origin = getattr(annotation, "__origin__", None)
+    if origin is list:
+        return f"list of {_type_name(args[0])}" if args else "list"
+    return getattr(annotation, "__name__", str(annotation))
+
+
+def _describe_body(model: type[BaseModel]) -> list[str]:
+    """Document a request body from the pydantic model itself.
+
+    Without this, every compose endpoint appears in the manual as a bare POST
+    with no indication of what to send — and `/agent/help` is the first and
+    often only thing an agent reads. A model that guesses the field names will
+    get a 422 it cannot diagnose.
+    """
+    lines: list[str] = []
+    for name, field in model.model_fields.items():
+        kind = _type_name(field.annotation)
+        if field.is_required():
+            state = "required"
+        else:
+            default = field.default
+            # An empty-string default reads as "default: " and teaches nothing.
+            # Those fields are the ones the server fills in for you, and their
+            # descriptions say so.
+            state = "optional" if default in (None, "") else f"default: {default}"
+        note = f" — {field.description}" if field.description else ""
+        lines.append(f"      {name} ({kind}, {state}){note}")
+    return lines
+
+
 def _describe_routes(base: str) -> str:
     """Build the endpoint list from the live route table.
 
-    Uses each endpoint's own signature and docstring, so a parameter that
-    exists is documented and one that does not cannot be.
+    Uses each endpoint's own signature, body model and docstring, so a
+    parameter that exists is documented and one that does not cannot be.
     """
     blocks: list[str] = []
     for route in router.routes:
         if not isinstance(route, APIRoute) or route.path == "/help":
             continue
-        method = "POST" if "POST" in route.methods else "GET"
+        method = next(
+            (m for m in ("POST", "PATCH", "PUT", "DELETE") if m in route.methods),
+            "GET",
+        )
         doc = inspect.getdoc(route.endpoint) or ""
         summary = doc.split("\n\n")[0].replace("\n", " ").strip()
 
         params: list[str] = []
+        body: list[str] = []
+        # This module carries `from __future__ import annotations`, so every
+        # annotation in the signature is a *string*. Resolving them is not
+        # optional decoration: without it no request body is ever recognised,
+        # and the compose endpoints document themselves as taking nothing.
+        try:
+            hints = typing.get_type_hints(route.endpoint)
+        except Exception:  # pragma: no cover — an annotation we cannot resolve
+            hints = {}
         for name, param in inspect.signature(route.endpoint).parameters.items():
             default = param.default
-            if not isinstance(default, fastapi.params.Query):
+            if isinstance(default, fastapi.params.Query):
+                description = getattr(default, "description", None) or ""
+                fallback = getattr(default, "default", None)
+                shown = "" if fallback in (None, Ellipsis) else f" (default: {fallback})"
+                params.append(f"      {name}{shown} — {description}".rstrip(" —"))
                 continue
-            description = getattr(default, "description", None) or ""
-            fallback = getattr(default, "default", None)
-            shown = "" if fallback in (None, Ellipsis) else f" (default: {fallback})"
-            params.append(f"      {name}{shown} — {description}".rstrip(" —"))
+            annotation = hints.get(name)
+            if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                body = _describe_body(annotation)
 
         blocks.append(
             f"  {method} {base}/agent{route.path}\n"
             f"    {summary}"
             + ("\n    Parameters:\n" + "\n".join(params) if params else "")
+            + ("\n    JSON body:\n" + "\n".join(body) if body else "")
         )
     return "\n\n".join(blocks)
 
@@ -160,14 +232,31 @@ def help_page(request: Request, identity: dict = _READ):
         + _HELP_CLOSING.format(base=base)
     )
     scope = identity["scope"]
+    powers = {
+        "read": (
+            "  This key is read-only. Every write below will refuse it — "
+            "composing needs an 'agent'-scope key and publishing needs 'post' "
+            "or 'agent'.\n"
+        ),
+        "post": (
+            "  This key may read, and may publish drafts a human has already "
+            "reviewed via POST /agent/post-now. It cannot create drafts or "
+            "generate images; that needs an 'agent'-scope key.\n"
+        ),
+        "agent": (
+            "  This key may read, compose (generate images, create drafts, "
+            "attach pictures) and publish reviewed drafts. It still cannot mark "
+            "a draft reviewed — a person does that in the dashboard, and until "
+            "they do, nothing you write can go out.\n"
+            "  It must be sent as a header on EVERY request, including reads. A "
+            "key that can publish is not allowed in a URL, because URLs are "
+            "written to access logs.\n"
+        ),
+    }
     body += (
         "\nYOUR KEY\n"
         f"  Label: {identity['label'] or '(unlabelled)'} — scope: {scope}.\n"
-        + (
-            "  This key is read-only. POST /agent/post-now will refuse it.\n"
-            if scope != "post"
-            else "  This key may publish reviewed drafts via POST /agent/post-now.\n"
-        )
+        + powers.get(scope, powers["read"])
     )
     return PlainTextResponse(body)
 
@@ -299,7 +388,378 @@ def inventory_endpoint(
 
 
 # ---------------------------------------------------------------------------
-# The one write
+# Compose — everything below needs an 'agent'-scope key, header-only.
+#
+# Each route is a thin wrapper over the service the dashboard already calls, so
+# the two surfaces cannot drift apart. What is added here is the boundary, not
+# behaviour: an agent may not set `reviewed`, may not set `status`, and may only
+# approve an image it generated itself.
+# ---------------------------------------------------------------------------
+
+@router.get("/locations")
+@_limiter.limit("60/minute")
+def locations_endpoint(
+    request: Request,
+    format: str = Query(default="text", description="'text' (default) or 'json'"),
+    identity: dict = _COMPOSE,
+):
+    """The counties and cities an ad may be placed in, which of them are
+    already in use, and the licence and phone numbers a draft must carry."""
+    with conn() as c:
+        data = agent_svc.locations_report(c)
+    return _respond(data, agent_svc.render_locations(data), format)
+
+
+class GenerateImageBody(BaseModel):
+    prompt: str | None = Field(
+        default=None,
+        description=(
+            "What to draw. Omit to use the stored prompt for this kind. Do not "
+            "ask for text in the picture — wording is composited separately and "
+            "diffusion models render it badly."
+        ),
+    )
+    kind: str = Field(
+        default="photo",
+        pattern="^(photo|cover)$",
+        description=(
+            "'cover' is the Craigslist thumbnail in slot 1 and is the only kind "
+            "slot 1 accepts. 'photo' fills slots 2-24."
+        ),
+    )
+    count: int = Field(default=1, ge=1, le=10, description="How many to generate.")
+    city: str | None = Field(
+        default=None, description="Interpolated into the stored prompt as {city}."
+    )
+
+
+@router.post("/images/generate")
+@_limiter.limit("10/minute")
+def generate_image_endpoint(
+    request: Request, body: GenerateImageBody, identity: dict = _COMPOSE
+):
+    """Generate one or more images. Costs real money and lands them unapproved —
+    they cannot be attached to anything until approved."""
+    with tx() as c:
+        result = images_svc.generate_images(
+            c,
+            count=body.count,
+            city=body.city,
+            kind=body.kind,
+            prompt_override=body.prompt,
+            created_by_key_id=identity["id"],
+        )
+    return {
+        **result,
+        "message": (
+            f"Generated {result['created']} {body.kind}(s) at a cost of "
+            f"${result['cost_usd']:.4f}. They are PENDING: approve one with "
+            f"POST /agent/images/{{id}}/approve before attaching it. Show the "
+            f"operator what was made and let them decide."
+        ),
+    }
+
+
+@router.post("/images/{image_id}/approve")
+@_limiter.limit("60/minute")
+def approve_image_endpoint(
+    request: Request, image_id: int, identity: dict = _COMPOSE
+):
+    """Approve an image YOU generated so it can be attached. Refuses any image
+    generated by a human or by a different key."""
+    with tx() as c:
+        # The whole of the agent's authority over the stack. An agent curates
+        # what it made; the operator's own images are not its to judge.
+        if not images_svc.was_created_by_key(c, image_id, identity["id"]):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Image {image_id} was not generated by this key, so this "
+                    f"key cannot approve it. You may only approve images you "
+                    f"generated yourself. Ask the operator to approve it on the "
+                    f"Images page."
+                ),
+            )
+        row = images_svc.set_status(c, image_id, "approved")
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"No image with id {image_id}."
+        )
+    return row
+
+
+class DraftCreateBody(BaseModel):
+    """What an agent may set on a new draft.
+
+    `reviewed` and `status` are absent on purpose, and their absence is the
+    publishing gate. `create_draft` forces `reviewed = False` for any
+    agent-written draft regardless of what reaches it.
+
+    `extra='forbid'` matters here beyond tidiness. Pydantic's default is to
+    ignore unknown fields, so a caller sending `reviewed: true` would get a 201
+    and a draft it believed was approved — the single most dangerous
+    misunderstanding available on this surface. Refusing the request says no out
+    loud instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    account: str = Field(description="Which account will post it, e.g. craigs1.")
+    title: str = Field(description="The Craigslist posting title.")
+    body: str = Field(description="The ad copy. Capped at 15,000 characters.")
+    county: str = Field(description="Must be one of GET /agent/locations exactly.")
+    city: str = Field(description="Must be a city listed under that county.")
+    postal_code: str = Field(default="", description="Defaults to the city's zip.")
+    license_number: str = Field(
+        default="", description="Defaults to the licence from /agent/locations."
+    )
+    phone_number: str = Field(
+        default="", description="Must be one of the active numbers."
+    )
+    service_offered: str = Field(default="", description="Defaults to the standard value.")
+    body_head: str | None = Field(
+        default=None,
+        description=(
+            "The ad copy without the shared keyword tail. Set this when the body "
+            "carries a tail, so similarity is scored on the part that varies."
+        ),
+    )
+
+
+def _validate_location(county: str, city: str) -> None:
+    """Refuse a county or city the posting desktop cannot route.
+
+    `poster._select_subarea()` matches the county by substring to choose the
+    Craigslist subarea radio. An unrecognised county does not raise there — it
+    falls through to the first radio and the ad publishes under the wrong
+    subarea, with nothing anywhere reporting it. The cheapest place to stop that
+    is at the point of authoring, which is here.
+    """
+    if county not in LOCATIONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"{county!r} is not a county this system can post to. Call "
+                f"GET /agent/locations for the exact list — the spelling has to "
+                f"match, because the desktop picks the Craigslist subarea from it."
+            ),
+        )
+    if not subarea_supported(county):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"{county} has no subarea mapping on the posting desktop, so an "
+                f"ad placed there would publish under the wrong subarea. Pick a "
+                f"county marked usable in GET /agent/locations."
+            ),
+        )
+    known = [c for c, _ in LOCATIONS[county]]
+    if city not in known:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"{city!r} is not a listed city in {county}. Valid: "
+                f"{', '.join(known)}."
+            ),
+        )
+
+
+@router.post("/drafts", status_code=status.HTTP_201_CREATED)
+@_limiter.limit("30/minute")
+def create_draft_endpoint(
+    request: Request, body: DraftCreateBody, identity: dict = _COMPOSE
+):
+    """Write a new draft into the queue. It is created UNREVIEWED and cannot
+    publish until a human reviews it in the dashboard."""
+    from ..reference import LICENSE_NUMBER, SERVICE_OFFERED
+
+    _validate_location(body.county, body.city)
+    payload = body.model_dump()
+    payload["source"] = f"agent:{identity['label'] or identity['id']}"
+    if not payload["postal_code"]:
+        payload["postal_code"] = dict(LOCATIONS[body.county])[body.city]
+    if not payload["license_number"]:
+        payload["license_number"] = LICENSE_NUMBER
+    if not payload["service_offered"]:
+        payload["service_offered"] = SERVICE_OFFERED
+
+    with tx() as c:
+        known = agent_svc.known_accounts(c)
+        if known and body.account not in known:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown account {body.account!r}. Known: {', '.join(known)}.",
+            )
+        try:
+            draft = drafts_svc.create_draft(
+                c, payload, created_by_key_id=identity["id"]
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+            )
+    return {
+        **draft,
+        "message": (
+            f"Draft {draft['id']} created for {draft['account']}, UNREVIEWED. It "
+            f"has no images yet — attach a cover to slot 1 and autofill the "
+            f"photos. It cannot publish until a human marks it reviewed in the "
+            f"dashboard, so do not describe it as scheduled or live."
+        ),
+    }
+
+
+class DraftPatchBody(BaseModel):
+    """Fields an agent may change on a draft it wrote. No `reviewed`, no
+    `status` — those decide whether an ad publishes, and are not an agent's."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    body: str | None = None
+    body_head: str | None = None
+    county: str | None = None
+    city: str | None = None
+    postal_code: str | None = None
+    license_number: str | None = None
+    phone_number: str | None = None
+
+
+@router.patch("/drafts/{draft_id}")
+@_limiter.limit("30/minute")
+def patch_draft_endpoint(
+    request: Request, draft_id: int, body: DraftPatchBody, identity: dict = _COMPOSE
+):
+    """Change a draft this key created. Cannot touch a draft written by a human
+    or by another key, and cannot mark anything reviewed."""
+    payload = body.model_dump(exclude_unset=True)
+    with tx() as c:
+        existing = drafts_svc.get_draft(c, draft_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"No draft with id {draft_id}."
+            )
+        if existing.get("created_by_key_id") != identity["id"]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Draft {draft_id} was not created by this key. An agent may "
+                    f"only edit its own drafts; ask the operator to change this "
+                    f"one in the dashboard."
+                ),
+            )
+        if existing["status"] != "queued":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Draft {draft_id} is {existing['status']}, not queued.",
+            )
+        county = payload.get("county", existing["county"])
+        city = payload.get("city", existing["city"])
+        if ("county" in payload or "city" in payload) and county:
+            _validate_location(county, city or "")
+        # Belt and braces. `reviewed` and `status` are not on DraftPatchBody, so
+        # they cannot arrive — but `update_draft` would honour them if they ever
+        # did, and this is the flag that decides whether an ad goes live.
+        payload.pop("reviewed", None)
+        payload.pop("status", None)
+        try:
+            return drafts_svc.update_draft(c, draft_id, payload)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+            )
+
+
+@router.get("/drafts/{draft_id}")
+@_limiter.limit("60/minute")
+def get_draft_endpoint(request: Request, draft_id: int, identity: dict = _COMPOSE):
+    """Read back one draft with its images and its similarity to existing copy."""
+    with conn() as c:
+        draft = drafts_svc.get_draft(c, draft_id)
+        if draft is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"No draft with id {draft_id}."
+            )
+        head = draft.get("body_head") or draft.get("body") or ""
+        draft["similarity"] = drafts_svc.similarity_report(
+            c, head=head, exclude_draft_id=draft_id
+        )
+        draft["images"] = images_svc.images_for_draft(c, draft_id)
+    return draft
+
+
+class AttachCoverBody(BaseModel):
+    image_id: int = Field(
+        description="An approved cover image. Photos are refused — slot 1 takes covers only."
+    )
+
+
+@router.post("/drafts/{draft_id}/cover")
+@_limiter.limit("30/minute")
+def attach_cover_endpoint(
+    request: Request, draft_id: int, body: AttachCoverBody, identity: dict = _COMPOSE
+):
+    """Put an approved cover image in slot 1 — the Craigslist thumbnail."""
+    with tx() as c:
+        draft = drafts_svc.get_draft(c, draft_id)
+        if draft is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"No draft with id {draft_id}."
+            )
+        try:
+            return images_svc.attach(
+                c,
+                draft_id=draft_id,
+                image_id=body.image_id,
+                slot=images_svc.COVER_SLOT,
+            )
+        except ValueError as e:
+            # 409 with the service's wording: "image is not approved yet" and
+            # "slot 1 takes a cover" are both things the caller can act on.
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+
+
+class AutofillBody(BaseModel):
+    count: int = Field(
+        default=images_svc.MAX_SLOTS - 1,
+        ge=1,
+        le=images_svc.MAX_SLOTS - 1,
+        description="How many photo slots to fill. Defaults to all 23.",
+    )
+
+
+@router.post("/drafts/{draft_id}/autofill")
+@_limiter.limit("30/minute")
+def autofill_endpoint(
+    request: Request, draft_id: int, body: AutofillBody, identity: dict = _COMPOSE
+):
+    """Fill the draft's empty photo slots from the approved photo stack. Never
+    replaces a picture already chosen and never touches slot 1."""
+    with tx() as c:
+        draft = drafts_svc.get_draft(c, draft_id)
+        if draft is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"No draft with id {draft_id}."
+            )
+        attached = images_svc.fill_photo_slots(
+            c, draft_id=draft_id, account=draft["account"], want=body.count
+        )
+        health = images_svc.stack_health(c)
+    return {
+        "filled": len(attached),
+        "requested": body.count,
+        "images": attached,
+        "stack_health": health,
+        "message": (
+            f"Filled {len(attached)} of {body.count} photo slots. Fewer than "
+            f"asked means the stack is short, which is an ordinary state — the "
+            f"ad publishes with fewer pictures rather than failing."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# The one write that reaches Craigslist
 # ---------------------------------------------------------------------------
 
 class PostNowBody(BaseModel):

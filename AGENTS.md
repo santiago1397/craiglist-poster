@@ -27,15 +27,18 @@ Everything else is one more URL of the same shape.
 
 ## Issuing a key
 
-**Settings → API keys → Create key.** The key is shown once. Two scopes:
+**Settings → API keys → Create key.** The key is shown once. Three scopes:
 
-| Scope | What it opens |
-|---|---|
-| **Read only** | Every `/agent/*` GET. Cannot change anything. |
-| **Read + publish** | The above, plus `POST /agent/post-now` for drafts already marked reviewed. |
+| Scope | What it opens | May travel in a URL |
+|---|---|---|
+| **Read only** | Every `/agent/*` GET. Cannot change anything. | yes |
+| **Read + publish** | The above, plus `POST /agent/post-now` for drafts already marked reviewed. | no |
+| **Read + compose + publish** | The above, plus writing drafts, generating images and attaching them. | **no, not even on reads** |
 
-Revoke either from the same page. `last used` shows whether a key is still
-live, so a forgotten one is visible rather than silently valid forever.
+Revoke any of them from the same page. `last used` shows whether a key is still
+live, so a forgotten one is visible rather than silently valid forever. For
+`agent` keys the page also shows how many images that key has generated and what
+they cost, because generation is not capped.
 
 ### Why read keys go in the URL and post keys do not
 
@@ -58,6 +61,14 @@ both are deliberate:
 The server also redacts `key=` from its own uvicorn access log
 (`_RedactApiKeyFilter` in `backend/app/main.py`). That covers our logs, not the
 client's.
+
+**The `agent` scope is refused in the query string on every verb, reads
+included.** The concession above was bought with a specific argument — a leaked
+read key exposes information and nothing else, so "rotate it" is a complete
+answer. A key that can also publish does not qualify for that bargain, and
+honouring it from the header on a request that also carried `?key=` would leave
+the secret in the log anyway. An agent that genuinely cannot set headers gets a
+read key. The CLI and MCP server both send headers already, so neither notices.
 
 ---
 
@@ -87,6 +98,22 @@ python tools/cl_agent.py logs --hours 48 --flow post
 python tools/cl_agent.py post-now 123  # needs a 'post'-scope key
 ```
 
+Composing needs an `agent`-scope key:
+
+```bash
+python tools/cl_agent.py locations
+python tools/cl_agent.py generate-image --prompt "a tile roof in Davie" --kind cover
+python tools/cl_agent.py approve-image 412
+python tools/cl_agent.py draft-create ./draft.json   # or '-' to read stdin
+python tools/cl_agent.py draft-cover 88 412
+python tools/cl_agent.py draft-autofill 88
+python tools/cl_agent.py draft-show 88
+```
+
+`draft-create` takes a file, `-` for stdin, or inline JSON. A file is the normal
+path: ad copy is thousands of characters with newlines in it, and shell quoting
+mangles it. `cl_agent.py help` lists every field.
+
 Add `--json` to any read command. `CL_AGENT_URL` overrides the host.
 
 **The CLI always sends the key in a header**, never in the URL — a shell can
@@ -110,10 +137,14 @@ checks the exit code cannot mistake a blocked post for a published one.
 }
 ```
 
-Eight tools arrive named, described and typed, so the model never builds a URL.
-The descriptions carry the same caveats the prose does — including that
+Fifteen tools arrive named, described and typed, so the model never builds a
+URL. The descriptions carry the same caveats the prose does — that
 `craigslist_post_now` publishes a real advert, cannot be undone, and should be
-confirmed with the user first.
+confirmed with the user first; that `craigslist_generate_image` spends money;
+and that `craigslist_create_draft` produces something **unreviewed that cannot
+publish**, so a model must not report it as live. A test asserts each of those
+clauses is still in its description, because the description is the only thing
+guaranteed to be read before a tool is chosen.
 
 ---
 
@@ -129,14 +160,63 @@ confirmed with the user first.
 | `/agent/problems` | What is broken, ranked, explained. |
 | `/agent/logs` | The raw error records underneath that. |
 | `/agent/inventory` | Are there enough images to fill the queue? |
+| `/agent/locations` | Where may an ad go, and where are we already advertising? |
 
 Responses are plain English by default. Add `&format=json` when something needs
 to parse one — both render from the same data, so they cannot disagree.
 
-### What it cannot do
+---
 
-It cannot write ad copy, create drafts, edit live listings, change guardrails,
-generate images, or spend money. Those stay in the dashboard. The only write is
+## What an agent can compose
+
+With an `agent`-scope key it can build a complete draft: generate an image from
+a prompt, write the copy, place it in a location, attach a cover and fill the
+photo slots.
+
+| Endpoint | What it does |
+|---|---|
+| `POST /agent/images/generate` | Generate images from a prompt. Spends money. Lands them `pending`. |
+| `POST /agent/images/{id}/approve` | Approve an image — **only one this key generated**. |
+| `POST /agent/drafts` | Write a draft. Always `reviewed = false`. |
+| `PATCH /agent/drafts/{id}` | Change a draft this key wrote. |
+| `GET /agent/drafts/{id}` | Read it back, with images and a similarity score. |
+| `POST /agent/drafts/{id}/cover` | Put an approved cover in slot 1. |
+| `POST /agent/drafts/{id}/autofill` | Fill the photo slots from the stack. |
+
+Three limits are structural rather than advisory:
+
+**It cannot mark a draft reviewed.** No route exposes the field,
+`drafts.create_draft` forces it false for anything an agent writes, and
+`post-now` refuses an unreviewed draft. Composing an ad and publishing an ad are
+two different permissions, and only the first was granted. That is what makes
+handing over a compose key reasonable: the worst case is copy you have to read
+and delete, not an ad you have to take down.
+
+**It can only approve images it generated itself.** `images.created_by_key_id`
+records who made each row; a human's image answers no, and so does another key's.
+An agent curates what it made and does not get an opinion on your stack. It also
+cannot acquire rights over an existing image by regenerating it — `_store` is
+content-addressed and skips a digest already held rather than re-stamping it.
+
+**It can only edit drafts it wrote.** A draft created in the dashboard is not an
+agent's to change.
+
+**County and city are validated against `backend/app/reference.py`.** That list
+is closed because `poster._select_subarea()` matches the county by substring to
+pick the Craigslist subarea radio — an unrecognised value does not raise, it
+falls through to the first radio and the ad publishes in the wrong place with
+nothing reporting it. `/agent/locations` returns the valid set, flags counties
+with no subarea mapping, and says which cities already carry ads.
+
+**Generation is not capped.** It ships uncapped deliberately; the control is
+visibility. Every image records the key that made it and its cost, and
+Settings → API keys totals both per key.
+
+### What it still cannot do
+
+It cannot edit a live listing, change guardrails, mark anything reviewed, manage
+keys or accounts, or approve an image it did not make. Those stay in the
+dashboard whatever the key says. The only write that reaches Craigslist is
 `post-now`, and it is fenced:
 
 - The draft must already be marked **reviewed** by a human. An agent can decide

@@ -10,6 +10,12 @@ a tool an agent gives up on.
     ./cl_agent.py stats --window 7d
     ./cl_agent.py post-now 123
 
+Reading needs any key. Composing — `locations`, `generate-image`,
+`approve-image`, `draft-*` — needs an 'agent'-scope key. Note what composing is
+not: a draft written here is UNREVIEWED, nothing in this tool can change that,
+and an unreviewed draft cannot publish. A person decides whether the words go
+out on a live listing.
+
 **This sends the key in a header, always.** The HTTP surface also accepts
 `?key=` because many AI fetch tools cannot set headers at all — but a shell can,
 so there is no reason to use the leaky path here. Nothing this script does puts
@@ -115,6 +121,33 @@ def _fmt(args) -> str | None:
     return "json" if getattr(args, "json", False) else None
 
 
+def _read_json_arg(value: str) -> dict:
+    """A draft body from a file, from `-` for stdin, or inline.
+
+    Ad copy is thousands of characters with newlines in it. Passing that as a
+    shell flag is how you end up with a draft whose body was mangled by quoting
+    — so the normal path is a file or a pipe, and inline JSON is the fallback.
+    """
+    raw = sys.stdin.read() if value == "-" else None
+    if raw is None:
+        try:
+            with open(value, encoding="utf-8") as handle:
+                raw = handle.read()
+        except OSError:
+            # Not a path — assume it is the JSON itself.
+            raw = value
+    try:
+        parsed = json.loads(raw)
+    except ValueError as e:
+        raise Failure(
+            f"Could not parse that as JSON: {e}\n"
+            "Pass a path to a .json file, '-' to read stdin, or inline JSON."
+        ) from None
+    if not isinstance(parsed, dict):
+        raise Failure("The draft must be a JSON object, not a list or a scalar.")
+    return parsed
+
+
 COMMANDS = {
     "help": lambda a: _request("help", {}),
     "status": lambda a: _request("status", {"format": _fmt(a)}),
@@ -138,6 +171,29 @@ COMMANDS = {
     "inventory": lambda a: _request("inventory", {"format": _fmt(a)}),
     "post-now": lambda a: _request(
         "post-now", {}, method="POST", body={"draft_id": a.draft_id}
+    ),
+    # --- compose: needs an 'agent'-scope key -------------------------------
+    "locations": lambda a: _request("locations", {"format": _fmt(a)}),
+    "generate-image": lambda a: _request(
+        "images/generate", {}, method="POST",
+        body={"prompt": a.prompt, "kind": a.kind, "count": a.count, "city": a.city},
+    ),
+    "approve-image": lambda a: _request(
+        f"images/{a.image_id}/approve", {}, method="POST", body={}
+    ),
+    "draft-create": lambda a: _request(
+        "drafts", {}, method="POST", body=_read_json_arg(a.draft)
+    ),
+    "draft-show": lambda a: _request(f"drafts/{a.draft_id}", {}),
+    "draft-patch": lambda a: _request(
+        f"drafts/{a.draft_id}", {}, method="PATCH", body=_read_json_arg(a.changes)
+    ),
+    "draft-cover": lambda a: _request(
+        f"drafts/{a.draft_id}/cover", {}, method="POST",
+        body={"image_id": a.image_id},
+    ),
+    "draft-autofill": lambda a: _request(
+        f"drafts/{a.draft_id}/autofill", {}, method="POST", body={"count": a.count}
     ),
 }
 
@@ -197,6 +253,45 @@ def build_parser() -> argparse.ArgumentParser:
         "Publish a draft a human has already reviewed. Needs a 'post'-scope key.",
     )
     post_now.add_argument("draft_id", type=int)
+
+    # --- compose ----------------------------------------------------------
+    # Everything below needs an 'agent'-scope key. None of it can publish: a
+    # draft written here is unreviewed, and only a human in the dashboard can
+    # change that.
+
+    add("locations", "Where an ad may be placed, and which places are already used.")
+
+    gen = add("generate-image", "Generate an image. Costs money; lands unapproved.")
+    gen.add_argument("--prompt", help="What to draw. Omit for the stored prompt.")
+    gen.add_argument("--kind", default="photo", choices=["photo", "cover"],
+                     help="cover = slot 1 thumbnail; photo = slots 2-24")
+    gen.add_argument("--count", type=int, default=1)
+    gen.add_argument("--city", help="interpolated into the stored prompt")
+
+    approve = add("approve-image", "Approve an image THIS key generated.")
+    approve.add_argument("image_id", type=int)
+
+    create = add("draft-create", "Write a new draft. It is created unreviewed.")
+    create.add_argument(
+        "draft",
+        help="path to a .json file, '-' for stdin, or inline JSON. See "
+             "`cl_agent.py help` for the fields.",
+    )
+
+    show = add("draft-show", "Read one draft back, with images and similarity.")
+    show.add_argument("draft_id", type=int)
+
+    patch = add("draft-patch", "Change a draft this key created.")
+    patch.add_argument("draft_id", type=int)
+    patch.add_argument("changes", help="path to a .json file, '-' for stdin, or inline JSON")
+
+    cover = add("draft-cover", "Put an approved cover image in slot 1.")
+    cover.add_argument("draft_id", type=int)
+    cover.add_argument("image_id", type=int)
+
+    fill = add("draft-autofill", "Fill the draft's empty photo slots (2-24).")
+    fill.add_argument("draft_id", type=int)
+    fill.add_argument("--count", type=int, default=23)
 
     return parser
 

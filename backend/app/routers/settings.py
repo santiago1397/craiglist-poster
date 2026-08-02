@@ -52,9 +52,13 @@ class TokenCreate(BaseModel):
 
 class ApiKeyCreate(BaseModel):
     label: str = Field(default="", max_length=100)
-    # 'read' opens the whole agent surface. 'post' additionally allows
-    # publishing a draft a human has already marked reviewed.
-    scope: str = Field(default="read", pattern="^(read|post)$")
+    # 'read'  — the whole agent read surface. May travel in a URL.
+    # 'post'  — the above, plus publishing a draft a human marked reviewed.
+    # 'agent' — the above, plus composing: generating images, writing drafts and
+    #           attaching pictures. Header-only on every request, including
+    #           reads, because a key that can publish must not reach an access
+    #           log. It still cannot mark a draft reviewed.
+    scope: str = Field(default="read", pattern="^(read|post|agent)$")
 
 
 class PostingSwitch(BaseModel):
@@ -220,12 +224,22 @@ def delete_machine_token(token_id: int) -> None:
 
 @router.get("/api-keys")
 def list_api_keys() -> dict:
+    """Every key, with what each has spent and written.
+
+    Image generation through an `agent` key is deliberately uncapped, so this
+    is the entire control: the spend has to be visible somewhere, or "no cap,
+    but logged" is just "no cap".
+    """
+    from ..services import images as images_svc
+
     with conn() as c:
         rows = c.execute(
             "SELECT id, label, scope, created_at, last_seen_at, revoked_at "
             "FROM api_keys ORDER BY created_at DESC"
         ).fetchall()
-    return {"keys": [dict(r) for r in rows]}
+        usage = images_svc.key_usage(c)
+    empty = {"images_generated": 0, "cost_usd": 0.0, "drafts_created": 0}
+    return {"keys": [{**dict(r), **usage.get(r["id"], empty)} for r in rows]}
 
 
 @router.post("/api-keys", status_code=status.HTTP_201_CREATED)

@@ -120,12 +120,29 @@ def _next_position(conn: psycopg.Connection, account: str) -> float:
     return float(row["p"]) + 1024.0
 
 
-def create_draft(conn: psycopg.Connection, payload: dict) -> dict:
+def create_draft(
+    conn: psycopg.Connection,
+    payload: dict,
+    *,
+    created_by_key_id: int | None = None,
+) -> dict:
+    """Insert a draft. `created_by_key_id` marks one an agent key wrote.
+
+    An agent-written draft is forced `reviewed = False` here rather than only in
+    the router. `reviewed` is a member of `_EDITABLE`, so a payload carrying it
+    would otherwise be honoured — and `reviewed` is the single flag standing
+    between a machine-written ad and a live listing under a real licence number.
+    A guarantee that important belongs at the point of insert, where no future
+    caller can route around it.
+    """
     check_body_length(payload.get("body"))
     fields = {k: v for k, v in payload.items() if k in _EDITABLE and k != "status"}
     fields.setdefault("account", payload["account"])
     fields["position"] = _next_position(conn, fields["account"])
     fields["source"] = payload.get("source", "manual")
+    if created_by_key_id is not None:
+        fields["created_by_key_id"] = created_by_key_id
+        fields["reviewed"] = False
 
     cols = ", ".join(fields)
     placeholders = ", ".join(f"%({k})s" for k in fields)
