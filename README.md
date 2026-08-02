@@ -78,6 +78,7 @@ All commands run via `uv run cl <command>`.
 | `cl edit` | Run one pass of pending edit work: load posts the dashboard asked for, apply queued changes. The reporter daemon does this every 15s anyway. |
 | `cl edit --dry-run` | Rehearse an edit: open the form, diff against desired, **type nothing**. Safe against live posts. |
 | `cl edit-canary <post_id>` | Perform one *real* edit end to end. Refuses any post not in `CL_CANARY_POSTS`. |
+| `cl scan-ended` | Read the account page's inactive and deleted tabs and report every ended posting, so an ad that has expired stops being a bare id. |
 
 ---
 
@@ -142,6 +143,26 @@ human speed is over half an hour for one field.
 Posting deliberately still types. A new listing is what Craigslist scrutinises
 and that flow has run this way for months; an edit is a short visit to an ad
 that already exists, and it holds the browser lease while it runs.
+
+### Ended postings
+
+A posting that ends takes its copy with it. Craigslist stops serving the public
+URL and stops offering the edit form, and hydration — the only route to a body —
+goes with it. Anything published before the image stack existed left no record
+of its pictures either.
+
+Two things now guard against that:
+
+- **What goes out is kept.** A post published from the queue copies the draft's
+  copy onto itself, and the pictures it used stay reachable from the draft that
+  produced it. Both show on the post's page, from our own bytes rather than
+  Craigslist's, which stop loading when the ad ends.
+- **`cl scan-ended`** walks the account page's inactive and deleted tabs and
+  reports what is there — titles, dates, area, category, final counters. It is
+  the last place an ended ad is described at all.
+
+Neither is retroactive. Postings that ended before this existed have only their
+title and URL, and no route back to the rest.
 
 **County and service type are not editable on a live post.** Craigslist's edit
 form exposes no control for either, so offering them would stage a change the
