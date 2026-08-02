@@ -159,6 +159,15 @@ export function PostEditPanel(props: {
         </div>
       </div>
 
+      {applying && (
+        <p className="rounded border border-accent-border bg-accent/10 px-2 py-1.5 text-xs text-accent-fg">
+          The posting machine is editing this ad right now — it took the change
+          at {formatDateTime(p.last_attempt_at)}. Nothing can be altered until it
+          reports back, so the controls above are disabled rather than silently
+          refused.
+        </p>
+      )}
+
       {p.hydrate_error && (
         <p className="text-xs text-danger-fg">Load failed: {p.hydrate_error}</p>
       )}
@@ -243,6 +252,11 @@ export function PostEditPanel(props: {
             {p.image_set_managed && (
               <button
                 disabled={applying || run.isPending}
+                title={
+                  applying
+                    ? "The posting machine is editing this ad right now"
+                    : "Apply the change without touching the live gallery"
+                }
                 onClick={() =>
                   run.mutate(() =>
                     api.put(`/edits/${p.post_id}/desired`, { image_set_managed: false }),
