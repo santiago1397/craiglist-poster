@@ -29,7 +29,7 @@ import psycopg
 from ..config import get_settings
 from . import drafts as drafts_svc
 from . import images as images_svc
-from .queue import get_guardrails
+from .queue import TASK_FIRE_HOURS, get_guardrails
 
 # Fields the operator may set on a desired state. Images are not here: they are
 # rows in `post_desired_images`, managed through attach/detach so ownership and
@@ -59,6 +59,23 @@ CONSUMING_OUTCOMES = (
 
 # Statuses that need a human before the desktop touches the post again.
 PARKED_STATUSES = ("parked_stale", "parked_gone", "degraded_live", "failed")
+
+# The desktop refuses to begin a reconcile this close to a scheduled posting
+# slot (DESIGN_EDITS decision 28: an edit is never worth delaying a post).
+# Mirrored here so the dashboard can say so. Without it, pressing Apply now in
+# the twenty minutes around 9, 1 or 5 looked exactly like pressing a dead
+# button: accepted, then silence, then a twenty-minute expiry.
+SLOT_GUARD_MINUTES = 10
+
+
+def _near_posting_slot(local: datetime) -> int | None:
+    """Minutes until the guard lifts, or None if we are clear of a slot."""
+    for hour in TASK_FIRE_HOURS:
+        slot = local.replace(hour=hour, minute=0, second=0, microsecond=0)
+        delta = (local - slot).total_seconds() / 60
+        if abs(delta) <= SLOT_GUARD_MINUTES:
+            return max(1, int(SLOT_GUARD_MINUTES - delta) + 1)
+    return None
 
 
 def _local_now(now: datetime) -> datetime:
@@ -578,6 +595,15 @@ def evaluate_edit_eligibility(
             "editing is disabled"
             + (f": {reason}" if reason else " — enable it under Settings once the "
                "Craigslist edit-form spike is done")
+        )
+    # Not skipped by `ignore_window`: the window is pacing and an operator may
+    # overrule it, but deferring to a posting slot is a safety rule the desktop
+    # enforces regardless, so reporting anything else here would be a lie.
+    mins = _near_posting_slot(local)
+    if mins is not None:
+        global_blocks.append(
+            f"within {SLOT_GUARD_MINUTES} minutes of a posting slot — editing "
+            f"stands aside so a post is never delayed; clear in ~{mins} min"
         )
     if not ignore_window and not (
         g["edit_window_start_hour"] <= local.hour < g["edit_window_end_hour"]
