@@ -700,6 +700,7 @@ def reporter_daemon(
     from .accounts import account_snapshot
     from .config import (
         ACCOUNTS, MAX_POSTS_PER_ACCOUNT_PER_WEEK, MAX_POSTS_PER_DAY_TOTAL,
+        code_version,
         MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT, POST_WEEKDAYS_ONLY,
         POST_WINDOW_END_HOUR, POST_WINDOW_START_HOUR,
     )
@@ -733,7 +734,9 @@ def reporter_daemon(
             post_window_start_hour=POST_WINDOW_START_HOUR,
             post_window_end_hour=POST_WINDOW_END_HOUR,
             post_weekdays_only=POST_WEEKDAYS_ONLY,
+            code_version=code_version(),
         ))
+        logger.info(f"reporter-daemon starting on {code_version()}")
     except Exception as e:
         logger.warning(f"scheduler_config emit failed: {e}")
 

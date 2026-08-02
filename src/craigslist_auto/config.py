@@ -250,3 +250,39 @@ ACCOUNTS: list[Account] = [
 ]
 
 ACCOUNTS_BY_NAME = {a.name: a for a in ACCOUNTS}
+
+
+def code_version() -> str:
+    """A short identifier for the code this machine is running.
+
+    Prefers the git commit of the checkout the package was imported from, which
+    is the only thing that answers "did my pull actually reach the daemon".
+    Falls back to the installed version when git is unavailable, and says so
+    plainly rather than pretending.
+    """
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        sha = (out.stdout or "").strip()
+        if out.returncode == 0 and sha:
+            dirty = subprocess.run(
+                ["git", "-C", str(root), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            suffix = "+dirty" if (dirty.stdout or "").strip() else ""
+            return f"{sha}{suffix} ({root})"
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version
+        return f"v{version('craigslist-auto')} ({root})"
+    except Exception:
+        return f"unknown ({root})"

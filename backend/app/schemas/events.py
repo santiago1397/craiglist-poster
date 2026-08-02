@@ -201,6 +201,14 @@ class SchedulerConfig(_EventBase):
     post_window_end_hour: int
     post_weekdays_only: bool
 
+    # What code this machine is actually running, reported at daemon startup.
+    # Twice now a fix has been merged, pulled and restarted, and the daemon has
+    # gone on running the previous version — once because the pull landed in a
+    # different checkout, and diagnosing it meant fingerprinting the code from
+    # the side effects it left in the step trail. A machine that says which
+    # commit it is on turns that into one glance.
+    code_version: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # 7. flow_error — any flow that raises, anywhere, reports it here.
