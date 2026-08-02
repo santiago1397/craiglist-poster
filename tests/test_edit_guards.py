@@ -162,6 +162,35 @@ if _SEL is not None:
         failures.append("image_thumb no longer targets the observed figure.imgbox")
 
 
+# --- a matching gallery must not be torn down and rebuilt -------------------
+# The replace was gated on `manage_images` rather than on whether the images
+# actually differed, so taking control of a gallery meant every later text-only
+# edit deleted 24 images and re-uploaded them: 48 avoidable operations against a
+# live posting, and 48 chances to fail halfway with it empty.
+try:
+    import inspect as _inspect
+    from craigslist_auto import editor as _editor
+    _recon = _inspect.getsource(_editor.reconcile_post)
+    _replace = _inspect.getsource(_editor._replace_images)
+except Exception as e:  # pragma: no cover
+    _recon = _replace = None
+    print(f"(skipping replace-gating checks: {e})")
+
+if _recon is not None:
+    if "if manage_images and images_differ:" not in _recon:
+        failures.append(
+            "the image replace is no longer gated on images_differ — a matching "
+            "gallery will be deleted and re-uploaded on every text edit"
+        )
+    # `degraded_live` is the loudest alarm the system has. It must mean images
+    # really were taken away, not that a selector went missing.
+    if "mutated=removed > 0" not in _replace:
+        failures.append(
+            "an upload failure claims mutation unconditionally — a missing "
+            "upload control would report degraded_live on an untouched gallery"
+        )
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
