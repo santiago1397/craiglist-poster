@@ -36,6 +36,7 @@ happen by accident.
 """
 from __future__ import annotations
 
+import json
 import random
 from datetime import datetime, timedelta, timezone
 
@@ -1040,3 +1041,113 @@ def pick_for_draft(
         },
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Archiving the pictures an ended posting used
+#
+# A recovered posting's image manifest holds Craigslist's own URLs. They resolve
+# today and nothing says they will once Craigslist prunes the posting, so the
+# only durable answer is to hold the bytes ourselves.
+#
+# Archived images go in this table like everything else, but at
+# `status='archived'`: `pick_for_draft` requires 'approved', so they can never
+# be handed to a draft, and `_BUCKET_SQL` files them under their own name rather
+# than pretending they are available. They are a record of what ran, not stock.
+# ---------------------------------------------------------------------------
+
+ARCHIVED_STATUS = "archived"
+RECOVERED_SOURCE = "recovered"
+
+# Craigslist serves these from its own CDN and they are ordinary JPEGs; the cap
+# is a sanity bound, not a real limit.
+_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024
+_ARCHIVE_TIMEOUT = 30.0
+
+
+def archive_post_images(conn: psycopg.Connection, post_id: str) -> dict:
+    """Fetch a posting's images and keep our own copies.
+
+    Rewrites `posts.images` in place, adding `image_id` and `sha256` to each
+    entry it manages to store. Entries already carrying an `image_id` are left
+    alone, so this is safe to run repeatedly and cheap on the second pass.
+    """
+    import httpx
+
+    row = conn.execute(
+        "SELECT account, images FROM posts WHERE post_id = %s", (post_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown post_id {post_id!r}")
+
+    manifest = list(row["images"] or [])
+    if not manifest:
+        return {"post_id": post_id, "stored": 0, "already": 0, "failed": 0}
+
+    stored = already = failed = 0
+    with httpx.Client(timeout=_ARCHIVE_TIMEOUT, follow_redirects=True) as client:
+        for entry in manifest:
+            if entry.get("image_id"):
+                already += 1
+                continue
+            url = entry.get("url")
+            if not url:
+                continue
+            if url.startswith("//"):
+                url = "https:" + url
+            try:
+                resp = client.get(url)
+                resp.raise_for_status()
+                data = resp.content
+                if not data or len(data) > _ARCHIVE_MAX_BYTES:
+                    raise ValueError(f"{len(data)} bytes is not a usable image")
+                mime = resp.headers.get("content-type", "image/jpeg").split(";")[0]
+                digest, rel, size = storage.put_bytes(data, mime)
+            except Exception as e:
+                logger.warning(f"could not archive {url} for post {post_id}: {e}")
+                failed += 1
+                continue
+
+            # Content-addressed, so the same picture across two postings is one
+            # row and one file.
+            img = conn.execute(
+                """
+                INSERT INTO images (sha256, storage_path, mime, bytes_size, source,
+                                    status, kind, owner_account, used_at)
+                VALUES (%s,%s,%s,%s,%s,%s,'photo',%s, NOW())
+                ON CONFLICT (sha256) DO UPDATE SET updated_at = NOW()
+                RETURNING id
+                """,
+                (digest, rel, mime, size, RECOVERED_SOURCE, ARCHIVED_STATUS,
+                 row["account"]),
+            ).fetchone()
+            entry["image_id"] = img["id"]
+            entry["sha256"] = digest
+            stored += 1
+
+    conn.execute(
+        "UPDATE posts SET images = %s::jsonb, updated_at = NOW() WHERE post_id = %s",
+        (json.dumps(manifest), post_id),
+    )
+    if stored:
+        logger.info(f"archived {stored} image(s) for post {post_id}")
+    return {"post_id": post_id, "stored": stored, "already": already, "failed": failed}
+
+
+def posts_needing_archive(conn: psycopg.Connection, limit: int = 50) -> list[str]:
+    """Postings whose manifest still points only at Craigslist."""
+    rows = conn.execute(
+        """
+        SELECT post_id FROM posts
+        WHERE jsonb_typeof(images) = 'array'
+          AND jsonb_array_length(images) > 0
+          AND EXISTS (
+              SELECT 1 FROM jsonb_array_elements(images) e
+              WHERE e->>'url' IS NOT NULL AND e->>'image_id' IS NULL
+          )
+        ORDER BY posted_ts DESC
+        LIMIT %s
+        """,
+        (limit,),
+    ).fetchall()
+    return [r["post_id"] for r in rows]

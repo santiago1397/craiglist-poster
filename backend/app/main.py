@@ -13,7 +13,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from .config import get_settings
-from .db import close_pool, init_pool, tx
+from .db import close_pool, conn, init_pool, tx
 
 async def _topup_loop(interval_minutes: int) -> None:
     """Keep the draft queue full.
@@ -68,6 +68,53 @@ async def _image_topup_loop(interval_minutes: int) -> None:
         await asyncio.sleep(interval)
 
 
+# Hourly is fast enough: Craigslist keeps a finished posting's images up for
+# days, and the batch is small so a backlog drains over a few cycles rather than
+# hammering their CDN in one burst.
+_ARCHIVE_INTERVAL = 3600
+_ARCHIVE_BATCH = 10
+
+
+async def _image_archive_loop() -> None:
+    """Keep our own copy of every picture a posting published.
+
+    `posts.images` holds Craigslist's own CDN URLs — written by hydration for
+    live postings and by `cl scan-ended` for finished ones. They resolve until
+    Craigslist prunes the ad, and after that the record of what an ad looked
+    like is gone. That makes this a race, so it runs on its own rather than
+    waiting for somebody to press a button.
+
+    Cheap when there is nothing to do: one indexed scan that finds no rows.
+    Ungated on purpose — it spends no money and calls no model, it only fetches
+    URLs we already recorded.
+    """
+    from .services import images as images_svc
+
+    await asyncio.sleep(90)  # after both top-up loops have had their turn
+    while True:
+        try:
+            def _run() -> dict:
+                with conn() as c:
+                    pending = images_svc.posts_needing_archive(c, limit=_ARCHIVE_BATCH)
+                stored = 0
+                for pid in pending:
+                    # A post per transaction: one unreachable image must not
+                    # roll back the copies we did manage to keep.
+                    with tx() as c:
+                        stored += images_svc.archive_post_images(c, pid).get("stored", 0)
+                return {"posts": len(pending), "stored": stored}
+
+            result = await asyncio.to_thread(_run)
+            if result["stored"]:
+                logger.info(
+                    f"archived {result['stored']} published image(s) "
+                    f"across {result['posts']} post(s)"
+                )
+        except Exception as e:  # never let the loop die
+            logger.warning(f"image archive failed: {e!r}")
+        await asyncio.sleep(_ARCHIVE_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("Starting up — initialising DB pool")
@@ -84,6 +131,9 @@ async def lifespan(_: FastAPI):
         tasks.append(
             asyncio.create_task(_image_topup_loop(settings.generation_interval_minutes))
         )
+    # Independent of generation: archiving is about not losing what already went
+    # out, so it must keep running even with draft generation switched off.
+    tasks.append(asyncio.create_task(_image_archive_loop()))
     try:
         yield
     finally:
