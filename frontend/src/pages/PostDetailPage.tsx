@@ -6,6 +6,7 @@ import { formatDate, formatDateTime, formatNumber } from "../lib/format";
 import { PostEditPanel } from "../components/post/PostEditPanel";
 import { PostEditHistory } from "../components/post/PostEditHistory";
 import { PostRecovery } from "../components/post/PostRecovery";
+import { PostRecord } from "../components/post/PostRecord";
 import { PublishedImages } from "../components/post/PublishedImages";
 import type { LocationRef } from "../lib/posting";
 import type { EditablePost } from "../lib/edits";
@@ -133,6 +134,19 @@ export default function PostDetailPage() {
       {/* Recovery first: a degraded live posting is the one thing on this page
           that cannot wait, and burying it under the editor would be wrong. */}
       {editable && <PostRecovery post={editable} onError={setError} />}
+
+      {/* Then, for a posting predating content capture, what survives of it.
+          Above the editor because on those posts the editor is empty and every
+          control in it is disabled — leading with it reads as a broken page. */}
+      {editable && (
+        <PostRecord
+          post={post}
+          snapshots={snapshots}
+          hasCopy={!!editable.body}
+          hasImages={(editable.images?.length ?? 0) > 0 ||
+                     (editable.published_images?.length ?? 0) > 0}
+        />
+      )}
 
       {editQ.isError ? (
         <p className="text-sm text-fg-subtle">
