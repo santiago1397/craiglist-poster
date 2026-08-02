@@ -1135,7 +1135,15 @@ def reconcile_post(
                     k: desired.get(k, "") for k in HASHED_FIELDS
                     if (desired.get(k) or "").strip() != (live.get(k) or "").strip()
                 }
-                images_differ = manage_images and len(photos) != len(live_images)
+                # Counts alone said 24 == 24 and did nothing, which is exactly
+                # what replacing a gallery looks like from here: the live images
+                # are Craigslist URLs with no sha256 to compare against ours.
+                # The server answers it instead — `images_changed` means the
+                # staged set has been touched since one was last published.
+                images_differ = manage_images and (
+                    bool(desired.get("images_changed"))
+                    or len(photos) != len(live_images)
+                )
                 log.note("diff", f"{len(text_changes)} text field(s), images={images_differ}")
 
                 # Refuse a change we have no control to make, *before* typing

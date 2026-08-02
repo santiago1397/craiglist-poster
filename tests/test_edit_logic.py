@@ -414,6 +414,44 @@ check("a successful apply asks for a fresh read",
 reset()
 
 
+# --- swapping a gallery for a different one of the same size ---------------
+# The reconcile compared counts, so replacing twenty-four photos with
+# twenty-four others read as 24 == 24 and reported `no_change`. Identity is not
+# available — images already on Craigslist are URLs on their servers — so the
+# question is answered from our side: has the staged set been touched since one
+# was last published?
+reset()
+add_post("9200")
+hydrate("9200")
+with tx() as c:
+    edits_svc.upsert_desired(c, "9200", {"image_set_managed": True})
+    c.execute("UPDATE post_desired_state SET image_rev = 4, live_image_rev = 4 "
+              "WHERE post_id = '9200'")
+    claimed = edits_svc.claim_reconcile(c, machine="m1", post_id="9200")
+check("an untouched gallery is not flagged for replacement",
+      claimed is not None and claimed["images_changed"] is False,
+      str(claimed and claimed["images_changed"]))
+
+with tx() as c:
+    c.execute("UPDATE post_desired_state SET status = 'pending', image_rev = 5 "
+              "WHERE post_id = '9200'")
+    claimed = edits_svc.claim_reconcile(c, machine="m1", post_id="9200")
+check("a gallery touched since the last publish is flagged",
+      claimed is not None and claimed["images_changed"] is True,
+      str(claimed and claimed["images_changed"]))
+
+attempt("9200", "applied", rev=1)
+with tx() as c:
+    row = c.execute(
+        "SELECT image_rev, live_image_rev FROM post_desired_state WHERE post_id='9200'"
+    ).fetchone()
+check("a successful apply marks the staged gallery as the live one",
+      row["live_image_rev"] == row["image_rev"],
+      f"{row['live_image_rev']} vs {row['image_rev']}")
+
+reset()
+
+
 print(f"{len(ok)} checks passed")
 if failures:
     print("FAILURES:")
