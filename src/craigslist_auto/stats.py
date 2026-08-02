@@ -851,13 +851,26 @@ SAFE_ROW_ACTION = "display"
 # Named so a mistake is loud rather than merely wrong.
 FORBIDDEN_ROW_ACTIONS = ("repost", "renew", "delete", "edit")
 
+# The manage/display page, OBSERVED (artifact 7467c7b2, 2026-08-02). Title
+# "south florida | manage posting", and it is the whole ad: the copy, the
+# gallery, the post id. This is the only surviving description of an ended
+# posting anywhere.
+ENDED_SEL = {
+    "title": "#titletextonly",
+    "body": "#postingbody",
+    # The page also carries OpenStreetMap tiles from map*.craigslist.org, which
+    # are not the ad's pictures. Scoping to the image host keeps them out.
+    "images": "img[src*='images.craigslist.org']",
+    "infos": "p.postinginfo",
+}
+
 
 def scan_ended(
     *,
     headless: bool = False,
     only_account: str | None = None,
     capture: bool = True,
-    max_capture: int = 2,
+    max_recover: int = 5,
 ) -> dict:
     """Read every ended posting off the account page and report it.
 
@@ -899,12 +912,13 @@ def scan_ended(
                             page, flow="scan_ended", label=f"list_{tab}",
                             account=account.name,
                         )
-                # The listing gives a title and a date. The body and the images
-                # live one click further in, on a page nothing here has opened.
-                # Capture a couple so they can be read properly.
-                if capture:
-                    for row in found[:max_capture]:
-                        _capture_ended_post(page, account.name, row)
+                # The listing gives a title and a date; the copy and the
+                # pictures are one click further in, on the manage/display page.
+                if max_recover:
+                    for row in found[:max_recover]:
+                        _capture_ended_post(
+                            page, account.name, row, capture=capture
+                        )
             info["ok"] = True
         except LoginExpiredError as e:
             info["error"] = f"login_expired: {e}"
@@ -921,7 +935,9 @@ def scan_ended(
     return summary
 
 
-def _capture_ended_post(page: Page, account_name: str, row: dict) -> None:
+def _capture_ended_post(
+    page: Page, account_name: str, row: dict, *, capture: bool = True
+) -> None:
     """Open one ended posting's own page and capture it.
 
     Reconnaissance, not extraction. Which control an ended posting still offers
@@ -982,14 +998,104 @@ def _capture_ended_post(page: Page, account_name: str, row: dict) -> None:
         show.first.click()
         page.wait_for_load_state("domcontentloaded")
         sleep_jitter(1.5)
-        artifacts_mod.capture_page(
-            page, flow="scan_ended", label="ended_post_display",
-            post_id=post_id, account=account_name,
+
+        content = _read_ended_post(page)
+        if capture:
+            artifacts_mod.capture_page(
+                page, flow="scan_ended", label="ended_post_display",
+                post_id=post_id, account=account_name,
+            )
+        body_len = len(content.get("body") or "")
+        logger.info(
+            f"[{account_name}] recovered {post_id}: {body_len} body chars, "
+            f"{len(content['images'])} image(s)"
         )
+        if body_len:
+            _emit_ended_content(account_name, post_id, content)
+        row["recovered"] = bool(body_len)
+
         page.go_back(wait_until="domcontentloaded")
         sleep_jitter(1.0)
     except Exception as e:  # pragma: no cover - defensive
-        logger.warning(f"[{account_name}] could not capture ended post {post_id}: {e}")
+        logger.warning(f"[{account_name}] could not read ended post {post_id}: {e}")
+
+
+def _emit_ended_content(account_name: str, post_id: str, content: dict) -> None:
+    """Report what an ended posting said, through the ordinary content path.
+
+    A `post_content` event is exactly right: ingest already writes the copy and
+    the image manifest onto the posting from one, and refuses an older read over
+    a newer one. `editable` is false because Craigslist offers no edit form for
+    an ended ad — the dashboard uses that to show the copy without offering to
+    change it.
+    """
+    from . import reporter as reporter_mod
+    from .events import PostContent, PostImage
+
+    try:
+        reporter_mod.emit(PostContent(
+            ts=datetime.now(timezone.utc),
+            machine=os.environ.get("CL_MACHINE") or platform.node().lower(),
+            account=account_name,
+            post_id=post_id,
+            ok=True,
+            title=content.get("title"),
+            body=content.get("body"),
+            images=[PostImage(**i) for i in content.get("images", [])],
+            live_status="ended",
+            editable=False,
+        ))
+    except Exception as e:
+        logger.warning(f"could not report recovered content for {post_id}: {e}")
+
+
+def _read_ended_post(page: Page) -> dict:
+    """Scrape an ended posting's own page. Read-only.
+
+    Craigslist keeps serving `manage/<token>?action=display` after a posting
+    ends, and that page is the complete ad. Nothing else is: the public URL is
+    gone, the edit form is gone, and the account row carries only a title.
+    """
+    def _text(key: str) -> str:
+        loc = page.locator(ENDED_SEL[key])
+        if loc.count() == 0:
+            return ""
+        try:
+            return (loc.first.inner_text() or "").strip()
+        except Exception:
+            return ""
+
+    images: list[dict] = []
+    gallery = page.locator(ENDED_SEL["images"])
+    for i in range(gallery.count()):
+        src = gallery.nth(i).get_attribute("src")
+        if src:
+            # Craigslist serves a 600x450 in the gallery; the same id at
+            # _1200x900 is the largest it keeps, and costs nothing to ask for.
+            images.append({
+                "slot": i + 1,
+                "url": re.sub(r"_\d+x\d+\.jpg$", "_1200x900.jpg", src),
+                "sha256": None,
+            })
+
+    post_id = None
+    infos = page.locator(ENDED_SEL["infos"])
+    for i in range(infos.count()):
+        try:
+            txt = (infos.nth(i).inner_text() or "").strip()
+        except Exception:
+            continue
+        m = re.search(r"post id:\s*(\d+)", txt, re.I)
+        if m:
+            post_id = m.group(1)
+            break
+
+    return {
+        "title": _text("title") or None,
+        "body": _text("body") or None,
+        "images": images,
+        "craigslist_post_id": post_id,
+    }
 
 
 def _emit_ended_events(account: Account, rows: list[dict]) -> None:
