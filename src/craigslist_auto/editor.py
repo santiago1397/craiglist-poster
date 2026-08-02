@@ -894,6 +894,12 @@ def reconcile_post(
     # past this point discard it, so the next run reads published content rather
     # than our own unpublished work.
     draft_dirty = False
+    # Set only when the gallery has actually had images taken away. This is the
+    # single condition `degraded_live` is about, and nothing else should raise
+    # it: the alarm means "a live ad has lost its photos, go and look now", and
+    # it is worthless the moment it also fires for a browser closing during a
+    # text fill.
+    images_mutated = False
 
     def _result(outcome: str, **extra) -> dict:
         out = {
@@ -1186,6 +1192,7 @@ def reconcile_post(
                                 f"touching the gallery",
                                 mutated=False,
                             )
+                    images_mutated = True
                     final_images, extra = _replace_images(
                         page, log, photos, account.name, post_id
                     )
@@ -1316,8 +1323,16 @@ def reconcile_post(
             if draft_dirty:
                 _cancel_edit_session(page, log)
             step = log.current or "unknown"
+            # `degraded_live` is reserved for the one state that needs a person
+            # immediately: the gallery was emptied and not refilled. A crash
+            # while typing into a draft field — a browser closing mid-run, say —
+            # publishes nothing and removes nothing, so it is an ordinary
+            # failure. Classifying every post-read step as degraded reported two
+            # emergencies on an ad that was never touched.
             return _result(
-                "failed_other" if step in PRE_MUTATION_STEPS else "degraded_live",
+                "degraded_live" if images_mutated
+                else "failed_other" if step in PRE_MUTATION_STEPS
+                else "failed_form",
                 failed_step=step,
                 error_type=type(e).__name__, error_message=str(e)[:500],
             )
