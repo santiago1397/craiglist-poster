@@ -396,6 +396,16 @@ or spend money. The single exception is publishing a draft **you have already
 marked reviewed**, which needs a separate `post`-scope key and still passes every
 guardrail — see [AGENTS.md](AGENTS.md).
 
+For a shell or your own terminal there is a CLI, and for MCP-capable hosts an
+MCP server. Both are single files in `tools/` with no dependencies beyond the
+standard library:
+
+```bash
+export CL_AGENT_KEY=<key>
+python tools/cl_agent.py status
+python tools/cl_agent.py stats --window 7d
+```
+
 ---
 
 ## Where things live
