@@ -724,6 +724,15 @@ def hydrate_post(
 # Reconcile (decisions 26, 32, 33, 36)
 # ---------------------------------------------------------------------------
 
+# Above this, paste rather than type. `poster.py` reached the same conclusion at
+# the posting form and said why: "Real users paste long descriptions; typing
+# 7000 chars is slow AND bot-like." The editor did not inherit it, and typing a
+# 14,502-character body at 45-180ms a character took over half an hour — long
+# enough to hold the browser lease past the stale-claim reaper, and a keystroke
+# cadence no human has ever produced.
+PASTE_ABOVE_CHARS = 200
+
+
 def _fill(page: Page, key: str, value: str) -> None:
     loc = page.locator(SEL[key])
     if loc.count() == 0:
@@ -731,7 +740,13 @@ def _fill(page: Page, key: str, value: str) -> None:
     # Clear first: an edit replaces the field, and human_type only appends.
     loc.first.click()
     loc.first.fill("")
-    human_type(loc.first, value)
+    if len(value) > PASTE_ABOVE_CHARS:
+        sleep_jitter(0.5)
+        loc.first.fill(value)
+        # The pause a person takes reading back what they just pasted.
+        sleep_jitter(1.5, 0.4)
+    else:
+        human_type(loc.first, value)
     sleep_jitter(0.4, 0.2)
 
 
