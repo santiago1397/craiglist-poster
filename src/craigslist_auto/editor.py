@@ -121,7 +121,20 @@ SEL = {
     "edit_title": "input[name='PostingTitle']",
     "edit_body": "textarea[name='PostingBody']",
     "edit_postal": "input[name='postal']",
-    "edit_city": "input[name='city']",
+    # The free-text area box, and emphatically NOT `input[name='city']`.
+    #
+    #   <input name="geographic_area" id="geographic_area"
+    #          value="Coral gables & Kendall & Palmetto Bay">
+    #
+    #   <label data-depends-on="show_address_ok">
+    #     <input name="city" value="Miami" disabled>
+    #   </label>
+    #
+    # `city` is the street-address city, disabled unless the posting shows a
+    # street address. Pointing here read "Miami" as though it were the ad's area
+    # — it is not, the area names three towns — and writing to it timed out for
+    # thirty seconds against an element that can never accept input.
+    "edit_city": "input[name='geographic_area']",
     "edit_phone": "input[name='contact_phone']",
     # Not `license_number` — that name does not exist here. The form carries a
     # `has_license` radio pair plus this free-text field.
@@ -469,6 +482,29 @@ def _count(page: Page, key: str) -> int:
     n = page.locator(SEL[key]).count()
     logger.debug(f"selector {key}={SEL[key]!r} matched {n}")
     return n
+
+
+def _is_fillable(page: Page, key: str) -> bool:
+    """Is this selector backed by something that can actually take input?
+
+    Presence is not enough. Craigslist's copy form carries a street-address
+    block whose inputs are rendered `disabled` until the posting opts into
+    showing an address — so a count of 1 was followed, thirty seconds later, by
+    `Locator.click: Timeout` against an element that can never accept a
+    keystroke. Checking here means that failure lands in the diff step, before
+    anything has been typed, and names the field.
+    """
+    loc = page.locator(SEL[key])
+    if loc.count() == 0:
+        logger.debug(f"selector {key}={SEL[key]!r} matched nothing")
+        return False
+    try:
+        ok = loc.first.is_visible() and loc.first.is_enabled()
+    except Exception:  # pragma: no cover — mid-navigation
+        return False
+    if not ok:
+        logger.debug(f"selector {key}={SEL[key]!r} matched but is not fillable")
+    return ok
 
 
 def _census(page: Page) -> dict[str, int]:
@@ -1070,7 +1106,9 @@ def reconcile_post(
                 # forever, having done nothing. Running here keeps the posting
                 # untouched, so this is a clean failure rather than a partial
                 # edit.
-                unreachable = sorted(k for k in text_changes if _count(page, FIELD_SEL[k]) == 0)
+                unreachable = sorted(
+                    k for k in text_changes if not _is_fillable(page, FIELD_SEL[k])
+                )
                 if unreachable:
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_reconcile", label="unsupported_field",
@@ -1081,7 +1119,7 @@ def reconcile_post(
                         error_type="field_not_reachable",
                         error_message=(
                             "cannot edit " + ", ".join(unreachable)
-                            + " — no element matched "
+                            + " — nothing fillable matched "
                             + ", ".join(f"{k}={SEL[FIELD_SEL[k]]!r}" for k in unreachable)
                         )[:500],
                         images_live_count=len(live_images),
