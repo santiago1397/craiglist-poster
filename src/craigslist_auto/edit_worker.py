@@ -47,6 +47,28 @@ def near_posting_slot(now: datetime | None = None) -> bool:
     return False
 
 
+GOOD_EDIT_OUTCOMES = ("applied", "no_change", "dry_run")
+
+
+def _attach_log_tail(result: dict, flow: str) -> None:
+    """Ship the tail of run.log with a failure.
+
+    The step trail says which step died; the log says what the browser was
+    doing when it did — every selector count, every navigation. It lives on the
+    posting machine, which is not where anyone is sitting when they need it.
+    Attaching it on failure only, so a healthy run costs nothing.
+    """
+    try:
+        result.setdefault("artifact_ids", [])
+        result["artifact_ids"].extend(artifacts.capture_text(
+            editor._log_tail(),
+            flow=flow, label="run_log_tail",
+            post_id=result.get("post_id"), account=result.get("account"),
+        ))
+    except Exception as e:  # pragma: no cover — evidence must not break a flow
+        logger.warning(f"could not attach the log tail: {e}")
+
+
 def _emit_content(machine: str, result: dict) -> None:
     reporter.emit(PostContent(
         ts=datetime.now(timezone.utc),
@@ -149,6 +171,8 @@ def run_once(
             )
             summary["failed"] += 1
             continue
+        if not result.get("ok"):
+            _attach_log_tail(result, "edit_hydrate")
         _emit_content(machine, result)
         summary["hydrated"] += 1
         summary["results"].append(
@@ -225,6 +249,8 @@ def run_once(
             summary["failed"] += 1
             continue
 
+        if result["outcome"] not in GOOD_EDIT_OUTCOMES:
+            _attach_log_tail(result, "edit_reconcile")
         _emit_attempt(machine, result)
         summary["results"].append(
             {"post_id": post_id, "kind": "reconcile", "outcome": result["outcome"]}

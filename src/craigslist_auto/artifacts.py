@@ -75,6 +75,40 @@ def _spool(
     )
 
 
+def capture_text(
+    text: str,
+    *,
+    flow: str,
+    label: str,
+    post_id: str | None = None,
+    account: str | None = None,
+) -> list[str]:
+    """Ship a blob of text to the dashboard as an artifact.
+
+    Used for the tail of `logs/run.log`. The desktop's own log is the one place
+    a failure's full context lives — every selector count, every navigation —
+    and it sits on a machine the operator is usually not sitting at. Uploading
+    the relevant slice on failure means a diagnosis does not require someone to
+    go and find the box.
+
+    Stored as `kind='html'` because that is what the ingest route accepts; the
+    content type keeps it honest.
+    """
+    if not text:
+        return []
+    artifact_id = _new_id()
+    data = text.encode("utf-8", errors="replace")[-MAX_BYTES:]
+    try:
+        _spool(
+            artifact_id, data, kind="html", content_type="text/plain; charset=utf-8",
+            post_id=post_id, account=account, flow=flow, label=label,
+        )
+    except Exception as e:  # pragma: no cover — evidence must not break a flow
+        logger.warning(f"could not spool {label} text artifact: {e}")
+        return []
+    return [artifact_id]
+
+
 def capture_page(
     page,
     *,

@@ -266,7 +266,36 @@ def hub_step_url(hub_url: str, step: str) -> str:
 # useful artifact in this project right now is a healthy edit form: it is the
 # DOM needed to replace the guesses in SEL. Off by default so steady-state
 # upload volume stays flat once the selectors are settled.
-TRACE = os.environ.get("CL_EDIT_TRACE", "").strip().lower() in ("1", "true", "yes")
+_TRACE_RAW = os.environ.get("CL_EDIT_TRACE", "").strip().lower()
+TRACE = _TRACE_RAW in ("1", "true", "yes", "all")
+# `CL_EDIT_TRACE=all` captures every step, not just the interesting ones. Three
+# bugs running have been "the browser was not on the page the code thought", and
+# reconstructing that from the one capture taken at the end is guesswork. This
+# is the filmstrip.
+TRACE_ALL = _TRACE_RAW == "all"
+
+# Steps worth a capture even on an ordinary TRACE run: where we landed, what the
+# form looked like, what the gallery looked like, and what came back from the
+# two writes.
+TRACE_STEPS = frozenset({
+    "open_edit_form", "open_edit_step", "read_images", "hydrate",
+    "submit_copy", "open_images_step", "publish",
+})
+
+# How much of the desktop's own log to ship when something fails.
+LOG_TAIL_LINES = 400
+
+
+def _log_tail(lines: int = LOG_TAIL_LINES) -> str:
+    """The tail of logs/run.log, for shipping alongside a failure."""
+    from .config import LOGS_DIR
+
+    path = LOGS_DIR / "run.log"
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            return "".join(f.readlines()[-lines:])
+    except Exception as e:  # pragma: no cover — defensive
+        return f"(could not read {path}: {e})"
 
 
 class EditFailure(RuntimeError):
@@ -303,19 +332,51 @@ class StepLog:
     steps: list[dict] = field(default_factory=list)
     current: str | None = None
     _started: float = 0.0
+    # Set once the browser exists, so every step can record where it actually
+    # was. This is the single most useful field on the trail: every bug so far
+    # has been the browser sitting on a page the code did not expect, and
+    # without this it takes an artifact download to find that out.
+    page: object | None = None
+    flow: str = "edit"
+    post_id: str | None = None
+    account: str | None = None
+    artifacts_out: list[str] = field(default_factory=list)
+
+    def where(self) -> str | None:
+        if self.page is None:
+            return None
+        try:
+            return f"{self.page.title()} | {self.page.url}"
+        except Exception:  # pragma: no cover — page may be mid-navigation
+            return None
+
+    def _capture(self, name: str, ok: bool) -> None:
+        if self.page is None or not TRACE:
+            return
+        if not (TRACE_ALL or not ok or name in TRACE_STEPS):
+            return
+        try:
+            self.artifacts_out.extend(artifacts.capture_page(
+                self.page, flow=self.flow, label=f"step_{name}",
+                post_id=self.post_id, account=self.account,
+            ))
+        except Exception:  # pragma: no cover — evidence must not break a flow
+            pass
 
     @contextmanager
     def step(self, name: str):
         self.current = name
         self._started = time.monotonic()
-        logger.debug(f"edit step: {name}")
+        logger.debug(f"edit step: {name}  at {self.where()}")
         try:
             yield
         except Exception:
-            self._record(name, ok=False)
+            self._record(name, ok=False, note=self.where())
+            self._capture(name, ok=False)
             raise
         else:
-            self._record(name, ok=True)
+            self._record(name, ok=True, note=self.where())
+            self._capture(name, ok=True)
 
     def _record(self, name: str, *, ok: bool, note: str | None = None) -> None:
         self.steps.append({
@@ -478,6 +539,13 @@ def hydrate_post(
         account, headless=headless, flow="edit", lease_blocking=False
     ) as ctx:
         page = ctx.new_page()
+        # One list, so a capture taken inside a step ends up on the event with
+        # everything else rather than being quietly dropped.
+        log.page = page
+        log.flow = "edit_hydrate"
+        log.post_id = post_id
+        log.account = account.name
+        log.artifacts_out = artifact_ids
         try:
             with log.step("open_account_page"):
                 _open_account_page(page, account.name)
@@ -815,6 +883,11 @@ def reconcile_post(
         account, headless=headless, flow="edit", lease_blocking=False
     ) as ctx:
         page = ctx.new_page()
+        log.page = page
+        log.flow = "edit_reconcile"
+        log.post_id = post_id
+        log.account = account.name
+        log.artifacts_out = artifact_ids
         try:
             with log.step("open_account_page"):
                 _open_account_page(page, account.name)

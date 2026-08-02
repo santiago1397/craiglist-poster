@@ -120,6 +120,20 @@ in **Diagnostics → Editing live posts**.
 > To stop it at any time, without a deploy: **Settings → Guardrails**, or
 > `UPDATE guardrail_settings SET edits_enabled = FALSE, edits_paused_reason = '…'`.
 
+**Debugging an edit.** Every step of a run records the page it was actually on —
+title and URL — on the attempt's step trail, visible under the post's Edit
+history. That is usually enough: three of the first bugs here were the browser
+sitting on a page the code did not expect.
+
+| `CL_EDIT_TRACE` | What gets captured |
+|---|---|
+| unset | screenshot + HTML on failure only |
+| `1` | the above, plus the landing page, both forms, the gallery, and both writes |
+| `all` | the above, plus every single step — a filmstrip of the whole walk |
+
+A failed run also uploads the tail of `logs/run.log` as an artifact, so the
+desktop's own log is readable from the dashboard without going to the machine.
+
 **County and service type are not editable on a live post.** Craigslist's edit
 form exposes no control for either, so offering them would stage a change the
 desktop can never make. Anything else it cannot reach fails loudly rather than
