@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from patchright.sync_api import Page
 
-from .config import ACCOUNTS, DATA_DIR, LOGS_DIR, Account
+from .config import ACCOUNTS, DATA_DIR, LOGS_DIR, Account, machine_name
 from .human import read_pause, sleep_jitter
 from .poster import launch_account
 
@@ -1035,7 +1035,7 @@ def _emit_ended_content(account_name: str, post_id: str, content: dict) -> None:
     try:
         reporter_mod.emit(PostContent(
             ts=datetime.now(timezone.utc),
-            machine=os.environ.get("CL_MACHINE") or platform.node().lower(),
+            machine=machine_name(),
             account=account_name,
             post_id=post_id,
             ok=True,

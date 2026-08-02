@@ -369,6 +369,65 @@ if _cap is not None:
         )
 
 
+# --- every name a browser flow reaches for must actually resolve ------------
+# `_emit_ended_content` referenced `os` and `platform` in a module that imports
+# neither. It raised NameError inside its own `except`, logged a warning nobody
+# was reading, and turned a working recovery into a silent no-op — a scan that
+# opened three postings, captured all three, and reported nothing.
+#
+# These functions only ever run with a live browser, so no test exercises them
+# and a missing import survives everything else in this suite. Reading
+# LOAD_GLOBAL straight off the bytecode is exact: it is the set of names Python
+# will look up in the module namespace, and nothing else. (`getclosurevars`
+# looks like the tool for this and is not — it reports attribute names too, so
+# every `.strip()` and `.count()` comes back as unresolved.)
+import builtins as _bi
+import dis as _dis
+
+try:
+    import inspect as _i4
+    from craigslist_auto import editor as _e4, edit_worker as _w4, stats as _s4
+    _MODULES = {"editor": _e4, "edit_worker": _w4, "stats": _s4}
+except Exception as e:  # pragma: no cover
+    _MODULES = {}
+    print(f"(skipping unbound-name checks: {e})")
+
+
+def _global_names(fn):
+    """Names this function will look up in its module namespace, recursively."""
+    seen = set()
+    stack = [fn.__code__]
+    while stack:
+        code = stack.pop()
+        for ins in _dis.get_instructions(code):
+            if ins.opname == "LOAD_GLOBAL" and isinstance(ins.argval, str):
+                seen.add(ins.argval)
+        stack.extend(c for c in code.co_consts if hasattr(c, "co_names"))
+    return seen
+
+
+for _mod_name, _mod in _MODULES.items():
+    for _fn_name, _fn in sorted(vars(_mod).items()):
+        if not callable(_fn) or not hasattr(_fn, "__code__"):
+            continue
+        if getattr(_fn, "__module__", None) != _mod.__name__:
+            continue
+        # `@contextmanager` hands back a wrapper whose `__module__` is copied
+        # from the function it decorated but whose code lives in contextlib.
+        # Match on where the code actually is.
+        if _fn.__code__.co_filename != _mod.__file__:
+            continue
+        missing = sorted(
+            n for n in _global_names(_fn)
+            if n not in vars(_mod) and not hasattr(_bi, n)
+        )
+        if missing:
+            failures.append(
+                f"{_mod_name}.{_fn_name} looks up {missing} at runtime, and the "
+                f"module neither defines nor imports them"
+            )
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
