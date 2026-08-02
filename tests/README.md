@@ -27,13 +27,18 @@ such limitation, so the CLI has no excuse. It also pins that a guardrail refusal
 exits non-zero with its reasons intact, and reaches an MCP client as readable
 tool output rather than a transport error a model would just retry.
 
-`test_agent_api.py` covers the read surface AI agents use. Two things it pins:
-the publish endpoint refuses a key in the query string **even when a valid
-header is also present** (by then the secret is already in the access log), and
-the prose renderers keep their caveats — that stats are a once-daily scrape,
-that post times are forecasts, that no errors is not health. Those conditions
-live inside sentences rather than in JSON fields precisely because a model drops
-a field when summarising and does not drop a clause it is reading.
+`test_agent_api.py` covers the read and compose surfaces AI agents use. Things
+it pins: the publish endpoint refuses a key in the query string **even when a
+valid header is also present** (by then the secret is already in the access
+log); no compose model exposes `reviewed` or `status`, which is the flag
+deciding whether machine-written copy reaches a live listing; the generated
+manual documents request bodies (this module uses `from __future__ import
+annotations`, so annotations are strings and a naive `issubclass` check silently
+documents every compose route as taking no input); and the prose renderers keep
+their caveats — that stats are a once-daily scrape, that post times are
+forecasts, that no errors is not health. Those conditions live inside sentences
+rather than in JSON fields precisely because a model drops a field when
+summarising and does not drop a clause it is reading.
 
 `test_failure_reporting.py` covers the rules that decide whether a failure can
 be debugged at all: `failed_step` is never None, every step the poster can die
@@ -88,6 +93,7 @@ PYTHONPATH=backend uv run python tests/test_image_archive.py # keeping our own c
 PYTHONPATH=backend uv run python tests/test_posts_window.py # the 90-day default never hides posts silently
 PYTHONPATH=backend uv run python tests/test_hydration_evidence.py  # the selector census reaches the dashboard
 PYTHONPATH=backend uv run python tests/test_agent_reports.py  # the agent reports' SQL, empty and populated
+PYTHONPATH=backend uv run python tests/test_agent_compose.py  # what an agent key may and may not build
 PYTHONPATH=backend uv run python tests/test_db_timezone.py    # date boundaries are local, not UTC
 
 dropdb cl_scratch
@@ -126,6 +132,17 @@ excluded posts early. The pool now opens connections with
 `-c timezone=<DISPLAY_TZ>`; remove that and this test fails **at any hour**,
 because it compares against the wall clock rather than assuming the run happens
 inside the broken window.
+
+`test_agent_compose.py` covers the boundary around an `agent`-scope key. Two
+properties matter more than the rest, and both are asserted at more than one
+layer because both are defence in depth: **an agent cannot publish what it
+wrote** (no route exposes `reviewed`, `create_draft` forces it false, and
+`post-now` refuses an unreviewed draft), and **an agent can only approve an
+image it generated itself** (a human's image and another key's are both
+refused). It also pins that an unroutable county is rejected at authoring time —
+the desktop matches the county by substring to pick the Craigslist subarea, so a
+bad value publishes in the wrong place rather than failing, and this is the last
+point it can be caught.
 
 `test_queue_logic.py` is the important one. It exercises the parts that only
 fail at runtime — the SQL, `pg_trgm`, the claim's `FOR UPDATE SKIP LOCKED`, and

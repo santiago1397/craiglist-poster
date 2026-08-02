@@ -39,7 +39,18 @@ READS = [
     "/agent/help", "/agent/status", "/agent/queue", "/agent/posts",
     "/agent/stats", "/agent/problems", "/agent/logs", "/agent/inventory",
 ]
-required = [*READS, "/agent/post-now", "/settings/api-keys", "/settings/api-keys/{key_id}"]
+# The compose surface. Every one of these writes something or spends money, so
+# each is header-only and 'agent'-scope.
+COMPOSE = [
+    "/agent/locations", "/agent/images/generate",
+    "/agent/images/{image_id}/approve", "/agent/drafts",
+    "/agent/drafts/{draft_id}", "/agent/drafts/{draft_id}/cover",
+    "/agent/drafts/{draft_id}/autofill",
+]
+required = [
+    *READS, *COMPOSE, "/agent/post-now",
+    "/settings/api-keys", "/settings/api-keys/{key_id}",
+]
 missing = [r for r in required if r not in paths]
 assert not missing, f"missing routes: {missing}"
 ok.append(f"routes OK ({len(required)} endpoints registered)")
@@ -80,6 +91,86 @@ ok.append("auth OK (publishing refuses a key in the query string even when a hea
 r = client.post("/agent/post-now", json={"draft_id": 1})
 assert r.status_code == 401, f"post-now unauthenticated returned {r.status_code}"
 ok.append("auth OK (publishing rejects an anonymous caller)")
+
+# ---------------------------------------------------------------------------
+# The compose surface
+# ---------------------------------------------------------------------------
+
+# Anonymous. Every compose route writes or spends, so a missing guard here is
+# worse than on a read — and with no database attached, a 500 would prove one.
+COMPOSE_CALLS = [
+    ("get", "/agent/locations", None),
+    ("post", "/agent/images/generate", {"prompt": "x"}),
+    ("post", "/agent/images/1/approve", {}),
+    ("post", "/agent/drafts", {"account": "craigs1", "title": "t", "body": "b",
+                               "county": "Broward", "city": "Davie"}),
+    ("get", "/agent/drafts/1", None),
+    ("patch", "/agent/drafts/1", {"title": "t"}),
+    ("post", "/agent/drafts/1/cover", {"image_id": 1}),
+    ("post", "/agent/drafts/1/autofill", {"count": 5}),
+]
+for method, path, payload in COMPOSE_CALLS:
+    call = getattr(client, method)
+    r = call(path) if payload is None else call(path, json=payload)
+    assert r.status_code == 401, \
+        f"{method.upper()} {path} without a key returned {r.status_code}"
+ok.append(f"auth OK ({len(COMPOSE_CALLS)} compose endpoints reject an anonymous caller)")
+
+# An 'agent' key can publish, so it is refused in the query string on every
+# verb — including the read-shaped ones. The refusal must land BEFORE the key is
+# resolved, which is what makes it assertable with no database: a 400 here means
+# the check ran on the request, not on a row.
+for method, path, payload in COMPOSE_CALLS:
+    call = getattr(client, method)
+    url = f"{path}?key=1.somesecret"
+    r = call(url) if payload is None else call(url, json=payload)
+    assert r.status_code == 400, \
+        f"{method.upper()} {path} with ?key= returned {r.status_code}, expected 400"
+    assert "header" in str(r.json()["detail"]).lower()
+ok.append("auth OK (composing refuses a key in the query string, before any lookup)")
+
+# ---------------------------------------------------------------------------
+# The publishing gate
+# ---------------------------------------------------------------------------
+
+# The one property this whole feature rests on: no compose route may accept
+# `reviewed` or `status`. A draft an agent wrote must sit unreviewed until a
+# human says otherwise, and `drafts_svc.update_draft` would honour either field
+# if it ever reached it.
+from app.routers.agent import DraftCreateBody, DraftPatchBody  # noqa: E402
+
+for model in (DraftCreateBody, DraftPatchBody):
+    for forbidden in ("reviewed", "status"):
+        assert forbidden not in model.model_fields, \
+            f"{model.__name__} exposes {forbidden!r} — an agent could publish its own copy"
+ok.append("gate OK (no compose model accepts 'reviewed' or 'status')")
+
+# Absent is not enough — pydantic ignores unknown fields by default, so without
+# extra='forbid' a caller sending `reviewed: true` gets a 201 and a draft it
+# believes is approved. That is the most dangerous misunderstanding available on
+# this surface, so it must be a refusal, not a silent drop. Asserted against the
+# model directly because the route's auth dependency answers first over HTTP.
+from pydantic import ValidationError  # noqa: E402
+
+VALID = {"account": "craigs1", "title": "t", "body": "b",
+         "county": "Broward", "city": "Davie"}
+DraftCreateBody(**VALID)  # the same payload without the extra field is fine
+
+for forbidden in ({"reviewed": True}, {"status": "posted"}):
+    try:
+        DraftCreateBody(**VALID, **forbidden)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError(f"DraftCreateBody silently accepted {forbidden}")
+
+try:
+    DraftPatchBody(title="t", reviewed=True)
+except ValidationError:
+    pass
+else:
+    raise AssertionError("DraftPatchBody silently accepted reviewed=True")
+ok.append("gate OK (a body carrying reviewed or status is refused, not ignored)")
 
 # ---------------------------------------------------------------------------
 # Access-log redaction
@@ -215,5 +306,31 @@ assert "https://example.com/agent/post-now" in described
 assert "window (default: 7d)" in described
 assert "'yesterday', '7d' or '30d'" in described
 ok.append("help OK (generated from the live route table, parameters included)")
+
+# Every compose route appears, and — the part that is easy to lose — so does its
+# request body. This module carries `from __future__ import annotations`, which
+# turns every annotation into a string; without resolving them, `_describe_body`
+# silently matches nothing and the manual documents these as taking no input. A
+# model reading that would have to guess field names and get a 422 it cannot
+# diagnose, so this assertion is the canary for that regression.
+for path in COMPOSE:
+    assert f"https://example.com{path}" in described, f"{path} missing from generated help"
+assert "JSON body:" in described, "no request body was documented at all"
+for field in ("account (string, required)", "title (string, required)",
+              "county (string, required)", "image_id (integer, required)"):
+    assert field in described, f"help does not document the body field: {field}"
+# Optional fields the server fills in must not render as "default: " with a hole
+# where the value would be.
+assert "default: )" not in described, "an empty-string default rendered as a blank"
+ok.append("help OK (compose routes document their JSON bodies, resolved past PEP 563)")
+
+# The manual is the first thing an agent reads. The review gate has to be in it,
+# not only in the tool descriptions, because the HTTP surface has no tools.
+from app.routers.agent import _HELP_PREAMBLE  # noqa: E402
+
+lowered = _HELP_PREAMBLE.lower()
+for clause in ("unreviewed", "cannot publish", "human"):
+    assert clause in lowered, f"the help preamble does not state: {clause}"
+ok.append("help OK (the preamble states that composing is not publishing)")
 
 print("\n".join(ok))

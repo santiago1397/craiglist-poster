@@ -47,6 +47,11 @@ type Draft = {
   attempts: number;
   created_at: string;
   generated_by: string | null; // 'ai' | 'fallback' | null when hand-written
+  // Set when an agent API key wrote this draft rather than a person or the
+  // top-up loop. `source` carries the key's label ("agent:<label>"), which is
+  // what makes "who wrote this" answerable months later.
+  created_by_key_id: number | null;
+  source: string | null;
   // "Post now": set while the desktop has yet to pick the request up, cleared
   // by event ingest once the attempt comes back. There is no client-side
   // mirror of this — the column is the truth and the poll below reads it.
@@ -831,6 +836,19 @@ function DraftRow(props: {
             {d.generated_by === "ai" && (
               <span className="text-xs px-1.5 py-0.5 rounded bg-accent-soft text-accent-soft-fg">
                 AI
+              </span>
+            )}
+            {/* Written through an agent API key. Distinct from the "AI" badge,
+                which means the top-up loop drafted the copy: this one says an
+                outside assistant composed it and nobody has read it yet. */}
+            {d.created_by_key_id !== null && (
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-accent-soft text-accent-soft-fg"
+                title={`Composed through an agent API key (${
+                  d.source || "unlabelled"
+                }). It cannot publish until you mark it reviewed.`}
+              >
+                agent-written
               </span>
             )}
             {d.generated_by === "fallback" && (

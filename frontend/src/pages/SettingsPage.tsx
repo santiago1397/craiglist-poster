@@ -1174,21 +1174,32 @@ function MachineTokens() {
   );
 }
 
+type KeyScope = "read" | "post" | "agent";
+
 type ApiKey = {
   id: number;
   label: string;
-  scope: "read" | "post";
+  scope: KeyScope;
   created_at: string;
   last_seen_at: string | null;
   revoked_at: string | null;
+  images_generated: number;
+  cost_usd: number;
+  drafts_created: number;
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
 
+const SCOPE_BADGE: Record<KeyScope, string> = {
+  read: "read only",
+  post: "can publish",
+  agent: "can compose + publish",
+};
+
 function ApiKeys() {
   const qc = useQueryClient();
   const [label, setLabel] = useState("");
-  const [scope, setScope] = useState<"read" | "post">("read");
+  const [scope, setScope] = useState<KeyScope>("read");
   const [issued, setIssued] = useState<{ key: string; scope: string } | null>(null);
 
   const keysQ = useQuery({
@@ -1246,12 +1257,35 @@ function ApiKeys() {
           <code className="block break-all rounded bg-bg border border-border-strong px-2 py-1.5 text-xs font-mono">
             {issued.key}
           </code>
-          <p className="text-xs text-ok-fg">
-            Give an assistant this one URL and it can work out the rest:
-          </p>
-          <code className="block break-all rounded bg-bg border border-border-strong px-2 py-1.5 text-xs font-mono">
-            {API_BASE}/agent/help?key={issued.key}
-          </code>
+          {/* An agent key is refused in a query string on every route, so
+              offering the ?key= URL here would hand over a link that 400s and
+              teach exactly the habit the scope exists to prevent. */}
+          {issued.scope === "agent" ? (
+            <>
+              <p className="text-xs text-ok-fg">
+                Set this as an environment variable — it must be sent as a
+                header, never in a URL, including on reads:
+              </p>
+              <code className="block break-all rounded bg-bg border border-border-strong px-2 py-1.5 text-xs font-mono">
+                export CL_AGENT_KEY={issued.key}
+              </code>
+              <p className="text-xs text-ok-fg">
+                Then <code>python tools/cl_agent.py help</code>, or point an MCP
+                host at <code>tools/cl_agent_mcp.py</code>. This key can write ad
+                copy and generate images, but it cannot mark a draft reviewed —
+                nothing it writes can publish until you review it here.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-xs text-ok-fg">
+                Give an assistant this one URL and it can work out the rest:
+              </p>
+              <code className="block break-all rounded bg-bg border border-border-strong px-2 py-1.5 text-xs font-mono">
+                {API_BASE}/agent/help?key={issued.key}
+              </code>
+            </>
+          )}
           {issued.scope === "post" && (
             <p className="text-xs text-ok-fg">
               This key can publish drafts that have been marked reviewed. It must
@@ -1281,11 +1315,12 @@ function ApiKeys() {
           <span className="text-xs text-fg-muted">Scope</span>
           <select
             value={scope}
-            onChange={(e) => setScope(e.target.value as "read" | "post")}
+            onChange={(e) => setScope(e.target.value as KeyScope)}
             className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
           >
             <option value="read">Read only</option>
             <option value="post">Read + publish reviewed drafts</option>
+            <option value="agent">Read + compose + publish</option>
           </select>
         </label>
         <button
@@ -1306,6 +1341,17 @@ function ApiKeys() {
         </p>
       )}
 
+      {scope === "agent" && (
+        <p className="text-xs text-warn-fg">
+          An agent key can write ad copy, generate images (which costs money, and
+          is not capped) and attach them, as well as publish. It cannot mark a
+          draft reviewed, so everything it writes waits for you in Review before
+          it can go anywhere. It is refused in a URL on every request, including
+          reads — issue a separate read-only key for anything that cannot set
+          headers.
+        </p>
+      )}
+
       {keys.length === 0 ? (
         <p className="text-sm text-fg-subtle">
           No API keys. Nothing outside this dashboard can read the system.
@@ -1319,18 +1365,28 @@ function ApiKeys() {
                   {k.label || <span className="text-fg-subtle">(unlabelled)</span>}
                   <span
                     className={
-                      k.scope === "post"
-                        ? "ml-2 text-xs px-1.5 py-0.5 rounded bg-warn text-warn-fg"
-                        : "ml-2 text-xs px-1.5 py-0.5 rounded bg-surface-2 text-fg-muted"
+                      k.scope === "read"
+                        ? "ml-2 text-xs px-1.5 py-0.5 rounded bg-surface-2 text-fg-muted"
+                        : "ml-2 text-xs px-1.5 py-0.5 rounded bg-warn text-warn-fg"
                     }
                   >
-                    {k.scope === "post" ? "can publish" : "read only"}
+                    {SCOPE_BADGE[k.scope] ?? k.scope}
                   </span>
                 </p>
                 <p className="text-xs text-fg-subtle">
                   created {formatDateTime(k.created_at)} · last used{" "}
                   {k.last_seen_at ? formatDateTime(k.last_seen_at) : "never"}
                 </p>
+                {/* Generation through an agent key is uncapped by design, so
+                    what it has spent is the only thing standing in for a cap. */}
+                {(k.images_generated > 0 || k.drafts_created > 0) && (
+                  <p className="text-xs text-fg-subtle">
+                    {k.images_generated} image
+                    {k.images_generated === 1 ? "" : "s"} generated · $
+                    {(k.cost_usd ?? 0).toFixed(2)} spent · {k.drafts_created}{" "}
+                    draft{k.drafts_created === 1 ? "" : "s"} written
+                  </p>
+                )}
               </div>
               {k.revoked_at ? (
                 <span className="text-xs px-2 py-0.5 rounded bg-surface-2 text-fg-muted">

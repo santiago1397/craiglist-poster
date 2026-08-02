@@ -447,10 +447,22 @@ the caveats welded into the sentences — that stats are a once-a-day scrape, th
 post times are forecasts, that no errors does not mean healthy.
 
 It can read status, the queue, published posts, performance, problems, raw error
-logs and image inventory. It cannot write copy, edit live ads, change guardrails
-or spend money. The single exception is publishing a draft **you have already
-marked reviewed**, which needs a separate `post`-scope key and still passes every
-guardrail — see [AGENTS.md](AGENTS.md).
+logs and image inventory.
+
+With an **`agent`-scope key** it can also compose: generate an image from a
+prompt, write a draft, place it somewhere you are not already advertising,
+attach a cover and fill the photo slots. What it cannot do is decide that any of
+that goes out. A draft an agent writes is **unreviewed**, no API route can
+change that, and an unreviewed draft cannot publish — so the worst case is copy
+you read and delete, never an ad you have to take down. It can approve images it
+generated itself and nothing else, and it cannot edit live ads or change
+guardrails.
+
+Image generation through such a key is not capped. Settings → API keys shows how
+many images each key has generated and what they cost.
+
+Publishing a draft **you have already marked reviewed** needs a `post`- or
+`agent`-scope key and still passes every guardrail — see [AGENTS.md](AGENTS.md).
 
 For a shell or your own terminal there is a CLI, and for MCP-capable hosts an
 MCP server. Both are single files in `tools/` with no dependencies beyond the
