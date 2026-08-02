@@ -15,7 +15,16 @@ uv run python tests/test_browser_lease.py    # two flows can't share one Chrome 
 uv run python tests/test_edit_guards.py      # content hash, edit clamps, posting-slot guard
 uv run python tests/test_failure_reporting.py # every failure reaches the VPS debuggable
 PYTHONPATH=backend uv run python tests/test_agent_api.py  # agent auth boundaries + the caveats in every answer
+PYTHONPATH=backend uv run python tests/test_agent_tools.py # the CLI and MCP wrappers in tools/
 ```
+
+`test_agent_tools.py` replaces `urlopen`, so it inspects requests instead of
+sending them. The property it exists for: **the CLI must never put the key in a
+URL.** The HTTP surface accepts `?key=` because many AI fetch tools cannot set
+headers, and that concession writes the key into access logs — a shell has no
+such limitation, so the CLI has no excuse. It also pins that a guardrail refusal
+exits non-zero with its reasons intact, and reaches an MCP client as readable
+tool output rather than a transport error a model would just retry.
 
 `test_agent_api.py` covers the read surface AI agents use. Two things it pins:
 the publish endpoint refuses a key in the query string **even when a valid

@@ -61,6 +61,62 @@ client's.
 
 ---
 
+## Three ways in, one API
+
+All three call the same endpoints. Pick by what the agent can do, not by which
+is newest.
+
+| | Use when | Needs |
+|---|---|---|
+| **Plain HTTP** | the agent can fetch a URL and nothing else | nothing |
+| **CLI** (`tools/cl_agent.py`) | the agent has a shell, or you want to check something yourself | Python 3.9+ |
+| **MCP** (`tools/cl_agent_mcp.py`) | the host speaks MCP (Claude Code, Claude Desktop) | Python 3.9+, one config entry |
+
+Both tools are single files with **no dependencies beyond the standard
+library** — no `pip install`, no virtualenv. Copy either one anywhere Python
+runs.
+
+### CLI
+
+```bash
+export CL_AGENT_KEY=<key from Settings -> API keys>
+python tools/cl_agent.py help          # the server's own manual
+python tools/cl_agent.py status
+python tools/cl_agent.py stats --window 7d
+python tools/cl_agent.py logs --hours 48 --flow post
+python tools/cl_agent.py post-now 123  # needs a 'post'-scope key
+```
+
+Add `--json` to any read command. `CL_AGENT_URL` overrides the host.
+
+**The CLI always sends the key in a header**, never in the URL — a shell can
+set headers, so there is no reason to use the leaky path. Nothing it does puts
+the key in an access log or your shell history. A test enforces this.
+
+Refusals exit non-zero and print the server's own wording, so a script that
+checks the exit code cannot mistake a blocked post for a published one.
+
+### MCP
+
+```json
+{
+  "mcpServers": {
+    "craigslist": {
+      "command": "python",
+      "args": ["tools/cl_agent_mcp.py"],
+      "env": { "CL_AGENT_KEY": "<key>" }
+    }
+  }
+}
+```
+
+Eight tools arrive named, described and typed, so the model never builds a URL.
+The descriptions carry the same caveats the prose does — including that
+`craigslist_post_now` publishes a real advert, cannot be undone, and should be
+confirmed with the user first.
+
+---
+
 ## What an agent can see
 
 | Endpoint | Question it answers |
