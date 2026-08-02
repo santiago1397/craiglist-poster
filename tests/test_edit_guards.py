@@ -191,6 +191,30 @@ if _recon is not None:
         )
 
 
+# --- a resumed edit session is not a failure --------------------------------
+# Craigslist's edit wizard is /k/<token> with the step in ?s=. A fresh edit
+# opens at ?s=preview, but a session left open resumes wherever it got to —
+# which happened the moment a run submitted the copy page and stopped. Requiring
+# the preview turned a perfectly resumable draft into a hard failure.
+try:
+    from craigslist_auto.editor import is_edit_session as _in_session
+except Exception as e:  # pragma: no cover
+    _in_session = None
+    print(f"(skipping edit-session checks: {e})")
+
+if _in_session is not None:
+    for url, want, label in [
+        ("https://post.craigslist.org/k/TOK?s=preview", True, "fresh edit"),
+        ("https://post.craigslist.org/k/TOK?s=edit", True, "resumed on the copy step"),
+        ("https://post.craigslist.org/k/TOK?s=editimage", True, "resumed on images"),
+        ("https://post.craigslist.org/k/TOK", True, "no step at all"),
+        ("https://accounts.craigslist.org/login", False, "logged out"),
+        ("https://post.craigslist.org/manage/TOK", False, "still on manage"),
+    ]:
+        if _in_session(url) is not want:
+            failures.append(f"edit-session detection ({label}): {url}")
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
