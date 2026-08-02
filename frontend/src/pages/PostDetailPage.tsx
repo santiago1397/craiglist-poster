@@ -54,10 +54,20 @@ export default function PostDetailPage() {
     queryKey: ["edits", postId],
     queryFn: () => api.get<EditablePost>(`/edits/${postId}`),
     enabled: !!postId,
-    refetchInterval: (query) =>
-      query.state.data?.hydrate_requested_at || query.state.data?.edit_status === "applying"
-        ? 15_000
-        : false,
+    // Poll while anything is in flight — including the window between asking
+    // for a reconcile and the desktop claiming it. Keying only on `applying`
+    // was circular: the page learns it is applying by polling, and only starts
+    // polling once it knows. So Apply now left a stale view in which the
+    // controls stayed enabled, and the next click came back 409 "being edited
+    // right now" with no visible reason.
+    refetchInterval: (query) => {
+      const d = query.state.data;
+      if (!d) return false;
+      return d.hydrate_requested_at || d.reconcile_requested_at ||
+        d.edit_status === "applying"
+        ? 5_000
+        : false;
+    },
   });
 
   // Both feed the form's selects. Same query keys Review uses, so arriving from
