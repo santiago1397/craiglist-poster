@@ -38,8 +38,8 @@ class GuardrailUpdate(BaseModel):
     # defence; the desktop clamps again to ceilings compiled into config.py.
     edits_enabled: bool | None = None
     min_hours_between_edits_same_post: int | None = Field(default=None, ge=1, le=720)
-    max_edits_per_account_per_day: int | None = Field(default=None, ge=0, le=20)
-    max_edits_per_post_lifetime: int | None = Field(default=None, ge=1, le=50)
+    max_edits_per_account_per_day: int | None = Field(default=None, ge=0, le=50)
+    max_edits_per_post_lifetime: int | None = Field(default=None, ge=1, le=200)
     edit_window_start_hour: int | None = Field(default=None, ge=0, le=23)
     edit_window_end_hour: int | None = Field(default=None, ge=1, le=24)
     edits_paused_reason: str | None = Field(default=None, max_length=200)

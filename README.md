@@ -146,8 +146,13 @@ is already up against its own caps — and "stop posting while I fix an ad" is a
 ordinary thing to want. To stop everything, turn off both under
 **Settings → Guardrails**.
 
-Edits have their own guardrails, mirroring posting: an edit window, a per-account
-daily cap, a per-post cooldown, and a lifetime cap. Failed attempts count against
+Edits have their own guardrails, all editable under **Settings → Editing live
+posts**: an edit window, a per-account daily cap, a per-post cooldown, and a
+lifetime cap. They are deliberately far looser than posting's, because editing
+your own ad is ordinary behaviour and you drive it by hand — the thing that
+stops a broken selector retrying forever is the per-post cooldown, not the daily
+cap. **Apply now** skips the window and the cooldown; it never skips the caps or
+the switch, and it tells you at the click if something will stop it. Failed attempts count against
 the cap on purpose, so a broken selector can't retry all day. The desktop clamps
 whatever the server sends to ceilings compiled into `config.py`.
 

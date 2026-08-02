@@ -50,21 +50,28 @@ FLOOR_MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 18
 EARLIEST_POST_HOUR = 6
 LATEST_POST_HOUR = 22
 
-# Editing ceilings (DESIGN_EDITS.md decision 30). Editing a live posting is not
-# obviously safer than creating one — it is browser activity on an aged account
-# that Craigslist may re-review — so it gets the same treatment: the dashboard
-# owns the live values, these are the outer bounds it cannot talk us past.
-CEILING_MAX_EDITS_PER_ACCOUNT_PER_DAY = 5
-CEILING_MAX_EDITS_PER_POST_LIFETIME = 10
-FLOOR_MIN_HOURS_BETWEEN_EDITS_SAME_POST = 24
+# Editing ceilings. Originally set to mirror posting's, on the reading that
+# editing a live posting is not obviously safer than creating one. That was too
+# cautious: posting's caps exist because volume of *new listings* is what gets an
+# account banned, whereas editing your own ad is ordinary behaviour Craigslist
+# expects, and the operator drives it by hand from the dashboard.
+#
+# What actually stops a broken selector retrying all day is the per-post
+# cooldown, not the daily cap — a failed reconcile that returns to `pending`
+# cannot be offered again until the cooldown passes. The cap is a backstop, so
+# it is set where it stops runaway automation without standing in front of
+# somebody editing their own ads.
+CEILING_MAX_EDITS_PER_ACCOUNT_PER_DAY = 50
+CEILING_MAX_EDITS_PER_POST_LIFETIME = 200
+FLOOR_MIN_HOURS_BETWEEN_EDITS_SAME_POST = 1
 
 # Defaults used when the server says nothing. `edits_enabled` is False on both
 # sides until the DESIGN_EDITS phase-0 spike has confirmed how Craigslist's edit
 # form actually behaves.
 EDITS_ENABLED = False
-MIN_HOURS_BETWEEN_EDITS_SAME_POST = 48
-MAX_EDITS_PER_ACCOUNT_PER_DAY = 3
-MAX_EDITS_PER_POST_LIFETIME = 5
+MIN_HOURS_BETWEEN_EDITS_SAME_POST = 2
+MAX_EDITS_PER_ACCOUNT_PER_DAY = 20
+MAX_EDITS_PER_POST_LIFETIME = 50
 EDIT_WINDOW_START_HOUR = 8
 EDIT_WINDOW_END_HOUR = 19
 
