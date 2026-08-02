@@ -86,6 +86,7 @@ PYTHONPATH=backend uv run python tests/test_edit_logic.py     # desired state, s
 PYTHONPATH=backend uv run python tests/test_edit_images.py    # staging images on a live posting
 PYTHONPATH=backend uv run python tests/test_hydration_evidence.py  # the selector census reaches the dashboard
 PYTHONPATH=backend uv run python tests/test_agent_reports.py  # the agent reports' SQL, empty and populated
+PYTHONPATH=backend uv run python tests/test_db_timezone.py    # date boundaries are local, not UTC
 
 dropdb cl_scratch
 ```
@@ -98,6 +99,16 @@ timezone, so a `CURRENT_DATE - N` baseline selects the same row as the latest
 snapshot every evening after 20:00 ET and reports zero views for every post,
 with no error anywhere. The window is anchored to each post's own newest
 snapshot instead. **Change that query and this test fails**, which is the point.
+
+`test_db_timezone.py` pins something invisible until evening. `snapshot_date`
+is written in America/New_York, Postgres on the VPS runs in UTC, so
+`CURRENT_DATE` and `timestamptz::date` roll over four hours before the data
+does. Between 20:00 and midnight Eastern, a scrape that had just finished
+reported `age_days = 1`, `days_active` gained a day, and the young-post filter
+excluded posts early. The pool now opens connections with
+`-c timezone=<DISPLAY_TZ>`; remove that and this test fails **at any hour**,
+because it compares against the wall clock rather than assuming the run happens
+inside the broken window.
 
 `test_queue_logic.py` is the important one. It exercises the parts that only
 fail at runtime — the SQL, `pg_trgm`, the claim's `FOR UPDATE SKIP LOCKED`, and
