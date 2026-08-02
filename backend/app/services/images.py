@@ -1175,8 +1175,10 @@ def posts_needing_archive(conn: psycopg.Connection, limit: int = 50) -> list[str
     entry whose URL names a downscaled variant was archived from a thumbnail,
     so the copy we hold is 50 pixels wide and needs replacing.
     """
+    # Raw string: the regex backslashes are for Postgres, and Python 3.12 warns
+    # about `\d` in a plain literal — a warning that becomes an error later.
     rows = conn.execute(
-        """
+        r"""
         SELECT post_id FROM posts
         WHERE jsonb_typeof(images) = 'array'
           AND jsonb_array_length(images) > 0
