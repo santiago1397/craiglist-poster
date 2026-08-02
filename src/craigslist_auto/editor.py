@@ -484,6 +484,34 @@ def _count(page: Page, key: str) -> int:
     return n
 
 
+def _goto_image_step(page: Page, hub_url: str) -> bool:
+    """Open the gallery sub-page. True only if we actually arrived.
+
+    Deep-linking `?s=editimage` from the copy step gets redirected straight back
+    to `?s=edit`, so the hop goes via the preview first — which is what clicking
+    "edit images" on the hub does anyway.
+
+    The return value is the point. A redirect leaves you on a page with no
+    gallery, where the thumbnail count is a truthful zero about the wrong page.
+    Believing it would tell a reconcile that a 24-image posting has none, and
+    "replace" would then delete nothing and upload twenty-four on top.
+    """
+    page.goto(hub_step_url(hub_url, HUB_STEP_PREVIEW), wait_until="domcontentloaded")
+    read_pause(500)
+    page.goto(hub_step_url(hub_url, HUB_STEP_IMAGES), wait_until="domcontentloaded")
+    read_pause(900)
+    # The uploader is on every state of this page, full or empty; the gallery is
+    # not, so `file_input` is what distinguishes "arrived, no images" from
+    # "never got here".
+    arrived = _count(page, "file_input") > 0
+    if not arrived:
+        logger.warning(
+            f"asked for the image step and landed on {page.url} — not reading a "
+            f"gallery from it"
+        )
+    return arrived
+
+
 def _is_fillable(page: Page, key: str) -> bool:
     """Is this selector backed by something that can actually take input?
 
@@ -711,18 +739,17 @@ def hydrate_post(
             # reconcile diff believe it was adding a gallery to a bare ad rather
             # than replacing one.
             with log.step("read_images"):
-                page.goto(
-                    hub_step_url(hub_url, HUB_STEP_IMAGES),
-                    wait_until="domcontentloaded",
-                )
-                read_pause(900)
-                images = _live_images(page)
-                log.note(
-                    "images",
-                    f"image_thumb={_count(page, 'image_thumb')} "
-                    f"file_input={_count(page, 'file_input')} "
-                    f"image_remove={_count(page, 'image_remove')}",
-                )
+                images = []
+                if _goto_image_step(page, hub_url):
+                    images = _live_images(page)
+                    log.note(
+                        "images",
+                        f"image_thumb={_count(page, 'image_thumb')} "
+                        f"file_input={_count(page, 'file_input')} "
+                        f"image_remove={_count(page, 'image_remove')}",
+                    )
+                else:
+                    log.note("images", f"gallery not reached, landed on {page.url}")
                 if TRACE or not images:
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_hydrate", label="images_loaded",
@@ -1053,11 +1080,23 @@ def reconcile_post(
                 # than replacing one. Read it where it lives, then come back, so
                 # the fill loop and its pre-flight run on the copy page.
                 with log.step("read_images"):
-                    page.goto(
-                        hub_step_url(hub_url, HUB_STEP_IMAGES),
-                        wait_until="domcontentloaded",
-                    )
-                    read_pause(700)
+                    if not _goto_image_step(page, hub_url):
+                        artifact_ids.extend(artifacts.capture_page(
+                            page, flow="edit_reconcile", label="gallery_not_reached",
+                            post_id=post_id, account=account.name,
+                        ))
+                        return _result(
+                            "failed_form", failed_step="read_images",
+                            error_type="gallery_not_reached",
+                            error_message=(
+                                f"could not open the image step — landed on "
+                                f"{page.url}. Refusing to guess at the live "
+                                f"gallery: reading it as empty would make this "
+                                f"replace upload on top of the existing images "
+                                f"rather than replace them."
+                            ),
+                            images_desired_count=len(photos),
+                        )
                     live_images = _live_images(page)
                     log.note("images", f"live={len(live_images)} desired={len(photos)}")
                     page.goto(
@@ -1201,23 +1240,11 @@ def reconcile_post(
                 try:
                     with log.step("open_images_step"):
                         # Via the hub. Going straight from the copy page to
-                        # ?s=editimage got redirected back to ?s=edit, so the
-                        # replace ran against a page with no gallery on it.
-                        page.goto(
-                            hub_step_url(hub_url, HUB_STEP_PREVIEW),
-                            wait_until="domcontentloaded",
-                        )
-                        read_pause(500)
-                        page.goto(
-                            hub_step_url(hub_url, HUB_STEP_IMAGES),
-                            wait_until="domcontentloaded",
-                        )
-                        read_pause(900)
-                        # BUG 3's guard: refuse to touch anything unless this is
-                        # really the gallery. Craigslist redirects out of the
-                        # image step in states we do not fully understand yet,
-                        # and every operation past here is destructive.
-                        if _count(page, "file_input") == 0:
+                        # One route to the gallery, verified, used everywhere.
+                        # Everything past this point is destructive, and the
+                        # image step redirects back to the copy page in states
+                        # we do not fully understand yet.
+                        if not _goto_image_step(page, hub_url):
                             artifact_ids.extend(artifacts.capture_page(
                                 page, flow="edit_reconcile",
                                 label="images_step_not_reached",
