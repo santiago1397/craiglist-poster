@@ -6,6 +6,7 @@ import { formatDate, formatDateTime, formatNumber } from "../lib/format";
 import { PostEditPanel } from "../components/post/PostEditPanel";
 import { PostEditHistory } from "../components/post/PostEditHistory";
 import { PostRecovery } from "../components/post/PostRecovery";
+import { PublishedImages } from "../components/post/PublishedImages";
 import type { LocationRef } from "../lib/posting";
 import type { EditablePost } from "../lib/edits";
 
@@ -145,6 +146,8 @@ export default function PostDetailPage() {
           onError={setError}
         />
       ) : null}
+
+      {editable && <PublishedImages images={editable.published_images ?? []} />}
 
       {editable && <PostEditHistory attempts={editable.attempts ?? []} />}
 

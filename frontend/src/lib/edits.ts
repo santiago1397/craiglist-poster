@@ -67,6 +67,20 @@ export type EditablePost = {
   reconcile_request_error: string | null;
 
   attempts: EditAttempt[];
+  /**
+   * The images this posting went out with, from the draft that produced it.
+   * `posts.images` holds Craigslist's own CDN URLs, which stop resolving when
+   * the posting ends — these are our bytes, kept for good.
+   */
+  published_images: PublishedImage[] | null;
+};
+
+export type PublishedImage = {
+  slot: number;
+  id: number;
+  kind: "cover" | "photo";
+  sha256: string | null;
+  used_at: string | null;
 };
 
 export type EditHealth = {

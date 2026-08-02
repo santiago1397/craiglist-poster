@@ -91,6 +91,27 @@ def get_post(post_id: str) -> dict:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
         out = dict(found)
         out["attempts"] = edits_svc.attempts_for_post(c, post_id)
+        # The images this posting actually went out with.
+        #
+        # `posts.images` is a manifest of Craigslist's own CDN URLs, captured by
+        # hydration — it dies with the posting, which is exactly when someone
+        # wants to know what was on it. The bytes we uploaded are ours,
+        # content-addressed and kept for good (`delete_image` refuses to remove
+        # anything published), so the draft's attachment rows are the durable
+        # record of what went out and in which slot.
+        out["published_images"] = [
+            dict(r) for r in c.execute(
+                """
+                SELECT di.slot, i.id, i.kind, i.sha256, i.used_at
+                FROM drafts d
+                JOIN draft_images di ON di.draft_id = d.id
+                JOIN images i ON i.id = di.image_id
+                WHERE d.posted_post_id = %s
+                ORDER BY di.slot
+                """,
+                (post_id,),
+            ).fetchall()
+        ]
     return out
 
 
