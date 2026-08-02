@@ -235,6 +235,12 @@ if _fill_src is not None:
             "_fill types every value character by character again — a full-length "
             "body takes over half an hour"
         )
+    # A long value must paste whatever the typing mode is, or setting
+    # CL_EDIT_TYPING=human quietly restores the half-hour edit.
+    if "len(value) <= PASTE_ABOVE_CHARS" not in _fill_src:
+        failures.append("the paste threshold no longer overrides the typing mode")
+    if _ed.EDIT_TYPING not in ("paste", "human"):
+        failures.append(f"unknown typing mode {_ed.EDIT_TYPING!r}")
     if _ed.PASTE_ABOVE_CHARS > 2000:
         failures.append(
             f"the paste threshold is {_ed.PASTE_ABOVE_CHARS} chars, high enough "
