@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -1064,13 +1065,37 @@ RECOVERED_SOURCE = "recovered"
 _ARCHIVE_MAX_BYTES = 8 * 1024 * 1024
 _ARCHIVE_TIMEOUT = 30.0
 
+# Craigslist encodes the size in the filename — `_50x50c`, `_300x300`,
+# `_600x450`, `_1200x900` — and `_1200x900` is the largest it keeps. The
+# manage/display page a scan reads renders its gallery strip at 50x50, so a
+# manifest scraped from it points at 50-pixel thumbnails unless something asks
+# for better. Normalising here as well as at the scraper means a manifest
+# already in the database heals itself without a second trip to Craigslist.
+_CL_VARIANT = re.compile(r"_\d+x\d+c?\.jpg$", re.I)
+_LARGEST_VARIANT = "_1200x900.jpg"
+
+
+def largest_variant(url: str) -> str:
+    """Rewrite a Craigslist image URL to the full-size original.
+
+    Anything unrecognised is returned unchanged: a working URL beats a clever
+    one, and a 404 here means the only surviving copy of that picture is lost.
+    """
+    if not url:
+        return url
+    if url.startswith("//"):
+        url = "https:" + url
+    return _CL_VARIANT.sub(_LARGEST_VARIANT, url)
+
 
 def archive_post_images(conn: psycopg.Connection, post_id: str) -> dict:
     """Fetch a posting's images and keep our own copies.
 
     Rewrites `posts.images` in place, adding `image_id` and `sha256` to each
-    entry it manages to store. Entries already carrying an `image_id` are left
-    alone, so this is safe to run repeatedly and cheap on the second pass.
+    entry it manages to store. An entry that already has an `image_id` is left
+    alone, so this is safe to run repeatedly and cheap on the second pass —
+    unless its URL was pointing at a downscaled variant, in which case the copy
+    we hold is a thumbnail and gets replaced by the full-size original.
     """
     import httpx
 
@@ -1084,17 +1109,22 @@ def archive_post_images(conn: psycopg.Connection, post_id: str) -> dict:
     if not manifest:
         return {"post_id": post_id, "stored": 0, "already": 0, "failed": 0}
 
-    stored = already = failed = 0
+    stored = already = failed = upgraded = 0
     with httpx.Client(timeout=_ARCHIVE_TIMEOUT, follow_redirects=True) as client:
         for entry in manifest:
-            if entry.get("image_id"):
-                already += 1
-                continue
             url = entry.get("url")
             if not url:
                 continue
-            if url.startswith("//"):
-                url = "https:" + url
+            full = largest_variant(url)
+            if full != url:
+                # What we hold, if anything, came from a smaller variant.
+                entry["url"] = url = full
+                if entry.get("image_id"):
+                    entry["image_id"] = entry["sha256"] = None
+                    upgraded += 1
+            if entry.get("image_id"):
+                already += 1
+                continue
             try:
                 resp = client.get(url)
                 resp.raise_for_status()
@@ -1130,12 +1160,21 @@ def archive_post_images(conn: psycopg.Connection, post_id: str) -> dict:
         (json.dumps(manifest), post_id),
     )
     if stored:
-        logger.info(f"archived {stored} image(s) for post {post_id}")
-    return {"post_id": post_id, "stored": stored, "already": already, "failed": failed}
+        logger.info(
+            f"archived {stored} image(s) for post {post_id}"
+            + (f" ({upgraded} replacing a downscaled copy)" if upgraded else "")
+        )
+    return {"post_id": post_id, "stored": stored, "already": already,
+            "failed": failed, "upgraded": upgraded}
 
 
 def posts_needing_archive(conn: psycopg.Connection, limit: int = 50) -> list[str]:
-    """Postings whose manifest still points only at Craigslist."""
+    """Postings whose pictures we do not yet hold at full size.
+
+    Two cases, and the second is why this is not just "image_id IS NULL": an
+    entry whose URL names a downscaled variant was archived from a thumbnail,
+    so the copy we hold is 50 pixels wide and needs replacing.
+    """
     rows = conn.execute(
         """
         SELECT post_id FROM posts
@@ -1143,7 +1182,10 @@ def posts_needing_archive(conn: psycopg.Connection, limit: int = 50) -> list[str
           AND jsonb_array_length(images) > 0
           AND EXISTS (
               SELECT 1 FROM jsonb_array_elements(images) e
-              WHERE e->>'url' IS NOT NULL AND e->>'image_id' IS NULL
+              WHERE e->>'url' IS NOT NULL
+                AND (e->>'image_id' IS NULL
+                     OR (e->>'url' ~* '_\d+x\d+c?\.jpg$'
+                         AND e->>'url' !~* '_1200x900\.jpg$'))
           )
         ORDER BY posted_ts DESC
         LIMIT %s
