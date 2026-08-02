@@ -134,6 +134,15 @@ sitting on a page the code did not expect.
 A failed run also uploads the tail of `logs/run.log` as an artifact, so the
 desktop's own log is readable from the dashboard without going to the machine.
 
+**How text is entered.** The editor pastes by default (`CL_EDIT_TYPING=paste`).
+Set `CL_EDIT_TYPING=human` to type short fields character by character the way
+posting does; the body is pasted either way, because 14,500 characters at
+human speed is over half an hour for one field.
+
+Posting deliberately still types. A new listing is what Craigslist scrutinises
+and that flow has run this way for months; an edit is a short visit to an ad
+that already exists, and it holds the browser lease while it runs.
+
 **County and service type are not editable on a live post.** Craigslist's edit
 form exposes no control for either, so offering them would stage a change the
 desktop can never make. Anything else it cannot reach fails loudly rather than

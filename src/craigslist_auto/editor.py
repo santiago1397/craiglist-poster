@@ -724,12 +724,26 @@ def hydrate_post(
 # Reconcile (decisions 26, 32, 33, 36)
 # ---------------------------------------------------------------------------
 
-# Above this, paste rather than type. `poster.py` reached the same conclusion at
-# the posting form and said why: "Real users paste long descriptions; typing
-# 7000 chars is slow AND bot-like." The editor did not inherit it, and typing a
-# 14,502-character body at 45-180ms a character took over half an hour — long
-# enough to hold the browser lease past the stale-claim reaper, and a keystroke
-# cadence no human has ever produced.
+# How the editor enters text. `paste` (the default) fills every field and pauses
+# as if reading it back; `human` types anything short character by character,
+# the way poster.py does at the posting form.
+#
+# Pasting is the default here, and posting deliberately keeps typing. They are
+# not the same risk. A new listing is the thing Craigslist scrutinises, and the
+# posting flow has run that way in production for months — no reason to change
+# it. An edit is a short, targeted visit to an ad that already exists, and it
+# holds the browser lease while it runs.
+#
+# The honest note on realism: `poster.py` already pastes its body and says why —
+# "Real users paste long descriptions; typing 7000 chars is slow AND bot-like."
+# Nobody types 14,502 characters by hand. Above the threshold, pasting is the
+# more human of the two, not the concession.
+EDIT_TYPING = os.environ.get("CL_EDIT_TYPING", "paste").strip().lower()
+
+# Always pasted, whatever the mode: a body this size cannot be typed in a
+# sensible amount of time. 14,502 characters at 45-180ms each is over half an
+# hour for one field — long enough to hold the lease past the stale-claim
+# reaper and make a healthy edit look permanently stuck.
 PASTE_ABOVE_CHARS = 200
 
 
@@ -740,13 +754,13 @@ def _fill(page: Page, key: str, value: str) -> None:
     # Clear first: an edit replaces the field, and human_type only appends.
     loc.first.click()
     loc.first.fill("")
-    if len(value) > PASTE_ABOVE_CHARS:
+    if EDIT_TYPING == "human" and len(value) <= PASTE_ABOVE_CHARS:
+        human_type(loc.first, value)
+    else:
         sleep_jitter(0.5)
         loc.first.fill(value)
         # The pause a person takes reading back what they just pasted.
-        sleep_jitter(1.5, 0.4)
-    else:
-        human_type(loc.first, value)
+        sleep_jitter(1.2, 0.4)
     sleep_jitter(0.4, 0.2)
 
 
