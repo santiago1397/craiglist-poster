@@ -83,6 +83,15 @@ DASHBOARD (VPS)                        DESKTOP (Windows)
 
 ### Safety
 
+30a. **Superseded 2026-08-01: the posting switch no longer gates editing.**
+    Decision 30 made posting's kill switch the master switch, on the reading
+    that pausing means "stop touching Craigslist". In use that was wrong: the
+    two activities carry different risk, and pausing posting while fixing an ad
+    is an ordinary thing to want that the coupling made impossible. It also let
+    one switch silently override another — Settings showed editing enabled while
+    nothing would ever edit. `edits_enabled` now stands alone; stopping
+    everything means turning off both.
+
 30. **Edits get the full guardrail treatment.** Server-owned settings in
     `guardrail_settings`, clamped to compiled ceilings in `config.py`, honouring
     the existing `posting_enabled` kill switch — the same shape as decisions 14

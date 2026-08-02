@@ -560,13 +560,18 @@ def evaluate_edit_eligibility(
     local = _local_now(now)
 
     global_blocks: list[str] = []
-    # Posting's kill switch is the master switch (decision 30): pausing the
-    # system pauses everything that drives a browser, not just posting.
-    if not g.get("posting_enabled", True):
-        reason = (g.get("paused_reason") or "").strip()
-        global_blocks.append(
-            f"posting paused from the dashboard{': ' + reason if reason else ''}"
-        )
+    # Editing is gated by `edits_enabled` alone. It used to be gated by the
+    # posting switch as well (decision 30, "pausing the system pauses everything
+    # that drives a browser"), which read well and worked badly: the two
+    # activities carry different risk. Posting creates listings and burns the
+    # daily and weekly caps, which is what gets an account banned; editing
+    # changes an ad that is already up, against its own separate caps. "Stop
+    # posting while I fix an ad" is an ordinary thing to want and was impossible.
+    #
+    # It also meant one switch silently overrode another: Settings showed
+    # editing enabled while nothing would ever edit. Now each switch does what
+    # its label says, and stopping everything means turning off both — which
+    # Diagnostics shows side by side.
     if not g.get("edits_enabled", False):
         reason = (g.get("edits_paused_reason") or "").strip()
         global_blocks.append(

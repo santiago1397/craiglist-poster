@@ -125,6 +125,13 @@ form exposes no control for either, so offering them would stage a change the
 desktop can never make. Anything else it cannot reach fails loudly rather than
 reporting success — see `unsupported_field` in Diagnostics.
 
+**Editing has its own switch, independent of posting.** Pausing posting stops
+posting; it does not stop editing. The two carry different risk — posting
+creates listings and burns the daily and weekly caps, editing changes an ad that
+is already up against its own caps — and "stop posting while I fix an ad" is an
+ordinary thing to want. To stop everything, turn off both under
+**Settings → Guardrails**.
+
 Edits have their own guardrails, mirroring posting: an edit window, a per-account
 daily cap, a per-post cooldown, and a lifetime cap. Failed attempts count against
 the cap on purpose, so a broken selector can't retry all day. The desktop clamps

@@ -226,10 +226,23 @@ hydrate("4002")
 with tx() as c:
     edits_svc.upsert_desired(c, "4002", {"title": "x"})
     c.execute("UPDATE guardrail_settings SET posting_enabled = FALSE, "
-              "paused_reason = 'holiday'")
+              "paused_reason = 'holiday', edits_enabled = TRUE")
     report = edits_svc.evaluate_edit_eligibility(c, ACCOUNTS, now=NOW)
-check("pausing posting also pauses editing",
-      any("paused" in b for b in report["global_blocks"]), str(report["global_blocks"]))
+# The two switches are independent. Pausing posting used to pause editing as
+# well, which meant "stop posting while I fix an ad" was impossible and Settings
+# could show editing enabled while nothing would ever edit.
+check("pausing posting does not pause editing",
+      not any("paused" in b for b in report["global_blocks"]),
+      str(report["global_blocks"]))
+with tx() as c:
+    c.execute("UPDATE guardrail_settings SET edits_enabled = FALSE")
+    report = edits_svc.evaluate_edit_eligibility(c, ACCOUNTS, now=NOW)
+check("editing has its own switch and it still stops everything",
+      any("editing is disabled" in b for b in report["global_blocks"]),
+      str(report["global_blocks"]))
+with tx() as c:
+    c.execute("UPDATE guardrail_settings SET posting_enabled = TRUE, "
+              "paused_reason = NULL, edits_enabled = TRUE")
 
 # Failed attempts consume a slot (decision 31), or a broken selector loops all day.
 reset()

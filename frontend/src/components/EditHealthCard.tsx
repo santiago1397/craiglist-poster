@@ -77,7 +77,9 @@ export function EditHealthCard({ accounts }: { accounts: string[] }) {
       {h.global_blocks.length > 0 && (
         <div>
           <p className="text-xs text-fg-muted">
-            Nothing will be applied to a live posting while any of these hold:
+            Nothing will be applied to a live posting while any of these hold.
+            Pausing posting does not stop editing — the two switches are
+            separate, and both live under Settings &rarr; Guardrails.
           </p>
           <ul className="mt-1 list-disc pl-5 text-xs text-fg-muted space-y-0.5">
             {h.global_blocks.map((b) => (
