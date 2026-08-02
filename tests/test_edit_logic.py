@@ -355,6 +355,42 @@ check("a body inside the limit is accepted", d["body"].startswith("y"))
 
 reset()
 
+# --- the posting-slot guard is reported, not just enforced ------------------
+# The desktop refuses to start a reconcile within ten minutes of 9, 1 or 5
+# (decision 28). The server did not know, so pressing Apply now in that window
+# looked exactly like a dead button: accepted, silence, then a twenty-minute
+# expiry. It is a safety rule rather than pacing, so a requested edit does not
+# overrule it either.
+from datetime import datetime as _dt
+from zoneinfo import ZoneInfo as _Z
+
+_ET = _Z("America/New_York")
+reset()
+add_post("9001")
+hydrate("9001")
+with tx() as c:
+    edits_svc.upsert_desired(c, "9001", {"title": "x"})
+
+    near = _dt(2026, 7, 30, 13, 2, tzinfo=_ET).astimezone(timezone.utc)
+    rep = edits_svc.evaluate_edit_eligibility(c, ACCOUNTS, now=near)
+    check("a posting slot blocks editing",
+          any("posting slot" in b for b in rep["global_blocks"]),
+          str(rep["global_blocks"]))
+
+    rep = edits_svc.evaluate_edit_eligibility(c, ACCOUNTS, now=near, ignore_window=True)
+    check("Apply now does not overrule the posting slot",
+          any("posting slot" in b for b in rep["global_blocks"]),
+          str(rep["global_blocks"]))
+
+    clear = _dt(2026, 7, 30, 11, 30, tzinfo=_ET).astimezone(timezone.utc)
+    rep = edits_svc.evaluate_edit_eligibility(c, ACCOUNTS, now=clear)
+    check("away from a slot there is no such block",
+          not any("posting slot" in b for b in rep["global_blocks"]),
+          str(rep["global_blocks"]))
+
+reset()
+
+
 print(f"{len(ok)} checks passed")
 if failures:
     print("FAILURES:")
