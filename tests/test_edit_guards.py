@@ -312,6 +312,42 @@ if _mod is not None:
         failures.append("the verified gallery hop is gone")
 
 
+# --- reading an ended posting must never repost it --------------------------
+# Each action on a posting row is its own form in the same cell: display,
+# repost, renew, delete, edit. `scan-ended` opens ended ads to read them, and it
+# is one sloppy selector away from putting a dead ad back on the market — which
+# costs money, burns the daily cap, and looks exactly like the operator asked
+# for it. The scoping and the read-back are the whole safety story, so they are
+# asserted rather than trusted.
+try:
+    import inspect as _i3
+    from craigslist_auto import stats as _st
+    _cap = _i3.getsource(_st._capture_ended_post)
+except Exception as e:  # pragma: no cover
+    _cap = None
+    print(f"(skipping scan-ended safety checks: {e})")
+
+if _cap is not None:
+    if _st.SAFE_ROW_ACTION != "display":
+        failures.append(
+            f"scan-ended's permitted row action is {_st.SAFE_ROW_ACTION!r}, not 'display'"
+        )
+    # Scoped to the display form, not to a value loose in the cell.
+    if "form.manage.{SAFE_ROW_ACTION}" not in _cap:
+        failures.append(
+            "scan-ended no longer scopes its click to the display form — a "
+            "matching value on the repost form could be picked up"
+        )
+    # And it reads back what it is about to click.
+    if "value != SAFE_ROW_ACTION" not in _cap:
+        failures.append("scan-ended clicks without verifying the control's value")
+    if "form_action != SAFE_ROW_ACTION" not in _cap:
+        failures.append("scan-ended does not verify the form's hidden action")
+    for bad in _st.FORBIDDEN_ROW_ACTIONS:
+        if f"value='{bad}'" in _cap or f'value="{bad}"' in _cap:
+            failures.append(f"scan-ended references the {bad!r} control")
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
