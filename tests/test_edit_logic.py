@@ -476,9 +476,15 @@ with tx() as c:
     # state, so re-keying it orphans them unless the foreign key cascades. The
     # first version of this test had none, and the merge failed the first time
     # it met a real posting.
+    img = c.execute(
+        "INSERT INTO images (sha256, storage_path, mime, bytes_size, source, "
+        "status, kind) VALUES ('merge-test-sha','x/y.jpg','image/jpeg',1,"
+        "'uploaded','approved','cover') RETURNING id"
+    ).fetchone()
     c.execute(
         "INSERT INTO post_desired_images (post_id, image_id, slot) "
-        "SELECT 'xvbywnthPhu59jd5tMPpGP', id, 1 FROM images LIMIT 1"
+        "VALUES ('xvbywnthPhu59jd5tMPpGP', %s, 1)",
+        (img["id"],),
     )
 
 with tx() as c:
@@ -518,6 +524,54 @@ with tx() as c:
     ).fetchone()["n"]
 check("the staged images follow the desired state", n == 1, str(n))
 check("and none are left behind", orphans == 0, str(orphans))
+
+reset()
+
+
+# --- what a posting said outlives the posting -------------------------------
+# Bodies only ever existed on Craigslist's edit form, which an ended posting no
+# longer has — so a post that expired took its copy with it. The draft holds
+# exactly what was submitted, so it is kept at publish time.
+from app.schemas.events import PostAttempt as _PA  # noqa: E402
+from app.services import drafts as _drafts_svc  # noqa: E402
+
+reset()
+with tx() as c:
+    dr = _drafts_svc.create_draft(c, {
+        "account": "craigs1", "title": "Roof Repair in Davie",
+        "body": "the copy that went out", "body_head": "the copy",
+        "county": "Broward", "city": "Davie", "geographic_area": "Davie, Plantation",
+        "postal_code": "33324", "phone_number": "954", "license_number": "CCC1",
+    })
+    c.execute("UPDATE drafts SET status='claimed' WHERE id=%s", (dr["id"],))
+with tx() as c:
+    ingest_svc.ingest_events(c, [_PA(
+        ts=NOW, machine="m", account="craigs1", outcome="posted",
+        post_id="7777777777", post_url="https://x/7777777777.html",
+        ad_title="Roof Repair in Davie", draft_id=dr["id"],
+    )])
+with tx() as c:
+    p = c.execute(
+        "SELECT title, body, county, city, postal_code FROM posts "
+        "WHERE post_id='7777777777'"
+    ).fetchone()
+check("a published post keeps the copy that went out",
+      p and p["body"] == "the copy that went out", str(p and p["body"]))
+check("and the area it was filed under",
+      p and p["city"] == "Davie, Plantation" and p["county"] == "Broward",
+      str(p and (p["city"], p["county"])))
+
+# A live read is the better source and must not be overwritten by a replay.
+hydrate("7777777777", body="edited since publishing")
+with tx() as c:
+    ingest_svc.ingest_events(c, [_PA(
+        ts=NOW + timedelta(minutes=5), machine="m", account="craigs1",
+        outcome="posted", post_id="7777777777", ad_title="x", draft_id=dr["id"],
+    )])
+with tx() as c:
+    p = c.execute("SELECT body FROM posts WHERE post_id='7777777777'").fetchone()
+check("a hydrated body is never overwritten by the draft",
+      p["body"] == "edited since publishing", str(p["body"]))
 
 reset()
 

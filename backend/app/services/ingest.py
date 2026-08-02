@@ -151,6 +151,12 @@ def _adopt_post_id(
             "UPDATE post_edit_attempts SET post_id = %s WHERE post_id = %s",
             (post_id, old_id),
         )
+        # And the draft's back-reference, or the copy that was published is no
+        # longer reachable from the posting it produced.
+        conn.execute(
+            "UPDATE drafts SET posted_post_id = %s WHERE posted_post_id = %s",
+            (post_id, old_id),
+        )
         conn.execute("DELETE FROM posts WHERE post_id = %s", (old_id,))
 
 
@@ -329,12 +335,50 @@ def _record_degradation(conn: psycopg.Connection, ev: PostAttempt) -> None:
     )
 
 
+def _keep_published_copy(conn: psycopg.Connection, ev: PostAttempt) -> None:
+    """Record what a post said, from the draft that produced it.
+
+    The dashboard has never stored post bodies — hydration reads them off the
+    live edit form, which is the only place they existed. That works until a
+    posting ends: Craigslist stops offering an edit form, and the copy is simply
+    gone. Of 54 postings here, one had a body, and it had one because somebody
+    happened to load it while it was still live.
+
+    The draft holds exactly what was submitted, so it is copied across at
+    publish time and kept for good.
+
+    Only into gaps, and only while the post has never been hydrated. A live read
+    is the better source — it reflects edits made since — and decision 23's rule
+    stands: a `post_attempt` must never overwrite text read off the posting.
+    """
+    if not ev.draft_id or not ev.post_id:
+        return
+    conn.execute(
+        """
+        UPDATE posts p SET
+            title           = COALESCE(p.title, d.title),
+            body            = COALESCE(p.body, d.body),
+            county          = COALESCE(p.county, d.county),
+            city            = COALESCE(p.city, d.geographic_area, d.city),
+            service_offered = COALESCE(p.service_offered, d.service_offered),
+            postal_code     = COALESCE(p.postal_code, d.postal_code),
+            license_number  = COALESCE(p.license_number, d.license_number),
+            phone_number    = COALESCE(p.phone_number, d.phone_number),
+            updated_at      = NOW()
+        FROM drafts d
+        WHERE p.post_id = %s AND d.id = %s AND p.hydrated_at IS NULL
+        """,
+        (ev.post_id, ev.draft_id),
+    )
+
+
 def _route_draft(conn: psycopg.Connection, ev: PostAttempt) -> None:
     """Move the claimed draft on, per decision 16."""
     if ev.outcome == "posted":
         queue_svc.mark_posted(
             conn, draft_id=ev.draft_id, post_id=ev.post_id, posted_at=ev.ts
         )
+        _keep_published_copy(conn, ev)
         _clear_post_request(conn, ev.draft_id)
     elif ev.outcome in ("failed_login", "failed_form", "failed_other"):
         new_status = queue_svc.release_or_park(
