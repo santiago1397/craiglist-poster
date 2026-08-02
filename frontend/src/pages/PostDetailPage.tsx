@@ -147,7 +147,14 @@ export default function PostDetailPage() {
         />
       ) : null}
 
-      {editable && <PublishedImages images={editable.published_images ?? []} />}
+      {editable && (
+        <PublishedImages
+          postId={post.post_id}
+          images={editable.published_images ?? []}
+          manifest={editable.images ?? []}
+          onError={setError}
+        />
+      )}
 
       {editable && <PostEditHistory attempts={editable.attempts ?? []} />}
 

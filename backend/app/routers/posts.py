@@ -3,7 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..auth import require_admin
-from ..db import conn
+from ..db import conn, tx
+from ..services import images as images_svc
 from ..services.queries import post_detail, posts_page
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -48,3 +49,41 @@ def get_post(post_id: str) -> dict:
     if not result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
     return result
+
+
+@router.post("/{post_id}/archive-images")
+def archive_images(post_id: str) -> dict:
+    """Keep our own copies of a posting's pictures.
+
+    A recovered posting's manifest holds Craigslist's own URLs, which resolve
+    today and carry no promise about tomorrow. This fetches them from the VPS
+    and stores them content-addressed, at `status='archived'` so they can never
+    be handed back out to a draft.
+    """
+    with tx() as c:
+        try:
+            return images_svc.archive_post_images(c, post_id)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+@router.post("/archive-images")
+def archive_images_batch(
+    limit: int = Query(default=25, ge=1, le=200),
+) -> dict:
+    """Archive the pictures of every posting still pointing only at Craigslist."""
+    results = []
+    with conn() as c:
+        pending = images_svc.posts_needing_archive(c, limit=limit)
+    for pid in pending:
+        with tx() as c:
+            try:
+                results.append(images_svc.archive_post_images(c, pid))
+            except Exception as e:  # pragma: no cover - one bad post must not stop the rest
+                results.append({"post_id": pid, "error": str(e)})
+    return {
+        "considered": len(pending),
+        "stored": sum(r.get("stored", 0) for r in results),
+        "failed": sum(r.get("failed", 0) for r in results),
+        "posts": results,
+    }

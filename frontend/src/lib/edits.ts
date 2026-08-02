@@ -41,6 +41,12 @@ export type EditablePost = {
   license_number: string | null;
   phone_number: string | null;
   live_status: string | null;
+  /**
+   * What the posting's gallery holds, written by hydration or recovered from an
+   * ended posting's own page. `image_id` is present once we hold the bytes;
+   * until then `url` points at Craigslist and is only as durable as they are.
+   */
+  images: PostImageRef[] | null;
   editable: boolean;
   hydrated_at: string | null;
   hydrate_requested_at: string | null;
@@ -73,6 +79,13 @@ export type EditablePost = {
    * the posting ends — these are our bytes, kept for good.
    */
   published_images: PublishedImage[] | null;
+};
+
+export type PostImageRef = {
+  slot: number;
+  url: string | null;
+  sha256: string | null;
+  image_id?: number | null;
 };
 
 export type PublishedImage = {
