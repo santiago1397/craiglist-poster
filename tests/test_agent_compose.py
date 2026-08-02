@@ -249,16 +249,28 @@ assert r.status_code == 200
 text = r.text
 assert "Davie" in text, "the city just used is missing from the report"
 assert "in use by" in text, "nothing was reported as in use despite live drafts"
-assert "Monroe" in text and "NOT USABLE" in text, \
-    "an unsupported county is not flagged"
+assert "closed" in text, "the report does not say the county list is closed"
 
 r = client.get("/agent/locations?format=json", headers=headers)
-counties = {c["name"]: c for c in r.json()["counties"]}
+payload = r.json()
+counties = {c["name"]: c for c in payload["counties"]}
 davie = next(c for c in counties[COUNTY]["cities"] if c["city"] == CITY)
 assert davie["in_use"] >= 1, "Davie is carrying drafts but reports as free"
 assert CITY not in counties[COUNTY]["unused_cities"]
-assert counties["Monroe"]["subarea_supported"] is False
-ok.append("locations OK (in-use cities are counted; unsupported counties are flagged)")
+assert payload["license_number"], "no licence number was offered"
+
+# Monroe (the Keys) is not merely flagged, it is absent: Craigslist puts the
+# Keys on their own site, so `_select_subarea` cannot route them and the seed
+# rows were deleted. Check 9 already proved it is refused at authoring time;
+# this pins that it is never *offered* either, which is the stronger property.
+assert "Monroe" not in counties, "Monroe is being offered as a placeable county"
+
+# Everything still offered must be routable. `render_locations` carries a
+# NOT USABLE branch for a county with no subarea mapping — there is nothing to
+# flag today, and this is what fails if one is ever added without routing.
+unroutable = [n for n, c in counties.items() if not c["subarea_supported"]]
+assert not unroutable, f"offered but unroutable: {unroutable}"
+ok.append("locations OK (in-use cities counted; every offered county is routable)")
 
 
 reset()
