@@ -453,16 +453,16 @@ def _insert_scheduler_config(conn: psycopg.Connection, ev: SchedulerConfig) -> b
             event_id, ts, machine, posting_cadence, stats_sync_cadence,
             min_hours_between_posts_same_account, max_posts_per_day_total,
             max_posts_per_account_per_week, post_window_start_hour,
-            post_window_end_hour, post_weekdays_only
+            post_window_end_hour, post_weekdays_only, code_version
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (event_id) DO NOTHING
         """,
         (
             ev.event_id, ev.ts, ev.machine, ev.posting_cadence, ev.stats_sync_cadence,
             ev.min_hours_between_posts_same_account, ev.max_posts_per_day_total,
             ev.max_posts_per_account_per_week, ev.post_window_start_hour,
-            ev.post_window_end_hour, ev.post_weekdays_only,
+            ev.post_window_end_hour, ev.post_weekdays_only, ev.code_version,
         ),
     )
     return _did_insert(cur)
