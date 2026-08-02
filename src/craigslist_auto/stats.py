@@ -830,6 +830,27 @@ def export_xlsx(path: Path, since: str | None = None) -> int:
 # that ran and earned just like the rest.
 ENDED_TABS = ("inactive", "deleted")
 
+# The only control on a posting row this may ever click.
+#
+# Observed on the account page, each action is its own form:
+#
+#   <form action="https://post.craigslist.org/manage/<token>" method="GET"
+#         class="manage display">
+#     <input type="hidden" name="action" value="display">
+#     <input type="submit" name="go" value="display" class="managebtn">
+#   </form>
+#
+# `display` reads. The neighbouring forms in the same cell renew a dead ad,
+# delete a live one, or open the editor, and they are one DOM reordering or one
+# sloppy selector away from being the thing that gets clicked. Reading an ended
+# posting must never be able to put it back on the market — a reposted ad costs
+# money, burns the daily cap, and is indistinguishable from the operator having
+# asked for it.
+SAFE_ROW_ACTION = "display"
+
+# Named so a mistake is loud rather than merely wrong.
+FORBIDDEN_ROW_ACTIONS = ("repost", "renew", "delete", "edit")
+
 
 def scan_ended(
     *,
@@ -921,10 +942,42 @@ def _capture_ended_post(page: Page, account_name: str, row: dict) -> None:
             buttons.nth(i).get_attribute("value") for i in range(buttons.count())
         ]
         logger.info(f"[{account_name}] ended post {post_id} offers: {labels}")
-        # 'display' is the read-only one; anything else risks reposting.
-        show = target.first.locator("td.buttons input[value='display']")
+
+        # Scoped to the display form specifically, not to a value anywhere in
+        # the cell, so a matching value on a different form cannot be picked up.
+        show = target.first.locator(
+            f"td.buttons form.manage.{SAFE_ROW_ACTION} "
+            f"input[type='submit'][value='{SAFE_ROW_ACTION}']"
+        )
         if show.count() == 0:
-            logger.info(f"[{account_name}] no display control on {post_id}")
+            logger.info(
+                f"[{account_name}] ended post {post_id} offers no "
+                f"{SAFE_ROW_ACTION!r} control — leaving it alone"
+            )
+            return
+
+        # Read back what is about to be clicked and refuse anything that is not
+        # exactly the read-only action. Belt and braces on purpose: the cost of
+        # being wrong here is a live ad nobody asked for.
+        value = (show.first.get_attribute("value") or "").strip().lower()
+        if value != SAFE_ROW_ACTION:
+            logger.error(
+                f"[{account_name}] refusing to click {value!r} on {post_id}; "
+                f"only {SAFE_ROW_ACTION!r} is permitted"
+            )
+            return
+        form_action = (
+            show.first.evaluate(
+                "el => (el.form && el.form.querySelector(\"input[name='action']\")"
+                "  || {}).value || ''"
+            )
+            or ""
+        ).strip().lower()
+        if form_action and form_action != SAFE_ROW_ACTION:
+            logger.error(
+                f"[{account_name}] the {SAFE_ROW_ACTION!r} button on {post_id} sits "
+                f"in a form whose action is {form_action!r} — not clicking it"
+            )
             return
         show.first.click()
         page.wait_for_load_state("domcontentloaded")
