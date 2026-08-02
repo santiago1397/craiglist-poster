@@ -869,6 +869,16 @@ def apply_attempt(conn: psycopg.Connection, ev) -> None:
         )
         return
 
+    if ev.outcome == "failed_stale":
+        # The operator's only route out of a stale park is to look at what the
+        # posting says now, so ask for that read rather than making them find
+        # the button. Requeue re-bases on whatever this brings back.
+        conn.execute(
+            "UPDATE posts SET hydrate_requested_at = NOW(), hydrate_error = NULL, "
+            "updated_at = NOW() WHERE post_id = %s",
+            (ev.post_id,),
+        )
+
     status = _OUTCOME_TO_STATUS.get(ev.outcome)
     if status is None:
         # A generic failure: safe to retry only if nothing was mutated.
