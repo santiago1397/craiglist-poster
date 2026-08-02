@@ -168,10 +168,23 @@ def apply_now(post_id: str, request: Request) -> dict:
             )
         except ValueError as e:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-        health = edits_svc.edit_health(c, [row["account"]])
-    # Surfacing the blocks with the 202 means a request that will not run says so
-    # immediately, rather than looking accepted and expiring twenty minutes later.
-    return {"requested_at": row["reconcile_requested_at"], "blocks": health["global_blocks"]}
+        # `ignore_window=True` mirrors what a requested reconcile is actually
+        # judged by, so the blocks reported here are the ones that will decide
+        # it — not a stricter set that would cry wolf about the window.
+        report = edits_svc.evaluate_edit_eligibility(
+            c, [row["account"]], ignore_window=True
+        )
+    account = report["accounts"].get(row["account"], {})
+    # Every reason, global and per-account. This used to return only the global
+    # ones, so hitting the per-account daily cap — by far the most likely way for
+    # a request to go nowhere — came back as a clean 202 and then silently
+    # expired twenty minutes later.
+    blocks = list(dict.fromkeys(report["global_blocks"] + account.get("reasons", [])))
+    return {
+        "requested_at": row["reconcile_requested_at"],
+        "eligible": account.get("eligible", False),
+        "blocks": blocks,
+    }
 
 
 @router.get("/{post_id}/attempts")

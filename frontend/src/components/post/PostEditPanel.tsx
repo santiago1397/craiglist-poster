@@ -62,6 +62,10 @@ export function PostEditPanel(props: {
   const p = props.post;
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
+  // What the server said when the request was accepted. A 202 with blocks means
+  // it was recorded but will not run until they clear, and saying so at the
+  // click beats letting it expire twenty minutes later.
+  const [blocks, setBlocks] = useState<string[] | null>(null);
 
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ["edits", p.post_id] });
@@ -130,7 +134,15 @@ export function PostEditPanel(props: {
                     ? "Already asked — the posting machine picks this up within about 15 seconds"
                     : "Apply this change to the live posting now"
                 }
-                onClick={() => run.mutate(() => api.post(`/edits/${p.post_id}/apply-now`))}
+                onClick={() =>
+                  run.mutate(async () => {
+                    const r = await api.post<{ eligible: boolean; blocks: string[] }>(
+                      `/edits/${p.post_id}/apply-now`,
+                    );
+                    setBlocks(r.eligible ? [] : r.blocks);
+                    return r;
+                  })
+                }
                 className="text-xs px-2 py-1 rounded bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
               >
                 {p.reconcile_requested_at ? "Applying soon…" : "Apply now"}
@@ -155,7 +167,24 @@ export function PostEditPanel(props: {
         <p className="text-xs text-warn-fg">{p.reconcile_request_error}</p>
       )}
 
-      {p.reconcile_requested_at && (
+      {!!blocks?.length && (
+        <div className="rounded border border-warn-border bg-warn/40 px-2 py-1.5">
+          <p className="text-xs text-warn-fg">
+            Asked for, but it will not run until these clear:
+          </p>
+          <ul className="mt-1 list-disc pl-5 text-xs text-warn-fg space-y-0.5">
+            {blocks.map((b) => (
+              <li key={b}>{b}</li>
+            ))}
+          </ul>
+          <p className="mt-1 text-xs text-fg-muted">
+            Caps and switches live under Settings → Guardrails. The request
+            expires in 20 minutes if nothing picks it up.
+          </p>
+        </div>
+      )}
+
+      {p.reconcile_requested_at && !blocks?.length && (
         <p className="text-xs text-fg-muted">
           Waiting for the posting machine to apply this — it polls every 15
           seconds. Nothing reaches the live ad until it finishes.
