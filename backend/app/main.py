@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -91,8 +93,46 @@ async def lifespan(_: FastAPI):
         close_pool()
 
 
+class _RedactApiKeyFilter(logging.Filter):
+    """Keep agent API keys out of the access log.
+
+    The agent surface accepts `?key=` because a large share of AI fetch tools
+    cannot set request headers, and an API they cannot call is useless. That
+    choice is only defensible if the key does not then get written to disk by
+    us — a credential in an access log is a credential in every backup and
+    every log shipper downstream of it.
+
+    uvicorn formats access lines lazily: `record.args` is
+    (client, method, full_path, http_version, status). Rewriting index 2 before
+    formatting redacts the query string without touching anything else.
+    """
+
+    _KEY = re.compile(r"([?&]key=)[^&\s]+", re.IGNORECASE)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            if "key=" in args[2].lower():
+                record.args = (
+                    args[:2] + (self._KEY.sub(r"\1REDACTED", args[2]),) + args[3:]
+                )
+        return True
+
+
+def _install_log_redaction() -> None:
+    """Attach the redaction filter once, however often create_app is called.
+
+    The logger is process-global while `create_app` is not — tests build
+    several apps — and filters appended twice would stack on the same logger.
+    """
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _RedactApiKeyFilter) for f in access.filters):
+        access.addFilter(_RedactApiKeyFilter())
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+    _install_log_redaction()
     app = FastAPI(
         title="Craigslist Automation API",
         version="0.1.0",
@@ -115,12 +155,16 @@ def create_app() -> FastAPI:
 
     # Routers registered lazily so tests can import create_app cheaply
     from .routers import (
-        accounts, artifacts, auth, dashboard, diagnostics, drafts, edits, events,
-        images, posts, prompts, queue, reference,
+        accounts, agent, artifacts, auth, dashboard, diagnostics, drafts, edits,
+        events, images, posts, prompts, queue, reference,
         settings as settings_router,
     )
 
     app.include_router(auth.router, prefix="/auth", tags=["auth"])
+    # Read-only surface for AI agents, on its own API-key auth. Deliberately
+    # not behind require_admin: the whole point is that it is callable without
+    # a browser session.
+    app.include_router(agent.router, prefix="/agent", tags=["agent"])
     app.include_router(events.router, prefix="/events", tags=["ingest"])
     app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
     app.include_router(accounts.router, prefix="/accounts", tags=["accounts"])

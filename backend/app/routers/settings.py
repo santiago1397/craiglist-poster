@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 from ..auth import require_admin
 from ..config import get_settings
 from ..db import conn, tx
-from ..security import issue_machine_token, revoke_machine_token
+from ..security import (
+    issue_api_key,
+    issue_machine_token,
+    revoke_api_key,
+    revoke_machine_token,
+)
 from ..services import queue as queue_svc
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -43,6 +48,13 @@ class GuardrailUpdate(BaseModel):
 class TokenCreate(BaseModel):
     machine: str
     label: str = ""
+
+
+class ApiKeyCreate(BaseModel):
+    label: str = Field(default="", max_length=100)
+    # 'read' opens the whole agent surface. 'post' additionally allows
+    # publishing a draft a human has already marked reviewed.
+    scope: str = Field(default="read", pattern="^(read|post)$")
 
 
 class PostingSwitch(BaseModel):
@@ -195,4 +207,38 @@ def delete_machine_token(token_id: int) -> None:
     if not revoke_machine_token(token_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Token not found or already revoked"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Agent API keys
+#
+# Separate table from machine tokens on purpose — see migration 0018. These
+# open `/agent/*` and nothing else; they can never claim a draft or report an
+# event.
+# ---------------------------------------------------------------------------
+
+@router.get("/api-keys")
+def list_api_keys() -> dict:
+    with conn() as c:
+        rows = c.execute(
+            "SELECT id, label, scope, created_at, last_seen_at, revoked_at "
+            "FROM api_keys ORDER BY created_at DESC"
+        ).fetchall()
+    return {"keys": [dict(r) for r in rows]}
+
+
+@router.post("/api-keys", status_code=status.HTTP_201_CREATED)
+def create_api_key(body: ApiKeyCreate) -> dict:
+    """The plaintext key is shown once and never stored. Copy it now."""
+    key = issue_api_key(body.label, body.scope)
+    return {"label": body.label, "scope": body.scope, "key": key}
+
+
+@router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_api_key(key_id: int) -> None:
+    if not revoke_api_key(key_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Key not found or already revoked",
         )

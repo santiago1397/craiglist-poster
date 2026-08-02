@@ -14,7 +14,16 @@ uv run python tests/test_outbox_guard.py     # only unsent *posted* attempts blo
 uv run python tests/test_browser_lease.py    # two flows can't share one Chrome profile
 uv run python tests/test_edit_guards.py      # content hash, edit clamps, posting-slot guard
 uv run python tests/test_failure_reporting.py # every failure reaches the VPS debuggable
+PYTHONPATH=backend uv run python tests/test_agent_api.py  # agent auth boundaries + the caveats in every answer
 ```
+
+`test_agent_api.py` covers the read surface AI agents use. Two things it pins:
+the publish endpoint refuses a key in the query string **even when a valid
+header is also present** (by then the secret is already in the access log), and
+the prose renderers keep their caveats — that stats are a once-daily scrape,
+that post times are forecasts, that no errors is not health. Those conditions
+live inside sentences rather than in JSON fields precisely because a model drops
+a field when summarising and does not drop a clause it is reading.
 
 `test_failure_reporting.py` covers the rules that decide whether a failure can
 be debugged at all: `failed_step` is never None, every step the poster can die
@@ -56,9 +65,19 @@ PYTHONPATH=backend uv run python tests/test_posting_switch.py # pause/resume act
 PYTHONPATH=backend uv run python tests/test_edit_logic.py     # desired state, staleness, decision-16-style routing
 PYTHONPATH=backend uv run python tests/test_edit_images.py    # staging images on a live posting
 PYTHONPATH=backend uv run python tests/test_hydration_evidence.py  # the selector census reaches the dashboard
+PYTHONPATH=backend uv run python tests/test_agent_reports.py  # the agent reports' SQL, empty and populated
 
 dropdb cl_scratch
 ```
+
+`test_agent_reports.py` runs every agent report against an empty database and a
+populated one — an empty install is the case most likely to raise and the first
+one a new agent hits. It also pins the stats window bug: `snapshot_date` is
+written in America/New_York while `CURRENT_DATE` is evaluated in the database's
+timezone, so a `CURRENT_DATE - N` baseline selects the same row as the latest
+snapshot every evening after 20:00 ET and reports zero views for every post,
+with no error anywhere. The window is anchored to each post's own newest
+snapshot instead. **Change that query and this test fails**, which is the point.
 
 `test_queue_logic.py` is the important one. It exercises the parts that only
 fail at runtime — the SQL, `pg_trgm`, the claim's `FOR UPDATE SKIP LOCKED`, and
