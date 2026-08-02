@@ -83,6 +83,23 @@ DASHBOARD (VPS)                        DESKTOP (Windows)
 
 ### Safety
 
+30b. **Revised 2026-08-02: the caps were set for the wrong activity.** 0010
+    gave editing posting's numbers — 3 a day, 5 per post, 48 hours between —
+    reasoning that editing a live posting is no safer than creating one. Wrong
+    comparison. Posting's caps exist because volume of *new listings* is what
+    gets an account banned; editing your own ad is ordinary behaviour, driven by
+    hand from the dashboard. Three a day is not a safety limit for that, and
+    because a failed attempt consumes a slot, three failed debugging runs used
+    up the day.
+
+    What actually stops a broken selector retrying forever is the **per-post
+    cooldown** — a pre-mutation failure returns to `pending` and cannot be
+    offered again until it passes. The daily cap is a backstop against runaway
+    automation, now set where it does that without standing in front of the
+    operator: 20/day, 50 per post, 2 hours (migration 0020). The edit guardrails
+    also finally appear in Settings, having been accepted by the API since 0010
+    and never rendered.
+
 30a. **Superseded 2026-08-01: the posting switch no longer gates editing.**
     Decision 30 made posting's kill switch the master switch, on the reading
     that pausing means "stop touching Craigslist". In use that was wrong: the

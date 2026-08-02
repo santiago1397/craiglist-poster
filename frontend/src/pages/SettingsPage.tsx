@@ -18,6 +18,13 @@ import { cn } from "../lib/cn";
 import { formatDateTime } from "../lib/format";
 
 type Guardrails = {
+  edits_enabled: boolean;
+  min_hours_between_edits_same_post: number;
+  max_edits_per_account_per_day: number;
+  max_edits_per_post_lifetime: number;
+  edit_window_start_hour: number;
+  edit_window_end_hour: number;
+  edits_paused_reason: string | null;
   min_hours_between_posts_same_account: number;
   max_posts_per_day_total: number;
   max_posts_per_account_per_week: number;
@@ -56,6 +63,11 @@ const LIMITS = {
   minCooldownHours: 18,
   earliestHour: 6,
   latestHour: 22,
+  // Editing is driven by hand and changes an ad that is already up, so its
+  // ceilings are far looser than posting's — see migration 0020.
+  maxEditsPerDay: 50,
+  maxEditsPerPostLifetime: 200,
+  minEditCooldownHours: 1,
 };
 
 export default function SettingsPage() {
@@ -127,14 +139,24 @@ export default function SettingsPage() {
       )}
 
       {guardrailsQ.data && (
-        <GuardrailForm
-          value={guardrailsQ.data}
-          busy={saveGuardrails.isPending}
-          onSave={(patch) => {
-            setSaved(null);
-            saveGuardrails.mutate(patch);
-          }}
-        />
+        <>
+          <GuardrailForm
+            value={guardrailsQ.data}
+            busy={saveGuardrails.isPending}
+            onSave={(patch) => {
+              setSaved(null);
+              saveGuardrails.mutate(patch);
+            }}
+          />
+          <EditGuardrailForm
+            value={guardrailsQ.data}
+            busy={saveGuardrails.isPending}
+            onSave={(patch) => {
+              setSaved(null);
+              saveGuardrails.mutate(patch);
+            }}
+          />
+        </>
       )}
 
       {generationQ.data && (
@@ -695,6 +717,122 @@ function GuardrailForm({
           </span>
         </span>
       </label>
+
+      {windowInvalid && (
+        <p className="text-sm text-danger-fg">
+          The window must open before it closes — the server rejects this.
+        </p>
+      )}
+    </Section>
+  );
+}
+
+function EditGuardrailForm({
+  value,
+  busy,
+  onSave,
+}: {
+  value: Guardrails;
+  busy: boolean;
+  onSave: (patch: Partial<Guardrails>) => void;
+}) {
+  const [f, setF] = useState(value);
+  useEffect(() => setF(value), [value]);
+
+  const set = <K extends keyof Guardrails>(k: K, v: Guardrails[K]) => setF({ ...f, [k]: v });
+  const dirty = JSON.stringify(f) !== JSON.stringify(value);
+  const windowInvalid = f.edit_window_start_hour >= f.edit_window_end_hour;
+
+  return (
+    <Section
+      title="Editing live posts"
+      description="Changing an ad that is already published. Separate from posting on purpose — pausing posting does not stop editing, and stopping everything means turning off both."
+      footer={
+        <>
+          <button
+            disabled={!dirty || busy || windowInvalid}
+            onClick={() => onSave(f)}
+            className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
+          >
+            {busy ? "Saving…" : "Save editing limits"}
+          </button>
+          {dirty && (
+            <button
+              onClick={() => setF(value)}
+              className="px-3 py-1.5 rounded text-sm text-fg-muted hover:bg-surface-2"
+            >
+              Reset
+            </button>
+          )}
+          <span className="text-xs text-fg-subtle">
+            Takes effect on the next poll, about 15 seconds.
+          </span>
+        </>
+      }
+    >
+      <label className="flex items-start gap-2">
+        <input
+          type="checkbox"
+          checked={f.edits_enabled}
+          onChange={(e) => set("edits_enabled", e.target.checked)}
+          className="mt-0.5"
+        />
+        <span>
+          <span className="text-sm text-fg block">Editing enabled</span>
+          <span className="text-xs text-fg-subtle">
+            Off means nothing ever touches a live posting. Loading a post to read
+            what it says still works — that is not an edit.
+          </span>
+        </span>
+      </label>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <NumberField
+          label="Edits per account, per day"
+          hint="Counted over a rolling 24 hours. A failed attempt counts too, so a broken selector cannot retry all day."
+          ceiling={`Desktop refuses anything above ${LIMITS.maxEditsPerDay}.`}
+          value={f.max_edits_per_account_per_day}
+          min={0}
+          max={LIMITS.maxEditsPerDay}
+          onChange={(v) => set("max_edits_per_account_per_day", v)}
+        />
+        <NumberField
+          label="Edits per post, lifetime"
+          hint="Total successful edits one posting may ever receive."
+          ceiling={`Desktop refuses anything above ${LIMITS.maxEditsPerPostLifetime}.`}
+          value={f.max_edits_per_post_lifetime}
+          min={1}
+          max={LIMITS.maxEditsPerPostLifetime}
+          onChange={(v) => set("max_edits_per_post_lifetime", v)}
+        />
+        <NumberField
+          label="Hours between edits of one post"
+          hint="Applies to the automatic pass only. Apply now skips it — this is what stops a failing edit retrying in a loop."
+          ceiling={`Desktop raises anything below ${LIMITS.minEditCooldownHours} back up.`}
+          value={f.min_hours_between_edits_same_post}
+          min={LIMITS.minEditCooldownHours}
+          max={720}
+          onChange={(v) => set("min_hours_between_edits_same_post", v)}
+        />
+        <div className="grid grid-cols-2 gap-4">
+          <NumberField
+            label="Window opens (ET)"
+            hint="Earliest hour."
+            value={f.edit_window_start_hour}
+            min={0}
+            max={23}
+            onChange={(v) => set("edit_window_start_hour", v)}
+          />
+          <NumberField
+            label="Window closes (ET)"
+            hint="Apply now ignores the window."
+            value={f.edit_window_end_hour}
+            min={1}
+            max={24}
+            onChange={(v) => set("edit_window_end_hour", v)}
+          />
+        </div>
+      </div>
 
       {windowInvalid && (
         <p className="text-sm text-danger-fg">
