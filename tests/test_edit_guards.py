@@ -264,6 +264,29 @@ if _recon is not None:
         )
 
 
+# --- the area box, not the street-address city ------------------------------
+# Craigslist's copy form has both. `geographic_area` is the free-text area box
+# and routinely names several towns; `city` belongs to the street-address block
+# and ships `disabled` unless the posting shows an address. Pointing at `city`
+# read "Miami" as though it were the ad's area — it was not — and writing to it
+# timed out for thirty seconds against an element that can never take input.
+if _SEL is not None:
+    if _SEL["edit_city"] != "input[name='geographic_area']":
+        failures.append(
+            f"edit_city is {_SEL['edit_city']!r}; the area box is "
+            f"input[name='geographic_area'] and `city` is the disabled "
+            f"street-address field"
+        )
+
+# Presence is not fillability: the pre-flight has to reject a disabled field
+# during diff, not discover it thirty seconds into the mutation.
+if _recon is not None and "_is_fillable(page, FIELD_SEL[k])" not in _recon:
+    failures.append(
+        "the pre-flight checks only that a field exists, so a disabled input "
+        "passes and then times out mid-edit"
+    )
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
