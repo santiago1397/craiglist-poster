@@ -878,6 +878,18 @@ def apply_attempt(conn: psycopg.Connection, ev) -> None:
     # The request has been served, whatever the answer was.
     _clear_reconcile_request(conn, ev.post_id)
 
+    if ev.outcome == "applied":
+        # The live posting just changed, so everything stored about its content
+        # describes the version before this edit — including `content_hash`,
+        # which the next edit will be based on. Leaving it stale meant a
+        # successful apply guaranteed the following one parked as
+        # `failed_stale`, blaming the operator for a change we had just made.
+        conn.execute(
+            "UPDATE posts SET hydrate_requested_at = NOW(), hydrate_error = NULL, "
+            "updated_at = NOW() WHERE post_id = %s",
+            (ev.post_id,),
+        )
+
     if ev.outcome in ("applied", "no_change"):
         conn.execute(
             """
