@@ -215,6 +215,33 @@ if _in_session is not None:
             failures.append(f"edit-session detection ({label}): {url}")
 
 
+# --- a long body is pasted, not typed ---------------------------------------
+# `human_type` runs 45-180ms a character with occasional pauses. A 14,502-char
+# body — an ordinary size here, since the keyword tail alone is ~14,000 — took
+# over half an hour to type, holding the browser lease the whole time and
+# producing a keystroke cadence no human has ever managed. poster.py already
+# pastes at the posting form for exactly this reason.
+try:
+    import inspect as _i
+    from craigslist_auto import editor as _ed
+    _fill_src = _i.getsource(_ed._fill)
+except Exception as e:  # pragma: no cover
+    _fill_src = None
+    print(f"(skipping paste checks: {e})")
+
+if _fill_src is not None:
+    if "PASTE_ABOVE_CHARS" not in _fill_src:
+        failures.append(
+            "_fill types every value character by character again — a full-length "
+            "body takes over half an hour"
+        )
+    if _ed.PASTE_ABOVE_CHARS > 2000:
+        failures.append(
+            f"the paste threshold is {_ed.PASTE_ABOVE_CHARS} chars, high enough "
+            f"that ordinary bodies are still typed"
+        )
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
