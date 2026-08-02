@@ -348,6 +348,27 @@ if _cap is not None:
             failures.append(f"scan-ended references the {bad!r} control")
 
 
+# --- an ended posting's own page is the last copy of the ad -----------------
+# manage/<token>?action=display keeps serving after a posting ends, and it is
+# the whole ad. Observed 2026-08-02: #postingbody held 14,138 characters on a
+# post whose public URL and edit form were both long gone.
+if _cap is not None:
+    want = {"title": "#titletextonly", "body": "#postingbody", "infos": "p.postinginfo"}
+    for key, sel in want.items():
+        if _st.ENDED_SEL.get(key) != sel:
+            failures.append(
+                f"ENDED_SEL[{key!r}] is {_st.ENDED_SEL.get(key)!r}, observed {sel!r}"
+            )
+    # The page also carries OpenStreetMap tiles from map*.craigslist.org. They
+    # are not the ad's pictures, and counting them would put map fragments in a
+    # posting's image manifest.
+    if "images.craigslist.org" not in _st.ENDED_SEL.get("images", ""):
+        failures.append(
+            "the ended-post image selector is not scoped to the image host — "
+            "map tiles would be recorded as the ad's pictures"
+        )
+
+
 if failures:
     print("FAILURES:")
     for f in failures:

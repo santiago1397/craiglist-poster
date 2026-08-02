@@ -620,10 +620,12 @@ def stats_sync(
 def scan_ended(
     account: str = typer.Option(None, help="Only this account (default: all)"),
     headless: bool = typer.Option(False, help="Run browser headless"),
+    limit: int = typer.Option(
+        5, help="How many ended postings to open and recover per account. Each "
+                "one is a page load, so this is the throttle.",
+    ),
     no_capture: bool = typer.Option(
-        False, "--no-capture",
-        help="Skip the page captures. They are how the selectors for reading an "
-             "ended posting's body get written, so leave them on the first time.",
+        False, "--no-capture", help="Skip the screenshot/HTML captures.",
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
@@ -634,15 +636,15 @@ def scan_ended(
     it. The account page's inactive and deleted tabs are the last place those
     ads are described at all.
 
-    This walks them and reports every posting it finds, so an ad that ended
-    stops being a bare id in the dashboard. It also captures the pages, because
-    the body and the images live one click further in and nothing here has seen
-    that page yet.
+    This walks them and reports every posting it finds, then opens the first
+    `--limit` of them through their own read-only `display` control and recovers
+    the copy and the picture list. It never touches repost, renew or delete.
     """
     _setup_logging(verbose=verbose)
     try:
         summary = stats_mod.scan_ended(
-            headless=headless, only_account=account, capture=not no_capture
+            headless=headless, only_account=account,
+            capture=not no_capture, max_recover=limit,
         )
     except Exception as e:
         logger.exception("scan-ended failed")

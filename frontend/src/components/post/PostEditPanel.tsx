@@ -79,6 +79,11 @@ export function PostEditPanel(props: {
 
   const loading = !!p.hydrate_requested_at;
   const loaded = !!p.hydrated_at;
+  // An ended posting can be recovered and read — `cl scan-ended` pulls the copy
+  // off the manage page — but Craigslist offers no edit form for it, so there
+  // is nothing to apply a change to. Without this the Edit button lit up the
+  // moment the copy arrived and every attempt would have parked as gone.
+  const ended = p.editable === false;
   const applying = p.edit_status === "applying";
   const pending = hasPendingEdit(p);
 
@@ -112,13 +117,15 @@ export function PostEditPanel(props: {
             {loading ? "Loading…" : loaded ? "Reload from Craigslist" : "Load from Craigslist"}
           </button>
           <button
-            disabled={!loaded || applying || run.isPending}
+            disabled={!loaded || ended || applying || run.isPending}
             title={
               !loaded
                 ? "Load the post from Craigslist first"
-                : applying
-                  ? "The desktop is editing this posting right now"
-                  : undefined
+                : ended
+                  ? "This posting has ended — Craigslist offers no edit form for it"
+                  : applying
+                    ? "The desktop is editing this posting right now"
+                    : undefined
             }
             onClick={() => setEditing(true)}
             className="text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-bg disabled:opacity-40"
@@ -165,6 +172,14 @@ export function PostEditPanel(props: {
           at {formatDateTime(p.last_attempt_at)}. Nothing can be altered until it
           reports back, so the controls above are disabled rather than silently
           refused.
+        </p>
+      )}
+
+      {ended && (
+        <p className="rounded border border-border bg-bg/40 px-2 py-1.5 text-xs text-fg-muted">
+          This posting has ended. The copy below was recovered from Craigslist's
+          own record of it, which is the last place it exists — the public URL
+          and the edit form are both gone, so it can be read but not changed.
         </p>
       )}
 
