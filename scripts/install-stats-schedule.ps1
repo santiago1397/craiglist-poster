@@ -2,10 +2,14 @@
 # local time (America/New_York on this machine). Morning-after snapshots let
 # CL's stat-lag (~1-6h+) settle fully, so day-over-day deltas are accurate.
 #
-# Usage:  Right-click → Run with PowerShell
+# Usage:  Right-click -> Run with PowerShell
 #         (or: powershell -ExecutionPolicy Bypass -File install-stats-schedule.ps1)
 
 $ErrorActionPreference = "Stop"
+
+# Registration goes through the shared helper, which verifies the task actually
+# landed instead of trusting the cmdlet. See _scheduled_task.ps1.
+. "$PSScriptRoot\_scheduled_task.ps1"
 
 $TaskName = "CL Stats Sync"
 
@@ -18,11 +22,6 @@ if (-not $uv) {
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Write-Host "Project root: $projectRoot"
 Write-Host "uv path:      $uv"
-
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Write-Host "Removing existing task '$TaskName'..."
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-}
 
 $action = New-ScheduledTaskAction `
     -Execute $uv `
@@ -42,18 +41,17 @@ $settings = New-ScheduledTaskSettingsSet `
 
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
-Register-ScheduledTask `
+Install-ClScheduledTask `
     -TaskName $TaskName `
     -Action $action `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "Craigslist stats scraper. Snapshots each account's active postings once per day." | Out-Null
+    -Description "Craigslist stats scraper. Snapshots each account's active postings once per day." `
+    -ExpectedExecute $uv `
+    -ExpectedWorkingDirectory $projectRoot
 
-Write-Host ""
-Write-Host "Task '$TaskName' installed." -ForegroundColor Green
 Write-Host "  Fires daily at: 6:00 AM"
-Write-Host "  Working dir:    $projectRoot"
 Write-Host ""
 Write-Host "To pause:   Disable-ScheduledTask -TaskName '$TaskName'"
 Write-Host "To remove:  Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false"
