@@ -1032,13 +1032,15 @@ def locations_report(conn: psycopg.Connection) -> dict:
 
     rows = conn.execute(
         """
+        -- `placements`, not `both`: BOTH is a reserved word in Postgres (it is
+        -- part of TRIM's grammar) and fails as a bare table alias.
         SELECT county, city, COUNT(*) AS n FROM (
             SELECT county, city FROM drafts
             WHERE status IN ('queued', 'claimed', 'needs_attention')
             UNION ALL
             SELECT county, city FROM posts
             WHERE posted_ts IS NOT NULL AND posted_ts >= NOW() - INTERVAL '90 days'
-        ) AS both
+        ) AS placements
         WHERE COALESCE(city, '') <> ''
         GROUP BY county, city
         """
