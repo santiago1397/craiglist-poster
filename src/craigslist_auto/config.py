@@ -293,3 +293,18 @@ def code_version() -> str:
         return f"v{version('craigslist-auto')} ({root})"
     except Exception:
         return f"unknown ({root})"
+
+
+def machine_name() -> str:
+    """Identify this physical machine, the way every flow must agree on it.
+
+    Was computed independently in `cli._machine_name` and again, wrongly, in the
+    ended-post reporter — where it referenced `os` and `platform` in a module
+    that imports neither, raised NameError inside a `try`, and turned a working
+    recovery into a silent no-op. One definition, so there is nothing to get
+    out of step.
+    """
+    import os
+    import platform
+
+    return os.environ.get("CL_MACHINE") or platform.node().lower()

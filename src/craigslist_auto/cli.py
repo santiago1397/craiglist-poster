@@ -50,11 +50,13 @@ def _setup_logging(verbose: bool = False):
 
 
 def _machine_name() -> str:
+    """Identify this physical machine, via the one definition in config.
+
+    The script only runs accounts whose `allowed_machine` matches this.
     """
-    Identify this physical machine. Override with CL_MACHINE env var.
-    The script will only run accounts whose `allowed_machine` matches this.
-    """
-    return os.environ.get("CL_MACHINE") or platform.node().lower()
+    from .config import machine_name
+
+    return machine_name()
 
 
 @app.command("init-data")
