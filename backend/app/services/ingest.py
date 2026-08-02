@@ -72,6 +72,90 @@ def ingest_events(conn: psycopg.Connection, events: list[AnyEvent]) -> dict:
 # posts dimension — used by both post_attempt(outcome=posted) and snapshot
 # ---------------------------------------------------------------------------
 
+def _adopt_post_id(
+    conn: psycopg.Connection, *, post_id: str, url: str | None
+) -> None:
+    """Re-key a posting whose id we only ever guessed at.
+
+    A published post reaches us twice, by two routes with two different ideas of
+    its id. `post_attempt` carries whatever `stats._extract_post_id` could pull
+    out of the URL, which for Craigslist's current share form is a base62 token;
+    `snapshot_taken` carries the numeric `data-postingid` off the account page.
+    Both then insert, and one live ad ends up as two rows — one accumulating
+    stats, the other holding the hydrated content and the edit state.
+
+    Craigslist's own id wins: it is what the account page uses, so it is what
+    the editor and the stats scrape can both find a row by. Everything hanging
+    off the token id is moved across before it goes.
+
+    Matching is on the URL, which both routes record identically and which
+    identifies the posting exactly.
+    """
+    if not url:
+        return
+    stale = conn.execute(
+        """
+        SELECT post_id FROM posts
+        WHERE url = %s AND post_id <> %s AND post_id !~ '^[0-9]+$'
+        """,
+        (url, post_id),
+    ).fetchall()
+    for row in stale:
+        old_id = row["post_id"]
+        logger.warning(
+            f"post {old_id} and {post_id} are the same listing ({url}); "
+            f"merging onto Craigslist's own id"
+        )
+        # Content and edit state move only into the gaps, so a target that has
+        # already been hydrated is never overwritten by an older read.
+        conn.execute(
+            """
+            UPDATE posts dst SET
+                title = COALESCE(dst.title, src.title),
+                body = COALESCE(dst.body, src.body),
+                county = COALESCE(dst.county, src.county),
+                city = COALESCE(dst.city, src.city),
+                service_offered = COALESCE(dst.service_offered, src.service_offered),
+                postal_code = COALESCE(dst.postal_code, src.postal_code),
+                license_number = COALESCE(dst.license_number, src.license_number),
+                phone_number = COALESCE(dst.phone_number, src.phone_number),
+                images = CASE WHEN dst.hydrated_at IS NULL THEN src.images ELSE dst.images END,
+                content_hash = COALESCE(dst.content_hash, src.content_hash),
+                live_status = COALESCE(dst.live_status, src.live_status),
+                hydrated_at = COALESCE(dst.hydrated_at, src.hydrated_at),
+                hydrate_steps = CASE WHEN dst.hydrated_at IS NULL
+                                     THEN src.hydrate_steps ELSE dst.hydrate_steps END,
+                hydrate_artifact_ids = CASE WHEN dst.hydrated_at IS NULL
+                                     THEN src.hydrate_artifact_ids
+                                     ELSE dst.hydrate_artifact_ids END,
+                hydrate_requested_at = COALESCE(dst.hydrate_requested_at,
+                                                src.hydrate_requested_at),
+                updated_at = NOW()
+            FROM posts src
+            WHERE dst.post_id = %s AND src.post_id = %s
+            """,
+            (post_id, old_id),
+        )
+        # The desired state and its images follow, unless the operator has
+        # already staged something against the surviving row.
+        moved = conn.execute(
+            "UPDATE post_desired_state SET post_id = %s WHERE post_id = %s "
+            "AND NOT EXISTS (SELECT 1 FROM post_desired_state WHERE post_id = %s) "
+            "RETURNING post_id",
+            (post_id, old_id, post_id),
+        ).fetchone()
+        if moved:
+            conn.execute(
+                "UPDATE post_desired_images SET post_id = %s WHERE post_id = %s",
+                (post_id, old_id),
+            )
+        conn.execute(
+            "UPDATE post_edit_attempts SET post_id = %s WHERE post_id = %s",
+            (post_id, old_id),
+        )
+        conn.execute("DELETE FROM posts WHERE post_id = %s", (old_id,))
+
+
 def _upsert_post(
     conn: psycopg.Connection,
     *,
@@ -93,6 +177,13 @@ def _upsert_post(
         """,
         (post_id, account, title, url, posted_ts),
     )
+    # After the insert, not before: the edit state moved across carries a
+    # foreign key onto this row, so it has to exist first.
+    #
+    # Craigslist's numeric id is authoritative. When it turns up, fold in any
+    # row created earlier under a token pulled out of the posting URL.
+    if post_id.isdigit():
+        _adopt_post_id(conn, post_id=post_id, url=url)
 
 
 # ---------------------------------------------------------------------------

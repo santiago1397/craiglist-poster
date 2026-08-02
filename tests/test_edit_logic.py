@@ -452,6 +452,58 @@ check("a successful apply marks the staged gallery as the live one",
 reset()
 
 
+# --- one listing, one row ---------------------------------------------------
+# A published post reaches the server twice with two ideas of its id:
+# `post_attempt` carries whatever could be pulled from the URL — a base62 token
+# for Craigslist's current share form — and `snapshot_taken` carries the numeric
+# data-postingid off the account page. Both inserted, so one live ad became two
+# rows: one accumulating stats, the other holding the hydrated content and every
+# edit made to it.
+from app.schemas.events import SnapshotTaken as _Snap  # noqa: E402
+
+reset()
+URL = "https://www.craigslist.org/view/d/miami-roof/xvbywnthPhu59jd5tMPpGP"
+with tx() as c:
+    c.execute(
+        "INSERT INTO posts (post_id, account, title, url, posted_ts, source) "
+        "VALUES ('xvbywnthPhu59jd5tMPpGP','craigs1','t',%s,%s,'manual_recovery')",
+        (URL, NOW),
+    )
+hydrate("xvbywnthPhu59jd5tMPpGP")
+with tx() as c:
+    edits_svc.upsert_desired(c, "xvbywnthPhu59jd5tMPpGP", {"title": "staged"})
+
+with tx() as c:
+    ingest_svc.ingest_events(c, [_Snap(
+        ts=NOW, account="craigs1", post_id="7950716823",
+        snapshot_date="2026-07-31", title="t", url=URL,
+        posted_ts=NOW, status="Active", impressions=334, views=20,
+    )])
+
+with tx() as c:
+    rows = c.execute("SELECT post_id FROM posts WHERE url = %s", (URL,)).fetchall()
+check("the same listing does not become two rows", len(rows) == 1,
+      str([r["post_id"] for r in rows]))
+check("Craigslist's own id is the one kept",
+      rows and rows[0]["post_id"] == "7950716823", str(rows))
+with tx() as c:
+    d = edits_svc.get_desired(c, "7950716823")
+    old = c.execute(
+        "SELECT 1 FROM posts WHERE post_id = 'xvbywnthPhu59jd5tMPpGP'"
+    ).fetchone()
+check("the staged edit follows the surviving row", d is not None and d["title"] == "staged",
+      str(d and d["title"]))
+check("the row keyed by the token is gone", old is None)
+with tx() as c:
+    p = c.execute(
+        "SELECT hydrated_at, body FROM posts WHERE post_id = '7950716823'"
+    ).fetchone()
+check("the hydrated content follows too",
+      p["hydrated_at"] is not None and p["body"] == "live body", str(p["body"]))
+
+reset()
+
+
 print(f"{len(ok)} checks passed")
 if failures:
     print("FAILURES:")
