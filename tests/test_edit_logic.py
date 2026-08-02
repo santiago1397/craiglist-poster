@@ -472,6 +472,14 @@ with tx() as c:
 hydrate("xvbywnthPhu59jd5tMPpGP")
 with tx() as c:
     edits_svc.upsert_desired(c, "xvbywnthPhu59jd5tMPpGP", {"title": "staged"})
+    # Staged images matter here, not decoration: they reference the desired
+    # state, so re-keying it orphans them unless the foreign key cascades. The
+    # first version of this test had none, and the merge failed the first time
+    # it met a real posting.
+    c.execute(
+        "INSERT INTO post_desired_images (post_id, image_id, slot) "
+        "SELECT 'xvbywnthPhu59jd5tMPpGP', id, 1 FROM images LIMIT 1"
+    )
 
 with tx() as c:
     ingest_svc.ingest_events(c, [_Snap(
@@ -500,6 +508,16 @@ with tx() as c:
     ).fetchone()
 check("the hydrated content follows too",
       p["hydrated_at"] is not None and p["body"] == "live body", str(p["body"]))
+with tx() as c:
+    n = c.execute(
+        "SELECT count(*) AS n FROM post_desired_images WHERE post_id = '7950716823'"
+    ).fetchone()["n"]
+    orphans = c.execute(
+        "SELECT count(*) AS n FROM post_desired_images "
+        "WHERE post_id = 'xvbywnthPhu59jd5tMPpGP'"
+    ).fetchone()["n"]
+check("the staged images follow the desired state", n == 1, str(n))
+check("and none are left behind", orphans == 0, str(orphans))
 
 reset()
 

@@ -138,17 +138,15 @@ def _adopt_post_id(
         )
         # The desired state and its images follow, unless the operator has
         # already staged something against the surviving row.
-        moved = conn.execute(
+        # The staged images ride along on the foreign key's ON UPDATE CASCADE
+        # (migration 0022). Moving them by hand afterwards is impossible: they
+        # reference the desired state, so the moment its key changes they are
+        # already either cascaded or rejected.
+        conn.execute(
             "UPDATE post_desired_state SET post_id = %s WHERE post_id = %s "
-            "AND NOT EXISTS (SELECT 1 FROM post_desired_state WHERE post_id = %s) "
-            "RETURNING post_id",
+            "AND NOT EXISTS (SELECT 1 FROM post_desired_state WHERE post_id = %s)",
             (post_id, old_id, post_id),
-        ).fetchone()
-        if moved:
-            conn.execute(
-                "UPDATE post_desired_images SET post_id = %s WHERE post_id = %s",
-                (post_id, old_id),
-            )
+        )
         conn.execute(
             "UPDATE post_edit_attempts SET post_id = %s WHERE post_id = %s",
             (post_id, old_id),
