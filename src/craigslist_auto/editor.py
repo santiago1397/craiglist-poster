@@ -793,6 +793,10 @@ def reconcile_post(
     log = StepLog()
     artifact_ids: list[str] = []
     started = time.monotonic()
+    # Set once anything has been written into Craigslist's draft. Failure paths
+    # past this point discard it, so the next run reads published content rather
+    # than our own unpublished work.
+    draft_dirty = False
 
     def _result(outcome: str, **extra) -> dict:
         out = {
@@ -1026,6 +1030,7 @@ def reconcile_post(
 
             # Submitting the copy sub-page returns to the hub; it does not
             # publish. Nothing reaches the live posting until the hub's publish.
+            draft_dirty = True
             with log.step("submit_copy"):
                 save = page.locator(SEL["save_button"])
                 if _count(page, "save_button") == 0:
@@ -1089,6 +1094,7 @@ def reconcile_post(
                         post_id=post_id, account=account.name,
                     ))
                     if not e.mutated:
+                        _cancel_edit_session(page, log)
                         return _result(
                             "failed_images", failed_step=e.step,
                             error_type="image_error", error_message=str(e)[:500],
@@ -1103,15 +1109,36 @@ def reconcile_post(
                     )
                     recovered = _attempt_image_recovery(page, photos)
                     if not recovered:
+                        # Second line of defence, and probably the stronger one.
+                        # The deletions happened inside Craigslist's draft, and
+                        # "cancel edit" throws the whole draft away — so
+                        # discarding should hand the posting back its original
+                        # gallery, which no amount of re-uploading could
+                        # guarantee.
+                        #
+                        # Reported as `degraded_live` regardless. Whether image
+                        # operations are truly draft-scoped is the one thing the
+                        # phase-0 spike never established, and "we think it is
+                        # fine" is not something to assert about a live ad. The
+                        # alarm means go and look; the message says what we did.
+                        discarded = _cancel_edit_session(page, log)
                         return _result(
                             "degraded_live", failed_step=e.step,
                             error_type="image_error_unrecovered",
                             error_message=(
                                 f"{e} — images were removed and could not be "
-                                f"restored; this posting is live with "
-                                f"{page.locator(SEL['image_thumb']).count()} image(s)"
+                                f"re-uploaded. "
+                                + (
+                                    "Craigslist's draft was then discarded, which "
+                                    "should have handed the posting back its "
+                                    "original gallery — check the live ad to "
+                                    "confirm."
+                                    if discarded
+                                    else "The draft could not be discarded either; "
+                                         "check the live ad now."
+                                )
                             )[:500],
-                            images_live_count=page.locator(SEL["image_thumb"]).count(),
+                            images_live_count=None,
                             images_desired_count=len(photos),
                         )
                     log.note("images_recovered", "re-uploaded after a failed replace")
@@ -1171,6 +1198,8 @@ def reconcile_post(
                 page, flow="edit_reconcile", label=f"failed_{e.step}",
                 post_id=post_id, account=account.name,
             ))
+            if draft_dirty:
+                _cancel_edit_session(page, log)
             outcome = "failed_form" if e.step in PRE_MUTATION_STEPS or not e.mutated else "degraded_live"
             return _result(
                 outcome, failed_step=e.step,
@@ -1182,12 +1211,49 @@ def reconcile_post(
                 page, flow="edit_reconcile", label="exception",
                 post_id=post_id, account=account.name,
             ))
+            if draft_dirty:
+                _cancel_edit_session(page, log)
             step = log.current or "unknown"
             return _result(
                 "failed_other" if step in PRE_MUTATION_STEPS else "degraded_live",
                 failed_step=step,
                 error_type=type(e).__name__, error_message=str(e)[:500],
             )
+
+
+def _cancel_edit_session(page: Page, log: StepLog) -> bool:
+    """Throw away Craigslist's draft copy of this edit.
+
+    A reconcile that stops between `submit_copy` and `publish` leaves a draft
+    holding changes that were never published. That draft is what the *next*
+    run reads, so its own half-applied work comes back as "the live posting
+    changed since you edited it" — the staleness check firing on a change we
+    made ourselves, with no way out but a reload that then stores draft content
+    as if it were live.
+
+    Discarding on the way out keeps the invariant the rest of the module relies
+    on: between runs, what Craigslist shows is what is published. Safe because
+    the desired state on the server is the source of truth — anything discarded
+    here is re-applied on the retry.
+
+    Best effort. It runs on a path that is already failing, and failing to
+    clean up must not replace the real error.
+    """
+    try:
+        cancel = page.locator(SEL["hub_cancel"])
+        if cancel.count() == 0:
+            log.note("cancel_edit", f"no cancel control on {page.url}")
+            return False
+        cancel.first.click()
+        page.wait_for_load_state("domcontentloaded")
+        sleep_jitter(1.0)
+        log.note("cancel_edit", "discarded the unpublished draft")
+        logger.info("discarded Craigslist's draft after a failed reconcile")
+        return True
+    except Exception as e:  # pragma: no cover — defensive
+        log.note("cancel_edit", f"could not discard the draft: {e}")
+        logger.warning(f"could not discard the draft after a failed reconcile: {e}")
+        return False
 
 
 def _attempt_image_recovery(page: Page, photos: list[Path]) -> bool:
