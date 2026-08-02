@@ -248,6 +248,22 @@ if _fill_src is not None:
         )
 
 
+# --- degraded_live means the gallery was emptied, nothing else --------------
+# The generic handler classified every step past the read-only ones as
+# `degraded_live`, so a browser closing during `fill_body` — which types into a
+# draft, publishes nothing and removes nothing — raised the emergency alarm on
+# an untouched ad. Twice. An alarm that fires for that is an alarm nobody reads.
+if _recon is not None:
+    if '"degraded_live" if images_mutated' not in _recon:
+        failures.append(
+            "degraded_live is no longer gated on images actually being removed"
+        )
+    if '"failed_other" if step in PRE_MUTATION_STEPS else "degraded_live"' in _recon:
+        failures.append(
+            "the blanket post-read -> degraded_live classification is back"
+        )
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
