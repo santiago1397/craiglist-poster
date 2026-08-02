@@ -576,6 +576,52 @@ check("a hydrated body is never overwritten by the draft",
 reset()
 
 
+# --- the pictures survive the posting too -----------------------------------
+# `posts.images` is a manifest of Craigslist's CDN URLs, captured by hydration,
+# and those stop resolving when a posting ends — precisely when someone wants to
+# see what was on it. The draft's attachment rows point at our own bytes, which
+# are kept for good, so they are the durable record of what went out.
+reset()
+with tx() as c:
+    dr2 = _drafts_svc.create_draft(c, {
+        "account": "craigs1", "title": "t", "body": "b",
+    })
+    img2 = c.execute(
+        "INSERT INTO images (sha256, storage_path, mime, bytes_size, source, "
+        "status, kind) VALUES ('published-sha','p/q.jpg','image/jpeg',1,"
+        "'uploaded','approved','cover') RETURNING id"
+    ).fetchone()
+    c.execute(
+        "INSERT INTO draft_images (draft_id, image_id, slot) VALUES (%s,%s,1)",
+        (dr2["id"], img2["id"]),
+    )
+    c.execute("UPDATE drafts SET status='claimed' WHERE id=%s", (dr2["id"],))
+with tx() as c:
+    ingest_svc.ingest_events(c, [_PA(
+        ts=NOW, machine="m", account="craigs1", outcome="posted",
+        post_id="7888888888", ad_title="t", draft_id=dr2["id"],
+    )])
+with tx() as c:
+    rows = c.execute(
+        """
+        SELECT di.slot, i.id FROM drafts d
+        JOIN draft_images di ON di.draft_id = d.id
+        JOIN images i ON i.id = di.image_id
+        WHERE d.posted_post_id = '7888888888' ORDER BY di.slot
+        """
+    ).fetchall()
+check("a published posting can still name its pictures",
+      len(rows) == 1 and rows[0]["slot"] == 1, str(rows))
+with tx() as c:
+    used = c.execute(
+        "SELECT used_at FROM images WHERE id = %s", (img2["id"],)
+    ).fetchone()
+check("and they are marked published, so their bytes are never deleted",
+      used["used_at"] is not None)
+
+reset()
+
+
 print(f"{len(ok)} checks passed")
 if failures:
     print("FAILURES:")
