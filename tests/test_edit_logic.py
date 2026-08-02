@@ -391,6 +391,29 @@ with tx() as c:
 reset()
 
 
+# --- a successful apply invalidates what we know about the posting ---------
+# The publish changes the live content, so `content_hash` now describes the
+# version before it. `upsert_desired` bases the next edit on that column, so
+# without a fresh read a successful apply guaranteed the following edit parked
+# as `failed_stale` — blaming the operator for a change the system had just
+# made itself.
+reset()
+add_post("9100")
+hydrate("9100")
+with tx() as c:
+    edits_svc.upsert_desired(c, "9100", {"title": "x"})
+    edits_svc.claim_reconcile(c, machine="m1", post_id="9100")
+attempt("9100", "applied", rev=1)
+with tx() as c:
+    row = c.execute(
+        "SELECT hydrate_requested_at FROM posts WHERE post_id='9100'"
+    ).fetchone()
+check("a successful apply asks for a fresh read",
+      row["hydrate_requested_at"] is not None)
+
+reset()
+
+
 print(f"{len(ok)} checks passed")
 if failures:
     print("FAILURES:")
