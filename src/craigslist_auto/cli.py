@@ -616,6 +616,56 @@ def stats_sync(
         )
 
 
+@app.command("scan-ended")
+def scan_ended(
+    account: str = typer.Option(None, help="Only this account (default: all)"),
+    headless: bool = typer.Option(False, help="Run browser headless"),
+    no_capture: bool = typer.Option(
+        False, "--no-capture",
+        help="Skip the page captures. They are how the selectors for reading an "
+             "ended posting's body get written, so leave them on the first time.",
+    ),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+):
+    """Recover ended postings from the account page.
+
+    When a posting ends, Craigslist stops serving its public URL and stops
+    offering an edit form — so hydration, the only route to a body, is gone with
+    it. The account page's inactive and deleted tabs are the last place those
+    ads are described at all.
+
+    This walks them and reports every posting it finds, so an ad that ended
+    stops being a bare id in the dashboard. It also captures the pages, because
+    the body and the images live one click further in and nothing here has seen
+    that page yet.
+    """
+    _setup_logging(verbose=verbose)
+    try:
+        summary = stats_mod.scan_ended(
+            headless=headless, only_account=account, capture=not no_capture
+        )
+    except Exception as e:
+        logger.exception("scan-ended failed")
+        reporter_mod.report_flow_error("scan_ended", e, account=account)
+        raise typer.Exit(3)
+
+    total = 0
+    for name, info in summary["accounts"].items():
+        if info.get("ok"):
+            tabs = "  ".join(f"{k}={v}" for k, v in (info.get("tabs") or {}).items())
+            typer.echo(f"  [OK] {name:10s}  {info['rows']} ended posting(s)   {tabs}")
+            total += info["rows"]
+        else:
+            typer.echo(f"  [--] {name:10s}  ERROR: {info.get('error')}")
+
+    typer.echo("")
+    typer.echo(f"{total} ended posting(s) reported to the dashboard.")
+    _flush_evidence()
+    pending = reporter_mod.pending_count()
+    if pending:
+        typer.echo(f"  [!] {pending} event(s) still unsent — check REPORTER_URL/REPORTER_TOKEN")
+
+
 @app.command("stats-seed")
 def stats_seed():
     """One-time: import historical posts from logs/state.json into the stats DB."""

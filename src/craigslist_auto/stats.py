@@ -173,7 +173,19 @@ class ScrapeParseError(RuntimeError):
 
 
 def _ensure_active_tab(page: Page, account_name: str) -> None:
-    """Navigate to the postings page and submit the 'active' filter."""
+    """Back-compat shim: the stats scrape only ever wants the active tab."""
+    _ensure_tab(page, account_name, "active")
+
+
+def _ensure_tab(page: Page, account_name: str, tab: str = "active") -> None:
+    """Navigate to the postings page and submit one of its filters.
+
+    The account page keeps ended postings under their own filter, and they are
+    the only remaining record of what those ads said — Craigslist stops serving
+    the public URL and the edit form, so nothing else can reach them.
+
+    `tab` is the filter button's value: 'active', 'inactive', 'deleted'.
+    """
     page.goto(CL_ACCOUNT_URL, wait_until="domcontentloaded")
     sleep_jitter(2.0)
     logger.debug(f"[{account_name}] landed on {page.url}")
@@ -185,15 +197,21 @@ def _ensure_active_tab(page: Page, account_name: str) -> None:
     if login_form_visible and not filters_visible:
         raise LoginExpiredError(f"account {account_name} is not logged in (url={page.url})")
 
-    # "active" is a form-submit button, not a link
+    # The filters are form-submit buttons, not links.
     try:
-        btn = page.locator("button[name='filter_active'][value='active']")
+        btn = page.locator(f"button[name='filter_active'][value='{tab}']")
+        if btn.count() == 0:
+            # Craigslist has named this control differently over time; fall back
+            # to any submit button carrying the tab's value.
+            btn = page.locator(f"button[type='submit'][value='{tab}']")
         if btn.count() > 0:
             btn.first.click()
             page.wait_for_load_state("domcontentloaded")
             sleep_jitter(1.5)
+        else:
+            logger.warning(f"[{account_name}] no '{tab}' filter button on the page")
     except Exception as e:
-        logger.debug(f"[{account_name}] could not submit 'active' filter: {e}")
+        logger.debug(f"[{account_name}] could not submit '{tab}' filter: {e}")
 
     # Wait for the postings table body to actually render.
     try:
@@ -791,3 +809,167 @@ def export_xlsx(path: Path, since: str | None = None) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Recovering ended postings
+#
+# When a posting ends, Craigslist stops serving its public URL and stops
+# offering an edit form, so hydration — the only route to a body — is gone with
+# it. What survives is the account page's own list of inactive postings, which
+# is the last place the ad is described at all.
+#
+# This walks that list and reports it. Content and images need the per-posting
+# manage page, whose DOM nothing here has seen; a run captures it so the
+# selectors can be written against something real rather than guessed at, which
+# is how every other page in this project has been settled.
+# ---------------------------------------------------------------------------
+
+# Which filters to walk. 'deleted' is included because Craigslist files a
+# manually removed posting there rather than under inactive, and those are ads
+# that ran and earned just like the rest.
+ENDED_TABS = ("inactive", "deleted")
+
+
+def scan_ended(
+    *,
+    headless: bool = False,
+    only_account: str | None = None,
+    capture: bool = True,
+    max_capture: int = 2,
+) -> dict:
+    """Read every ended posting off the account page and report it.
+
+    Returns a summary per account. Emits a `snapshot_taken` for each row, which
+    is what carries it to the dashboard: ingest creates the `posts` row from the
+    title and URL and files the status as a snapshot, so an ended ad stops being
+    a bare id.
+    """
+    from . import artifacts as artifacts_mod
+    from .config import ACCOUNTS
+    from .poster import launch_account
+
+    summary: dict = {"accounts": {}}
+    for account in ACCOUNTS:
+        if only_account and account.name != only_account:
+            continue
+        found: list[dict] = []
+        info: dict = {"ok": False, "rows": 0, "tabs": {}}
+        try:
+            with launch_account(account, headless=headless, flow="scan_ended") as ctx:
+                page = ctx.new_page()
+                for tab in ENDED_TABS:
+                    _ensure_tab(page, account.name, tab)
+                    rows = _scrape_current_page(page, account.name)
+                    pages = 1
+                    while _has_next_page(page) and pages < 20:
+                        _click_next_page(page)
+                        rows += _scrape_current_page(page, account.name)
+                        pages += 1
+                    for r in rows:
+                        r["ended_tab"] = tab
+                    info["tabs"][tab] = len(rows)
+                    found.extend(rows)
+                    logger.info(
+                        f"[{account.name}] {tab}: {len(rows)} posting(s) over {pages} page(s)"
+                    )
+                    if capture and rows:
+                        artifacts_mod.capture_page(
+                            page, flow="scan_ended", label=f"list_{tab}",
+                            account=account.name,
+                        )
+                # The listing gives a title and a date. The body and the images
+                # live one click further in, on a page nothing here has opened.
+                # Capture a couple so they can be read properly.
+                if capture:
+                    for row in found[:max_capture]:
+                        _capture_ended_post(page, account.name, row)
+            info["ok"] = True
+        except LoginExpiredError as e:
+            info["error"] = f"login_expired: {e}"
+            logger.error(f"[{account.name}] {e}")
+        except Exception as e:  # pragma: no cover - defensive
+            info["error"] = f"{type(e).__name__}: {e}"
+            logger.exception(f"[{account.name}] scan-ended failed")
+
+        info["rows"] = len(found)
+        summary["accounts"][account.name] = info
+        if found:
+            _emit_ended_events(account, found)
+
+    return summary
+
+
+def _capture_ended_post(page: Page, account_name: str, row: dict) -> None:
+    """Open one ended posting's own page and capture it.
+
+    Reconnaissance, not extraction. Which control an ended posting still offers
+    — display, repost, or nothing — decides how its body and images can be read,
+    and that is not worth guessing at.
+    """
+    from . import artifacts as artifacts_mod
+
+    post_id = row.get("post_id")
+    try:
+        target = page.locator(
+            f"tr.posting-row:has(td.status[data-postingid='{post_id}'])"
+        )
+        if target.count() == 0:
+            return
+        buttons = target.first.locator("td.buttons input[type='submit']")
+        labels = [
+            buttons.nth(i).get_attribute("value") for i in range(buttons.count())
+        ]
+        logger.info(f"[{account_name}] ended post {post_id} offers: {labels}")
+        # 'display' is the read-only one; anything else risks reposting.
+        show = target.first.locator("td.buttons input[value='display']")
+        if show.count() == 0:
+            logger.info(f"[{account_name}] no display control on {post_id}")
+            return
+        show.first.click()
+        page.wait_for_load_state("domcontentloaded")
+        sleep_jitter(1.5)
+        artifacts_mod.capture_page(
+            page, flow="scan_ended", label="ended_post_display",
+            post_id=post_id, account=account_name,
+        )
+        page.go_back(wait_until="domcontentloaded")
+        sleep_jitter(1.0)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"[{account_name}] could not capture ended post {post_id}: {e}")
+
+
+def _emit_ended_events(account: Account, rows: list[dict]) -> None:
+    """Report ended postings so the dashboard stops showing bare ids.
+
+    Reuses `snapshot_taken` rather than inventing an event: ingest already
+    creates the `posts` row from a snapshot's title and URL, and files the
+    status, which is exactly what is wanted. The snapshot date is the day the
+    posting was last seen, not today, so an ad that ended in June does not
+    appear to have been alive this morning.
+    """
+    from . import reporter as reporter_mod
+    from .events import SnapshotTaken
+
+    for r in rows:
+        if not r.get("post_id"):
+            continue
+        when = r.get("posted_date") or _today_et()
+        try:
+            reporter_mod.emit(SnapshotTaken(
+                ts=datetime.now(timezone.utc),
+                account=account.name,
+                post_id=r["post_id"],
+                snapshot_date=when,
+                title=r.get("title"),
+                url=r.get("url"),
+                status=r.get("status") or r.get("ended_tab"),
+                area=r.get("area"),
+                category=r.get("category"),
+                impressions=r.get("impressions"),
+                views=r.get("views"),
+                shares=r.get("shares"),
+                favorites=r.get("favorites"),
+            ))
+        except Exception as e:
+            logger.warning(f"could not report ended post {r.get('post_id')}: {e}")
