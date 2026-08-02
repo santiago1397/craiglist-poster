@@ -287,6 +287,31 @@ if _recon is not None and "_is_fillable(page, FIELD_SEL[k])" not in _recon:
     )
 
 
+# --- never guess at a gallery you could not open ---------------------------
+# Deep-linking ?s=editimage from the copy step gets redirected back to ?s=edit.
+# The thumbnail count on that page is a truthful zero about the wrong page, and
+# believing it told a reconcile that a 24-image posting had none — at which
+# point "replace" deletes nothing and uploads twenty-four on top.
+try:
+    import inspect as _i2
+    from craigslist_auto import editor as _ed2
+    _mod = _i2.getsource(_ed2)
+except Exception as e:  # pragma: no cover
+    _mod = None
+    print(f"(skipping gallery-navigation checks: {e})")
+
+if _mod is not None:
+    # Exactly one place navigates to the image step, and it reports whether it
+    # arrived.
+    if _mod.count("hub_step_url(hub_url, HUB_STEP_IMAGES)") != 1:
+        failures.append(
+            "more than one route to the image step — they drift, and the one "
+            "that skips the preview hop lands on the copy page"
+        )
+    if "def _goto_image_step" not in _mod:
+        failures.append("the verified gallery hop is gone")
+
+
 if failures:
     print("FAILURES:")
     for f in failures:
