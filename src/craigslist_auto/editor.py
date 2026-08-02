@@ -235,9 +235,21 @@ CENSUS_KEYS = (
 )
 
 # Craigslist's edit sub-pages, reachable as plain GETs off the hub URL.
+HUB_STEP_PREVIEW = "preview"
 HUB_STEP_EDIT = "edit"
 HUB_STEP_LOCATION = "geoverify"
 HUB_STEP_IMAGES = "editimage"
+
+
+def is_edit_session(url: str) -> bool:
+    """Is this URL inside Craigslist's edit wizard at all?
+
+    The wizard is /k/<token>, with the step in `?s=`. Which step you land on is
+    not ours to predict: a fresh edit opens at `?s=preview`, but an edit session
+    left open resumes wherever it got to. Requiring the preview turned a
+    resumable draft into a hard failure.
+    """
+    return "/k/" in url
 
 
 def hub_step_url(hub_url: str, step: str) -> str:
@@ -533,9 +545,13 @@ def hydrate_post(
                 edit.first.click()
                 page.wait_for_load_state("domcontentloaded")
                 read_pause(900)
-                hub_url = page.url
-                log.note("hub", hub_url)
-                if _count(page, "hub_marker") == 0:
+                landed = page.url
+                # Keep the base, not the landing URL: every later step is
+                # addressed as `?s=<step>` off it, and an edit session left open
+                # resumes at whatever step it reached last.
+                hub_url = landed.split("?")[0].split("#")[0]
+                log.note("hub", landed)
+                if not is_edit_session(landed):
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_hydrate", label="hub_unrecognised",
                         post_id=post_id, account=account.name,
@@ -543,8 +559,8 @@ def hydrate_post(
                     result.update({
                         "error_type": "selector_miss",
                         "error_message": (
-                            f"clicking edit landed on {hub_url}, which does not look "
-                            f"like the edit hub"
+                            f"clicking edit landed on {landed}, which is not "
+                            f"Craigslist's edit wizard"
                         ),
                     })
                     return result
@@ -833,9 +849,13 @@ def reconcile_post(
                 edit.first.click()
                 page.wait_for_load_state("domcontentloaded")
                 read_pause(900)
-                hub_url = page.url
-                log.note("hub", hub_url)
-                if _count(page, "hub_marker") == 0:
+                landed = page.url
+                # Keep the base, not the landing URL: every later step is
+                # addressed as `?s=<step>` off it, and an edit session left open
+                # resumes at whatever step it reached last.
+                hub_url = landed.split("?")[0].split("#")[0]
+                log.note("hub", landed)
+                if not is_edit_session(landed):
                     artifact_ids.extend(artifacts.capture_page(
                         page, flow="edit_reconcile", label="hub_unrecognised",
                         post_id=post_id, account=account.name,
@@ -844,8 +864,8 @@ def reconcile_post(
                         "failed_form", failed_step="open_edit_form",
                         error_type="selector_miss",
                         error_message=(
-                            f"clicking edit landed on {hub_url}, which is not the "
-                            f"edit hub"
+                            f"clicking edit landed on {landed}, which is not "
+                            f"Craigslist's edit wizard"
                         ),
                     )
 
@@ -1032,7 +1052,10 @@ def reconcile_post(
                         # Via the hub. Going straight from the copy page to
                         # ?s=editimage got redirected back to ?s=edit, so the
                         # replace ran against a page with no gallery on it.
-                        page.goto(hub_url, wait_until="domcontentloaded")
+                        page.goto(
+                            hub_step_url(hub_url, HUB_STEP_PREVIEW),
+                            wait_until="domcontentloaded",
+                        )
                         read_pause(500)
                         page.goto(
                             hub_step_url(hub_url, HUB_STEP_IMAGES),
@@ -1103,7 +1126,10 @@ def reconcile_post(
                     done.first.click()
                     page.wait_for_load_state("domcontentloaded")
                     sleep_jitter(1.2)
-                page.goto(hub_url, wait_until="domcontentloaded")
+                page.goto(
+                    hub_step_url(hub_url, HUB_STEP_PREVIEW),
+                    wait_until="domcontentloaded",
+                )
                 read_pause(900)
                 publish = page.locator(SEL["hub_publish"])
                 if publish.count() == 0:
