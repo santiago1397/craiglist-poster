@@ -85,6 +85,7 @@ PYTHONPATH=backend uv run python tests/test_posting_switch.py # pause/resume act
 PYTHONPATH=backend uv run python tests/test_edit_logic.py     # desired state, staleness, decision-16-style routing
 PYTHONPATH=backend uv run python tests/test_edit_images.py    # staging images on a live posting
 PYTHONPATH=backend uv run python tests/test_image_archive.py # keeping our own copy of what a post published
+PYTHONPATH=backend uv run python tests/test_posts_window.py # the 90-day default never hides posts silently
 PYTHONPATH=backend uv run python tests/test_hydration_evidence.py  # the selector census reaches the dashboard
 PYTHONPATH=backend uv run python tests/test_agent_reports.py  # the agent reports' SQL, empty and populated
 PYTHONPATH=backend uv run python tests/test_db_timezone.py    # date boundaries are local, not UTC
@@ -99,6 +100,13 @@ draft**. Those bytes have already appeared on Craigslist under one account, and
 decision 13 exists because Craigslist notices the same photo under different
 sellers. An archive that quietly grew the usable pool would violate that by
 accident, so the test asserts `pick_for_draft` never returns one.
+
+`test_posts_window.py` covers one number: `hidden_by_window`. The Posts list
+shows the last 90 days by default, and the oldest postings are exactly the ones
+whose ad copy was never captured — least replaceable, first to age out. The
+count has to mean what the "show all" button promises, so the test pins
+`total + hidden == the all-time total` under the account and search filters as
+well, not just globally.
 
 `test_agent_reports.py` runs every agent report against an empty database and a
 populated one — an empty install is the case most likely to raise and the first

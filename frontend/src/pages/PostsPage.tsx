@@ -42,6 +42,7 @@ type SyncInfo = { accounts: SyncAccount[]; stale: boolean; stale_after_days: num
 
 type Resp = {
   total: number;
+  hidden_by_window: number;
   limit: number;
   offset: number;
   items: PostRow[];
@@ -103,6 +104,10 @@ export default function PostsPage() {
 
   const items = q.data?.items ?? [];
   const total = q.data?.total ?? 0;
+  // The oldest postings are the ones whose ad copy was never captured, and they
+  // are the first to age out of the default 90 days. Saying nothing would make
+  // the list look complete while quietly getting shorter every week.
+  const hidden = q.data?.hidden_by_window ?? 0;
   const counts = q.data?.counts ?? {};
   const editCounts = q.data?.edit_counts;
   const sync = q.data?.sync;
@@ -392,6 +397,20 @@ export default function PostsPage() {
       <div className="flex items-center justify-between text-sm text-fg-muted">
         <div>
           {q.isLoading ? "Loading…" : `${formatNumber(total)} posts`}
+          {!q.isLoading && hidden > 0 && (
+            <>
+              {" · "}
+              <button
+                onClick={() => {
+                  setSince("all");
+                  setPage(0);
+                }}
+                className="underline hover:text-fg"
+              >
+                {formatNumber(hidden)} older than 90 days — show all
+              </button>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button

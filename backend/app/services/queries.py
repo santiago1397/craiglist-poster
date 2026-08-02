@@ -390,8 +390,28 @@ def posts_page(
         """
     ).fetchone()
 
+    # How many rows the date window itself is hiding — same filters otherwise.
+    #
+    # The oldest postings are the ones whose ad copy was never captured, so they
+    # are both the least replaceable and the first to age out of the default 90
+    # days. A list that silently drops them looks complete while getting shorter
+    # every week, so the page needs a number to offer "show all" against.
+    if since == "all":
+        hidden = 0
+    else:
+        all_where_sql, all_params = _build_where(
+            account=account, status_filter=status_filter, ghost_filter=ghost_filter,
+            since="all", search=search, exclude_young_posts=exclude_young,
+            edit_filter=edit_filter,
+        )
+        hidden = conn.execute(
+            f"{_BASE_CTES} SELECT COUNT(*) AS n FROM base_rated {all_where_sql}",
+            all_params,
+        ).fetchone()["n"] - total
+
     return {
         "total": total,
+        "hidden_by_window": max(0, hidden),
         "limit": limit,
         "offset": offset,
         "items": list(rows),
