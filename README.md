@@ -375,6 +375,29 @@ settled; it generates photos straight into Available (covers always stay manual)
 whenever depth drops below `image_stack_floor`. At $0.0035 an image, steady
 state is roughly $7/month.
 
+## Letting an AI read the system
+
+**Settings → API keys** issues a key for the `/agent` API — a read-only view of
+everything above, shaped for an AI assistant rather than a browser. Hand it one
+URL and it works out the rest:
+
+```
+https://api.craigslist.santiagoproperties.uk/agent/help?key=<KEY>
+```
+
+That returns a plain-English manual of every question it can ask. Answers come
+back as prose by default (`&format=json` if something needs to parse one), with
+the caveats welded into the sentences — that stats are a once-a-day scrape, that
+post times are forecasts, that no errors does not mean healthy.
+
+It can read status, the queue, published posts, performance, problems, raw error
+logs and image inventory. It cannot write copy, edit live ads, change guardrails
+or spend money. The single exception is publishing a draft **you have already
+marked reviewed**, which needs a separate `post`-scope key and still passes every
+guardrail — see [AGENTS.md](AGENTS.md).
+
+---
+
 ## Where things live
 
 | Path | What |

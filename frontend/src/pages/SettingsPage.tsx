@@ -151,6 +151,8 @@ export default function SettingsPage() {
       <PhoneNumbers />
 
       <MachineTokens />
+
+      <ApiKeys />
     </div>
   );
 }
@@ -1021,6 +1023,185 @@ function MachineTokens() {
                 <button
                   disabled={revoke.isPending}
                   onClick={() => revoke.mutate(t.id)}
+                  className="text-xs px-2 py-1 rounded border border-danger-border text-danger-fg hover:bg-danger disabled:opacity-40"
+                >
+                  Revoke
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
+type ApiKey = {
+  id: number;
+  label: string;
+  scope: "read" | "post";
+  created_at: string;
+  last_seen_at: string | null;
+  revoked_at: string | null;
+};
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "";
+
+function ApiKeys() {
+  const qc = useQueryClient();
+  const [label, setLabel] = useState("");
+  const [scope, setScope] = useState<"read" | "post">("read");
+  const [issued, setIssued] = useState<{ key: string; scope: string } | null>(null);
+
+  const keysQ = useQuery({
+    queryKey: ["settings", "api-keys"],
+    queryFn: () => api.get<{ keys: ApiKey[] }>("/settings/api-keys"),
+  });
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.post<{ key: string; scope: string }>("/settings/api-keys", { label, scope }),
+    onSuccess: (r) => {
+      setIssued({ key: r.key, scope: r.scope });
+      setLabel("");
+      setScope("read");
+      void qc.invalidateQueries({ queryKey: ["settings", "api-keys"] });
+    },
+  });
+
+  const revoke = useMutation({
+    mutationFn: (id: number) => api.del(`/settings/api-keys/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["settings", "api-keys"] }),
+  });
+
+  const keys = keysQ.data?.keys ?? [];
+  const err = create.error ?? revoke.error ?? keysQ.error;
+  const errText = err ? (err instanceof ApiError ? err.message : String(err)) : null;
+
+  return (
+    <Section
+      title="API keys (for AI agents)"
+      description="Lets an AI assistant read the state of this system — what is queued, what published, how it performed, and what is broken. Point it at /agent/help and it discovers the rest itself."
+    >
+      <p className="rounded border border-warn-border bg-warn px-3 py-2 text-xs text-warn-fg">
+        A read key may be sent in the URL as <code>?key=…</code>, because many AI
+        tools cannot set request headers. That means it will end up in browser
+        history and server logs. Treat a read key as low-value and rotate it
+        freely. A <strong>post</strong> key is refused in the URL and must be
+        sent as an <code>X-API-Key</code> header.
+      </p>
+
+      {errText && (
+        <p
+          role="alert"
+          className="rounded border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg"
+        >
+          {errText}
+        </p>
+      )}
+
+      {issued && (
+        <div className="rounded border border-ok-border bg-ok p-3 space-y-2">
+          <p className="text-sm font-medium text-ok-fg">
+            Copy this now — it is never shown again.
+          </p>
+          <code className="block break-all rounded bg-bg border border-border-strong px-2 py-1.5 text-xs font-mono">
+            {issued.key}
+          </code>
+          <p className="text-xs text-ok-fg">
+            Give an assistant this one URL and it can work out the rest:
+          </p>
+          <code className="block break-all rounded bg-bg border border-border-strong px-2 py-1.5 text-xs font-mono">
+            {API_BASE}/agent/help?key={issued.key}
+          </code>
+          {issued.scope === "post" && (
+            <p className="text-xs text-ok-fg">
+              This key can publish drafts that have been marked reviewed. It must
+              be sent as a header, never in the URL.
+            </p>
+          )}
+          <button
+            onClick={() => setIssued(null)}
+            className="text-xs px-2 py-1 rounded border border-border-strong text-fg-muted hover:bg-surface-2"
+          >
+            Done
+          </button>
+        </div>
+      )}
+
+      <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end">
+        <label className="block">
+          <span className="text-xs text-fg-muted">Label</span>
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="claude assistant"
+            className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+          />
+        </label>
+        <label className="block">
+          <span className="text-xs text-fg-muted">Scope</span>
+          <select
+            value={scope}
+            onChange={(e) => setScope(e.target.value as "read" | "post")}
+            className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+          >
+            <option value="read">Read only</option>
+            <option value="post">Read + publish reviewed drafts</option>
+          </select>
+        </label>
+        <button
+          disabled={!label.trim() || create.isPending}
+          onClick={() => create.mutate()}
+          className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
+        >
+          {create.isPending ? "Creating…" : "Create key"}
+        </button>
+      </div>
+
+      {scope === "post" && (
+        <p className="text-xs text-warn-fg">
+          A publish key can consume one of the three daily posting slots. It can
+          only publish drafts you have already marked reviewed, and every
+          guardrail still applies — but the ad goes live, and there is no undo
+          once the desktop has picked it up.
+        </p>
+      )}
+
+      {keys.length === 0 ? (
+        <p className="text-sm text-fg-subtle">
+          No API keys. Nothing outside this dashboard can read the system.
+        </p>
+      ) : (
+        <ul className="divide-y divide-border rounded border border-border">
+          {keys.map((k) => (
+            <li key={k.id} className="p-3 flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium">
+                  {k.label || <span className="text-fg-subtle">(unlabelled)</span>}
+                  <span
+                    className={
+                      k.scope === "post"
+                        ? "ml-2 text-xs px-1.5 py-0.5 rounded bg-warn text-warn-fg"
+                        : "ml-2 text-xs px-1.5 py-0.5 rounded bg-surface-2 text-fg-muted"
+                    }
+                  >
+                    {k.scope === "post" ? "can publish" : "read only"}
+                  </span>
+                </p>
+                <p className="text-xs text-fg-subtle">
+                  created {formatDateTime(k.created_at)} · last used{" "}
+                  {k.last_seen_at ? formatDateTime(k.last_seen_at) : "never"}
+                </p>
+              </div>
+              {k.revoked_at ? (
+                <span className="text-xs px-2 py-0.5 rounded bg-surface-2 text-fg-muted">
+                  revoked
+                </span>
+              ) : (
+                <button
+                  disabled={revoke.isPending}
+                  onClick={() => revoke.mutate(k.id)}
                   className="text-xs px-2 py-1 rounded border border-danger-border text-danger-fg hover:bg-danger disabled:opacity-40"
                 >
                   Revoke
