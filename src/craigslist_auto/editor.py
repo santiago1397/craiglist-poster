@@ -17,9 +17,9 @@ DESIGN_EDITS.md decisions 23, 26, 32, 33, 36.
     before that is a draft Craigslist will throw away on "cancel edit", which is
     what makes reading safe and what bounds the damage from a failed reconcile.
 
-    What is still unproven is the *write*: no run has yet submitted the copy
-    page, replaced a gallery, or pressed publish. Until one has, treat the
-    reconcile path as observed-but-unexercised.
+    The copy page has been submitted for real (2026-08-02). Replacing a gallery
+    and pressing publish still have not run end to end, so treat those two as
+    observed-but-unexercised.
 
     `edits_enabled` is TRUE on the server as of migration 0015, so this module
     CAN reach a live posting. What keeps that safe is that failure is loud: the
@@ -32,10 +32,12 @@ every step is timed and recorded, a mismatch raises `EditFailure` carrying the
 step name, and the backend routes on that step to decide whether the edit
 retries or parks (decision 32).
 
-The one genuinely dangerous window is between removing the live images and
-finishing the re-upload — a failure there leaves a live posting with no images.
-`_replace_images` therefore attempts an in-session recovery before giving up,
-and reports `degraded_live` if even that fails.
+The one genuinely dangerous window is between removing the images and finishing
+the re-upload. `_replace_images` attempts an in-session recovery before giving
+up, and reports `degraded_live` if even that fails — but only when this run
+actually removed something. Claiming it unconditionally made a failure to find
+the upload control indistinguishable from a stripped gallery, which is the
+difference between "retry it" and "go and look at the ad right now".
 """
 from __future__ import annotations
 
@@ -747,7 +749,11 @@ def _replace_images(
     except EditFailure:
         raise
     except Exception as e:
-        raise EditFailure("images_upload", e, mutated=True) from e
+        # `mutated` only if this run actually took something away. Reporting it
+        # unconditionally turned "could not find the upload control" into
+        # `degraded_live` — the loudest alarm the system has — on a posting
+        # whose 24 images had never been touched.
+        raise EditFailure("images_upload", e, mutated=removed > 0) from e
 
     return page.locator(SEL["image_thumb"]).count(), artifact_ids
 
@@ -1015,14 +1021,41 @@ def reconcile_post(
                 sleep_jitter(1.2)
 
             final_images = len(live_images)
-            if manage_images:
+            # `images_differ`, not `manage_images`. Taking control of a gallery
+            # is not a reason to delete and re-upload one that already matches:
+            # gated on the wrong flag, a one-word title change tore down 24
+            # images and put them back, which is 48 avoidable operations against
+            # a live posting and 48 chances to fail halfway.
+            if manage_images and images_differ:
                 try:
                     with log.step("open_images_step"):
+                        # Via the hub. Going straight from the copy page to
+                        # ?s=editimage got redirected back to ?s=edit, so the
+                        # replace ran against a page with no gallery on it.
+                        page.goto(hub_url, wait_until="domcontentloaded")
+                        read_pause(500)
                         page.goto(
                             hub_step_url(hub_url, HUB_STEP_IMAGES),
                             wait_until="domcontentloaded",
                         )
                         read_pause(900)
+                        # BUG 3's guard: refuse to touch anything unless this is
+                        # really the gallery. Craigslist redirects out of the
+                        # image step in states we do not fully understand yet,
+                        # and every operation past here is destructive.
+                        if _count(page, "file_input") == 0:
+                            artifact_ids.extend(artifacts.capture_page(
+                                page, flow="edit_reconcile",
+                                label="images_step_not_reached",
+                                post_id=post_id, account=account.name,
+                            ))
+                            raise EditFailure(
+                                "open_images_step",
+                                f"asked for the image step and landed on "
+                                f"{page.url} with no upload control — not "
+                                f"touching the gallery",
+                                mutated=False,
+                            )
                     final_images, extra = _replace_images(
                         page, log, photos, account.name, post_id
                     )
