@@ -12,23 +12,43 @@
 // somebody wants to see what was on it. Archive turns the weak record into the
 // good one by fetching those URLs onto the VPS.
 
+import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import { cn } from "../../lib/cn";
 import type { PostImageRef, PublishedImage } from "../../lib/edits";
+import { ImageLightbox, type LightboxImage } from "./ImageLightbox";
 
 const IMG_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
 
-type Shown = { key: string; slot: number; src: string; ours: boolean };
+/** Sized for us: 480 for tiles, 1024 for the viewer, the original on request. */
+function ours(id: number): Omit<LightboxImage, "key" | "slot" | "ours"> {
+  return {
+    thumbSrc: `${IMG_BASE}/images/${id}/thumb`,
+    viewSrc: `${IMG_BASE}/images/${id}/thumb?w=1024`,
+    fullSrc: `${IMG_BASE}/images/${id}/raw`,
+  };
+}
+
+/**
+ * Sized on Craigslist's side. Their CDN names the variant in the filename —
+ * `..._1200x900.jpg`, `_600x450`, `_300x300` — so a tile can ask for a tile
+ * rather than pulling a 1200px original and letting the browser shrink it.
+ * An unrecognised name is left alone; a working picture beats a clever URL.
+ */
+const CL_VARIANT = /_(50x50c|300x300|600x450|1200x900)\.jpg$/i;
+function craigslist(url: string): Omit<LightboxImage, "key" | "slot" | "ours"> {
+  const full = url.startsWith("//") ? `https:${url}` : url;
+  const at = (size: string) =>
+    CL_VARIANT.test(full) ? full.replace(CL_VARIANT, `_${size}.jpg`) : full;
+  return { thumbSrc: at("600x450"), viewSrc: at("1200x900"), fullSrc: at("1200x900") };
+}
 
 /** Our own copies first; a Craigslist URL only when we hold nothing better. */
-function resolve(attached: PublishedImage[], manifest: PostImageRef[]): Shown[] {
+function resolve(attached: PublishedImage[], manifest: PostImageRef[]): LightboxImage[] {
   if (attached.length > 0) {
     return attached.map((i) => ({
-      key: `own-${i.id}`,
-      slot: i.slot,
-      src: `${IMG_BASE}/images/${i.id}/thumb`,
-      ours: true,
+      key: `own-${i.id}`, slot: i.slot, ours: true, ...ours(i.id),
     }));
   }
   return manifest
@@ -36,8 +56,8 @@ function resolve(attached: PublishedImage[], manifest: PostImageRef[]): Shown[] 
     .map((i) => ({
       key: `man-${i.slot}-${i.image_id ?? i.url}`,
       slot: i.slot,
-      src: i.image_id ? `${IMG_BASE}/images/${i.image_id}/thumb` : (i.url as string),
       ours: !!i.image_id,
+      ...(i.image_id ? ours(i.image_id) : craigslist(i.url as string)),
     }));
 }
 
@@ -52,6 +72,7 @@ export function PublishedImages({
   manifest?: PostImageRef[];
   onError?: (msg: string) => void;
 }) {
+  const [viewing, setViewing] = useState<number | null>(null);
   const qc = useQueryClient();
   const archive = useMutation({
     mutationFn: () => api.post<{ stored: number; failed: number }>(
@@ -86,6 +107,7 @@ export function PublishedImages({
             ? "Our own copies, kept whether or not the posting is still up."
             : `${borrowed} of these are still coming from Craigslist and will stop ` +
               "loading once it prunes the posting."}
+          {" Click any picture to see it full size."}
         </p>
         {borrowed > 0 && (
           <button
@@ -98,28 +120,40 @@ export function PublishedImages({
         )}
       </div>
       <ul className="flex gap-2 flex-wrap">
-        {shown.map((img) => (
+        {shown.map((img, i) => (
           <li key={img.key} className="relative">
-            <img
-              src={img.src}
-              alt={img.slot === 1 ? "Cover image (Craigslist thumbnail)" : `Slot ${img.slot}`}
-              loading="lazy"
-              decoding="async"
-              width={112}
-              height={80}
-              className={cn(
-                "h-20 w-28 object-cover rounded border bg-surface-2",
-                img.slot === 1 ? "border-accent-border" : "border-border-strong",
-                !img.ours && "opacity-90",
-              )}
-              title={img.ours ? "Our copy" : "Served by Craigslist"}
-            />
-            <span className="absolute top-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-white">
+            <button
+              onClick={() => setViewing(i)}
+              title={`${img.ours ? "Our copy" : "Served by Craigslist"} — click to open full size`}
+              className="block rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-border"
+            >
+              <img
+                src={img.thumbSrc}
+                alt={img.slot === 1 ? "Cover image (Craigslist thumbnail)" : `Slot ${img.slot}`}
+                loading="lazy"
+                decoding="async"
+                width={112}
+                height={80}
+                className={cn(
+                  "h-20 w-28 object-cover rounded border bg-surface-2 transition",
+                  "hover:brightness-110 hover:border-accent-border",
+                  img.slot === 1 ? "border-accent-border" : "border-border-strong",
+                )}
+              />
+            </button>
+            <span className="absolute top-0.5 left-0.5 text-[10px] px-1 rounded bg-black/70 text-white pointer-events-none">
               {img.slot === 1 ? "cover" : img.slot}
             </span>
           </li>
         ))}
       </ul>
+
+      <ImageLightbox
+        images={shown}
+        index={viewing}
+        onIndexChange={setViewing}
+        onClose={() => setViewing(null)}
+      />
     </section>
   );
 }

@@ -864,6 +864,28 @@ ENDED_SEL = {
     "infos": "p.postinginfo",
 }
 
+# Craigslist encodes the size in the filename: `_50x50c`, `_300x300`, `_600x450`,
+# `_1200x900`. The manage/display page renders the gallery strip at 50x50, and
+# the trailing `c` on that one variant — it is a centre crop — is why the
+# earlier `_\d+x\d+\.jpg$` pattern skipped precisely the size that most needed
+# upgrading. 80 of the first 110 pictures we kept were 50-pixel thumbnails.
+_CL_VARIANT = re.compile(r"_\d+x\d+c?\.jpg$", re.I)
+# The largest Craigslist keeps. Asking for it costs one request either way.
+LARGEST_VARIANT = "_1200x900.jpg"
+
+
+def largest_variant(url: str) -> str:
+    """Rewrite a Craigslist image URL to the full-size original.
+
+    Leaves anything it does not recognise alone — a working URL beats a clever
+    one, and a 404 here means the only surviving copy of that picture is lost.
+    """
+    if not url:
+        return url
+    if url.startswith("//"):
+        url = "https:" + url
+    return _CL_VARIANT.sub(LARGEST_VARIANT, url)
+
 
 def scan_ended(
     *,
@@ -1070,11 +1092,12 @@ def _read_ended_post(page: Page) -> dict:
     for i in range(gallery.count()):
         src = gallery.nth(i).get_attribute("src")
         if src:
-            # Craigslist serves a 600x450 in the gallery; the same id at
-            # _1200x900 is the largest it keeps, and costs nothing to ask for.
+            # Craigslist names the variant in the filename, and the same id at
+            # _1200x900 is the largest it keeps, so ask for that whatever the
+            # page happened to render.
             images.append({
                 "slot": i + 1,
-                "url": re.sub(r"_\d+x\d+\.jpg$", "_1200x900.jpg", src),
+                "url": largest_variant(src),
                 "sha256": None,
             })
 
