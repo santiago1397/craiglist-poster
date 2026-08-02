@@ -303,11 +303,20 @@ def autofill_cover(conn: psycopg.Connection, *, post_id: str) -> dict | None:
 
 
 def _touch_desired(conn: psycopg.Connection, post_id: str) -> None:
-    """An image change is a content change: bump the revision so it reconciles."""
+    """An image change is a content change: bump the revision so it reconciles.
+
+    `image_rev` moves too, and separately. The desktop cannot tell whether the
+    live gallery matches the staged one — images already on Craigslist are URLs
+    on their servers with no sha256 to compare — so it used to decide on counts
+    alone, and swapping twenty-four photos for twenty-four others looked like no
+    change at all. This is the answer from our side: the gallery needs pushing
+    when it has been touched since the last one landed.
+    """
     conn.execute(
         """
         UPDATE post_desired_state
         SET desired_rev = desired_rev + 1,
+            image_rev = image_rev + 1,
             status = CASE WHEN status = 'applying' THEN status ELSE 'pending' END,
             updated_at = NOW()
         WHERE post_id = %s
@@ -804,6 +813,12 @@ def claim_reconcile(
         if claimed["image_set_managed"]
         else []
     )
+    # Has the staged gallery been touched since one was last published? The
+    # desktop cannot work this out by looking — see `_touch_desired`.
+    out["images_changed"] = bool(
+        claimed["image_set_managed"]
+        and claimed["image_rev"] > claimed["live_image_rev"]
+    )
     return out
 
 
@@ -896,6 +911,8 @@ def apply_attempt(conn: psycopg.Connection, ev) -> None:
             UPDATE post_desired_state
             SET status = 'applied',
                 live_rev = COALESCE(%s, desired_rev),
+                -- The gallery that is live is now the one that was staged.
+                live_image_rev = image_rev,
                 failed_step = NULL,
                 failed_message = NULL,
                 claimed_at = NULL,
