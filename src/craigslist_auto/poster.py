@@ -10,7 +10,7 @@ from loguru import logger
 from patchright.sync_api import BrowserContext, Page, sync_playwright
 
 from . import artifacts
-from .config import CL_SITE, LOGS_DIR, Account
+from .config import CL_ACCOUNT_URL, CL_SEARCH_URL, CL_SITE, LOGS_DIR, Account
 from .content import Ad, mark_content_used, mark_photos_used
 from .covers import is_cover_path, mark_cover_used
 from .human import human_click, human_type, read_pause, scroll_a_bit, sleep_jitter
@@ -165,7 +165,7 @@ def launch_account(
 
 
 def is_logged_in(page: Page) -> bool:
-    page.goto("https://accounts.craigslist.org/login/home", wait_until="domcontentloaded")
+    page.goto(CL_ACCOUNT_URL, wait_until="domcontentloaded")
     sleep_jitter(2.0)
     return "settings" in page.url or page.locator("text=postings").count() > 0
 
@@ -898,6 +898,117 @@ def _url_matches_title(href: str, title: str) -> bool:
     return sum(1 for w in words if w in slug) >= 2
 
 
+def _normalise_title(text: str | None) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _pick_posting_row(
+    rows: list[dict], *, post_id: str | None = None, expected_title: str | None = None
+) -> str | None:
+    """Choose our just-published posting out of the account's postings table.
+
+    Every row here belongs to the signed-in account, so unlike the confirmation
+    page there is no risk of picking up a stranger's ad — the only question is
+    which of our own postings this is.
+
+    A PostingID match is exact and therefore authoritative. Falling back to the
+    title is for the runs where the receipt never showed an id: Craigslist
+    truncates long titles in this table, so the comparison is a prefix one in
+    either direction, and the first hit wins because the table is newest-first.
+    """
+    if post_id:
+        for r in rows:
+            if r.get("post_id") == post_id and "/d/" in (r.get("href") or ""):
+                return r["href"]
+        return None
+
+    want = _normalise_title(expected_title)
+    if not want:
+        return None
+    for r in rows:
+        got = _normalise_title(r.get("title"))
+        # A handful of characters is not enough to tell two roofing ads apart.
+        if len(got) < 12 or "/d/" not in (r.get("href") or ""):
+            continue
+        if want.startswith(got) or got.startswith(want):
+            return r["href"]
+    return None
+
+
+# Same DOM contract the stats scrape reads (stats._scrape_current_page).
+_MY_POSTINGS_JS = """
+() => {
+    const out = [];
+    for (const tr of document.querySelectorAll('tr.posting-row')) {
+        const statusCell = tr.querySelector('td.status');
+        const rawId = (statusCell && statusCell.dataset.postingid)
+            || (tr.querySelector('td.postingID')?.textContent.trim() || '');
+        const a = tr.querySelector('td.title a');
+        out.push({
+            post_id: String(rawId).replace(/\\D/g, ''),
+            title: a ? a.textContent.trim() : '',
+            href: a ? a.href : '',
+        });
+    }
+    return out;
+}
+"""
+
+
+def _resolve_via_my_postings(
+    page: Page,
+    *,
+    post_id: str | None = None,
+    expected_title: str | None = None,
+    run: PostRun | None = None,
+    attempts: int = 3,
+) -> str | None:
+    """Read the live /view/d/ URL off the account's own postings page.
+
+    This is the only reliable way back from a PostingID to the URL a visitor
+    would see. It costs one extra page load per post, on a page the session is
+    already authenticated for.
+
+    Retried because a posting can take a few seconds to appear in the table
+    after checkout — which is exactly the window this runs in.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            page.goto(CL_ACCOUNT_URL, wait_until="domcontentloaded", timeout=30_000)
+            sleep_jitter(2.0)
+            if (
+                page.locator("input[type='password']").count()
+                and not page.locator("tr.posting-row").count()
+            ):
+                if run is not None:
+                    run.warn(
+                        "the account's postings page asked for a login, so the "
+                        "post URL could not be resolved there."
+                    )
+                return None
+            try:
+                page.wait_for_selector("tr.posting-row", timeout=10_000)
+            except Exception:
+                pass
+            rows = page.evaluate(_MY_POSTINGS_JS)
+            href = _pick_posting_row(
+                rows, post_id=post_id, expected_title=expected_title
+            )
+            if href:
+                found_by = f"PostingID={post_id}" if post_id else "title"
+                logger.info(
+                    f"  resolved {found_by} → {href} "
+                    f"(account postings page, attempt {attempt})"
+                )
+                return href
+        except Exception as e:
+            logger.warning(f"  postings-page lookup attempt {attempt} failed: {e}")
+        if attempt < attempts:
+            read_pause(1500)
+            sleep_jitter(4.0)
+    return None
+
+
 def _extract_post_url(
     page: Page, *, run: PostRun | None = None, expected_title: str | None = None
 ) -> str | None:
@@ -936,67 +1047,63 @@ def _extract_post_url(
             run.warn(msg)
         else:
             logger.warning(f"  {msg}")
-    # 2. Paid-category receipt page: extract PostingID and resolve it to the
-    #    canonical /d/ URL by loading the search-by-posting-ID page. That page
-    #    renders the matching post at the top with a normal /d/... link, so
-    #    we hand back the same URL a public visitor would copy from their
-    #    address bar — what dashboards and ghost-checks should compare on.
-    #    The /k/...?s=billing receipt URL itself is session-bound and 404s
-    #    once the session ends, so we must NOT save it.
+    # 2. The paid-category receipt page carries no link to the live post, only
+    #    a PostingID. This used to resolve that id through
+    #    /search/sss?postingID=<id>, which does not work and quietly never did:
+    #    Craigslist ignores the parameter and serves an ordinary for-sale
+    #    results page, so the first /d/ link on it was always a stranger's ad.
+    #    The title guard below rejected it (correctly) and the search URL got
+    #    saved instead — a link that opens a page of other people's listings.
+    #
+    #    The account's own postings page is the real mapping from PostingID to
+    #    the live URL, and this session is already signed in to it.
+    #
+    #    Whatever happens next, we navigate away, so remember the receipt URL
+    #    for the last resort below.
+    receipt_url = page.url
+    post_id = None
     try:
         import re
-        html = page.content()
-        m = re.search(r"PostingID\s*[:#]?\s*(\d{6,})", html)
+        m = re.search(r"PostingID\s*[:#]?\s*(\d{6,})", page.content())
         if m:
             post_id = m.group(1)
-            search_url = f"https://miami.craigslist.org/search/sss?postingID={post_id}"
-            logger.info(f"  extracted PostingID={post_id} from receipt page; resolving → {search_url}")
-            try:
-                page.goto(search_url, wait_until="domcontentloaded", timeout=30_000)
-                read_pause(800)
-                sleep_jitter(1.0)
-                canonical = page.locator("a[href*='/d/']").first
-                if canonical.count():
-                    href = canonical.get_attribute("href")
-                    # Searching by postingID should return only our post, but
-                    # the same "don't record a stranger's ad" rule applies.
-                    if href and (
-                        not expected_title or _url_matches_title(href, expected_title)
-                    ):
-                        logger.info(f"  resolved PostingID={post_id} → {href}")
-                        return href
-                    if run is not None:
-                        run.warn(
-                            f"PostingID={post_id} resolved to a link that does not "
-                            f"match this ad's title; saved the search URL instead."
-                        )
-                    return search_url
-                # Post may not be indexed yet, or could be ghosted already.
-                # Either way, the search URL still resolves the post live.
-                if run is not None:
-                    run.warn(
-                        f"PostingID={post_id} returned no /d/ link — post not yet "
-                        f"indexed, or already ghosted. Saved the search URL instead."
-                    )
-                return search_url
-            except Exception as e:
-                if run is not None:
-                    run.warn(
-                        f"PostingID={post_id} could not be resolved to a /d/ URL "
-                        f"({e!r}); saved the search URL instead."
-                    )
-                return search_url
+            logger.info(f"  extracted PostingID={post_id} from the receipt page")
     except Exception as e:
         logger.warning(f"  PostingID extraction failed: {e}")
-    # 3. Last resort — the current URL. On the paid-category receipt page this
-    # is session-bound and 404s once the session ends, so the post is recorded
-    # under a URL that will not resolve later. Worth flagging loudly.
+
+    # With no id we can still find the posting by title — every row on that
+    # page is ours, and the newest matching one is the ad just published.
+    href = _resolve_via_my_postings(
+        page, post_id=post_id, expected_title=expected_title, run=run
+    )
+    if href:
+        return href
+
+    if post_id:
+        # The id is real and the post published; only the URL is missing. Record
+        # the search URL so the id still reaches history — post_id is parsed
+        # back out of it, and without one the account is free to post again
+        # inside its cooldown. The nightly stats sync reads the same postings
+        # page and repairs the URL.
+        search_url = f"{CL_SEARCH_URL}?postingID={post_id}"
+        if run is not None:
+            run.warn(
+                f"PostingID={post_id} was not on the account's postings page — "
+                f"saved a search URL that will not open the post. The link "
+                f"repairs itself at the next stats sync."
+            )
+        return search_url
+
+    # 3. Last resort — the receipt URL. It is session-bound and 404s once the
+    # session ends, so the post is recorded under a URL that will not resolve
+    # later, and carries no id. Worth flagging loudly.
     if run is not None:
         run.warn(
-            "no /d/ link and no PostingID on the confirmation page — recorded "
+            "no /d/ link and no PostingID on the confirmation page, and the "
+            "posting was not found on the account's postings page — recorded "
             "the raw page URL, which is probably session-bound and will 404. "
             "This post may be unreachable from the dashboard."
         )
     else:
         logger.warning("  no /d/ link and no PostingID found; falling back to page.url")
-    return page.url
+    return receipt_url

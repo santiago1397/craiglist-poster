@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from craigslist_auto.poster import _url_matches_title  # noqa: E402
+from craigslist_auto.poster import _pick_posting_row, _url_matches_title  # noqa: E402
 from craigslist_auto.stats import extract_post_id  # noqa: E402
 
 ok = []
@@ -71,6 +71,53 @@ check(
     extract_post_id("https://post.craigslist.org/k/bbfEj6fxDgbS8h6WFxybYu/FdbgK") is None,
 )
 check("no url, no id", extract_post_id(None) is None)
+
+# The run that made this necessary: craigs2, 2026-08-03. The receipt page had
+# no /d/ link, PostingID=7951217641 was resolved through
+# /search/sss?postingID=..., and that search page — which ignores the parameter
+# entirely — offered a stranger's appliance ad. Recorded URL: the search page.
+print("\nthe posting id is resolved on the account's own postings page")
+ROWS = [
+    {"post_id": "7951217641",
+     "title": "Roof Repair Handyman -> Emergency -> Leak -> Near Me -> Same Day",
+     "href": "https://www.craigslist.org/view/d/miami-roof-repair-handyman-emergency/9xKtRmQpLvN3wYb7cHs2Tj"},
+    {"post_id": "7950716823", "title": TITLE, "href": REAL},
+]
+check(
+    "the row carrying our PostingID wins",
+    _pick_posting_row(ROWS, post_id="7951217641") == ROWS[0]["href"],
+)
+check(
+    "an id that is not in the table resolves to nothing, never a neighbour",
+    _pick_posting_row(ROWS, post_id="7912345678") is None,
+)
+check(
+    "with no id, the ad is found by its title",
+    _pick_posting_row(ROWS, expected_title=TITLE) == REAL,
+)
+check(
+    "a title Craigslist truncated in the table still matches",
+    _pick_posting_row(
+        [{"post_id": "7947735493",
+          "title": "Roof Leak Repair Specialist Serving Miami-Dade, Broward, Palm Beach &",
+          "href": "https://www.craigslist.org/view/d/pompano-beach-roof-leak-repair/2idMXkBtfX7E43474ecd8j"}],
+        expected_title=(
+            "Roof Leak Repair Specialist Serving Miami-Dade, Broward, Palm Beach "
+            "& The Treasure Coast"
+        ),
+    ) is not None,
+)
+check(
+    "a different roofing ad on the same account is not mistaken for ours",
+    _pick_posting_row(ROWS, expected_title="Tile Roof Replacement - Free Estimate") is None,
+)
+check(
+    "a row with no posting link is skipped",
+    _pick_posting_row(
+        [{"post_id": "7951217641", "title": TITLE, "href": ""}], post_id="7951217641"
+    ) is None,
+)
+check("an empty table resolves to nothing", _pick_posting_row([], post_id="7951217641") is None)
 
 print("")
 for line in ok:

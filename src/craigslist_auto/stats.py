@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from patchright.sync_api import Page
 
-from .config import ACCOUNTS, DATA_DIR, LOGS_DIR, Account, machine_name
+from .config import ACCOUNTS, CL_ACCOUNT_URL, DATA_DIR, LOGS_DIR, Account, machine_name
 from .human import read_pause, sleep_jitter
 from .poster import launch_account
 
@@ -20,8 +20,8 @@ STATS_DB = DATA_DIR / "stats.sqlite"
 STATS_HEALTH = DATA_DIR / "stats_health.json"
 FAILURES_DIR = LOGS_DIR / "failures"
 
-# Same URL poster.is_logged_in uses — this is the postings page when signed in.
-CL_ACCOUNT_URL = "https://accounts.craigslist.org/login/home"
+# CL_ACCOUNT_URL now lives in config (poster.py resolves post URLs there too and
+# cannot import this module — stats imports poster). Re-exported for editor.py.
 ET = ZoneInfo("America/New_York")
 
 # CL exposes four per-post counters (confirmed against real DOM 2026-07-01):
