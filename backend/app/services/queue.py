@@ -66,6 +66,7 @@ def update_guardrails(conn: psycopg.Connection, values: dict) -> dict:
     allowed = {
         "min_hours_between_posts_same_account",
         "max_posts_per_day_total",
+        "max_posts_per_account_per_day",
         "max_posts_per_account_per_week",
         "post_window_start_hour",
         "post_window_end_hour",
@@ -125,6 +126,34 @@ def _accounts_with_claim(conn: psycopg.Connection) -> set[str]:
     return {r["account"] for r in rows}
 
 
+def _posts_today_by_account(
+    conn: psycopg.Connection, now: datetime
+) -> dict[str, int]:
+    """Posts each account has made so far *today*, in the operator's timezone.
+
+    A calendar-day count, deliberately unlike every other cap here. The daily
+    total and the weekly cap are rolling windows, which is why both are
+    configured one above the figure they enforce — a post lands minutes after
+    its fire, so yesterday's post at the same clock time is still inside the
+    window. Counting "two per account per day" that way would mean yesterday
+    afternoon's post still counted at this morning's fire, and the morning slot
+    would never open at all.
+
+    The boundary is derived from the caller's `now` rather than the database's
+    `NOW()`, even though the two agree in production. Every other check in
+    `evaluate_eligibility` honours the injected clock, and one that quietly did
+    not would make this cap untestable — a test pinning it would pass whatever
+    the code did, because the rows it seeded would land on a different calendar
+    date than the real today.
+    """
+    midnight = _local_now(now).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = conn.execute(
+        "SELECT account, COUNT(*) AS n FROM posts WHERE posted_ts >= %s GROUP BY account",
+        (midnight,),
+    ).fetchall()
+    return {r["account"]: r["n"] for r in rows}
+
+
 def _posts_last_7d_by_account(conn: psycopg.Connection, now: datetime) -> dict[str, int]:
     rows = conn.execute(
         "SELECT account, COUNT(*) AS n FROM posts WHERE posted_ts >= %s GROUP BY account",
@@ -175,6 +204,7 @@ def evaluate_eligibility(
         )
 
     last_post = _last_post_by_account(conn)
+    today = _posts_today_by_account(conn, now)
     weekly = _posts_last_7d_by_account(conn, now)
     depths = queue_depths(conn)
     in_flight = _accounts_with_claim(conn)
@@ -198,6 +228,16 @@ def evaluate_eligibility(
                     f"cooldown: {hours:.1f}h since last "
                     f"(need {g['min_hours_between_posts_same_account']}h)"
                 )
+        # Two a day, one in the morning block and one in the afternoon. The
+        # cooldown alone very nearly implies this — five hours twice does not
+        # fit inside a ten-hour window — but "very nearly" is not a guarantee,
+        # and the arithmetic quietly stops holding the moment somebody widens
+        # the window in Settings. State the rule instead of deriving it.
+        td = today.get(name, 0)
+        if td >= g["max_posts_per_account_per_day"]:
+            reasons.append(
+                f"daily cap: {td}/{g['max_posts_per_account_per_day']} today"
+            )
         wk = weekly.get(name, 0)
         if wk >= g["max_posts_per_account_per_week"]:
             reasons.append(f"weekly cap: {wk}/{g['max_posts_per_account_per_week']}")
@@ -209,6 +249,7 @@ def evaluate_eligibility(
             "eligible": not reasons,
             "reasons": reasons,
             "last_post_at": last,
+            "posts_today": td,
             "posts_last_7d": wk,
             "queue_depth": depth,
         }
@@ -619,7 +660,18 @@ def _backstop_cover(conn: psycopg.Connection, draft: dict) -> None:
 # The Windows scheduled task fires at these local hours on weekdays. Projecting
 # against the real fire times rather than "any legal hour" is the difference
 # between a useful forecast and a plausible-looking fiction.
-TASK_FIRE_HOURS = (9, 13, 17)
+#
+# A morning block and an afternoon block, four fires each, matching the two
+# triggers in scripts/install-schedule.ps1. Four accounts and longest-idle-first
+# selection make the rotation land on the pairing by itself: fire k and fire k+4
+# are six hours apart, an hour clear of the five-hour cooldown, so a slow run or
+# one displaced slot does not cost a fire.
+#
+# Whole hours, at least an hour apart, is load-bearing rather than aesthetic:
+# `_next_fire` below builds each fire with `c.replace(hour=hour)` and
+# `project_schedule` steps its cursor forward one hour at a time. Anything finer
+# would need both rewritten.
+TASK_FIRE_HOURS = (8, 9, 10, 11, 14, 15, 16, 17)
 
 
 def project_schedule(
@@ -695,6 +747,13 @@ def project_schedule(
             mine = [t for a, t in history if a == account]
             last = max(mine) if mine else None
             if last and (fire_utc - last) < timedelta(hours=g["min_hours_between_posts_same_account"]):
+                continue
+            # Calendar day in the display timezone, matching
+            # `_posts_today_by_account`. Omitting this would forecast a third
+            # post on a day the server will refuse one.
+            if sum(
+                1 for t in mine if t.astimezone(tz).date() == fire.date()
+            ) >= g["max_posts_per_account_per_day"]:
                 continue
             if sum(1 for t in mine if t >= fire_utc - timedelta(days=7)) >= g["max_posts_per_account_per_week"]:
                 continue

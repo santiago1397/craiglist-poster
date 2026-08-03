@@ -6,7 +6,8 @@ account's profile at the same time is not a race we can lose gracefully — Chro
 either refuses to start or corrupts the profile, and this project's README
 already warns that OneDrive makes profile lock files fragile.
 
-Until now `post` (9/1/5), `stats-sync` (6am) and `init-account` (manual) were
+Until now `post` (eight weekday fires), `stats-sync` (6am) and `init-account`
+(manual) were
 kept apart purely by non-overlapping Task Scheduler times. Nothing enforced it.
 Adding an opportunistic edit worker makes a collision inevitable, so every flow
 that drives a browser now goes through here.

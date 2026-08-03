@@ -27,6 +27,9 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 class GuardrailUpdate(BaseModel):
     min_hours_between_posts_same_account: int | None = Field(default=None, ge=1, le=168)
     max_posts_per_day_total: int | None = Field(default=None, ge=1, le=50)
+    # A calendar-day count, unlike the two rolling-window caps either side of it
+    # — so this one is set to the figure it enforces, not one above it.
+    max_posts_per_account_per_day: int | None = Field(default=None, ge=1, le=24)
     max_posts_per_account_per_week: int | None = Field(default=None, ge=1, le=100)
     post_window_start_hour: int | None = Field(default=None, ge=0, le=23)
     post_window_end_hour: int | None = Field(default=None, ge=1, le=24)

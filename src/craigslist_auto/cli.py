@@ -111,7 +111,11 @@ def init_data():
     ])
     wb.save(EXCEL_PATH)
     typer.echo(f"Created sample: {EXCEL_PATH}")
-    typer.echo("Add real rows, then put unique photos in data/photos/craigs1, craigs2, craigs3.")
+    typer.echo(
+        "Add real rows, then put unique photos in "
+        + ", ".join(f"data/photos/{a.name}" for a in ACCOUNTS)
+        + "."
+    )
 
 
 @app.command("init-account")

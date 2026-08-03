@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from .config import (
     ACCOUNTS,
     Account,
+    MAX_POSTS_PER_ACCOUNT_PER_DAY,
     MAX_POSTS_PER_ACCOUNT_PER_WEEK,
     MAX_POSTS_PER_DAY_TOTAL,
     MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT,
@@ -72,6 +73,25 @@ def _posts_in_last_24h_total() -> int:
     state = _load_state()
     cutoff = _now() - timedelta(hours=24)
     return sum(1 for p in state.get("posts", []) if datetime.fromisoformat(p["at"]) >= cutoff)
+
+
+def _posts_today(account_name: str) -> int:
+    """This account's posts so far *today*, in the dashboard's timezone.
+
+    A calendar-day count, deliberately not a rolling 24h one. The daily total and
+    the weekly cap are both rolling windows and have to be set one above the
+    figure they enforce because of it (see config.py); doing the same here would
+    mean yesterday's afternoon post still counted at this morning's fire and the
+    morning slot would never open.
+    """
+    today = _now().astimezone(LOCAL_TZ).date()
+    state = _load_state()
+    return sum(
+        1
+        for p in state.get("posts", [])
+        if p["account"] == account_name
+        and datetime.fromisoformat(p["at"]).astimezone(LOCAL_TZ).date() == today
+    )
 
 
 def _posts_in_last_week(account_name: str) -> int:
@@ -189,6 +209,9 @@ def describe_block_reasons(account_name: str) -> list[str]:
         hrs = (_now() - last).total_seconds() / 3600
         if hrs < MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT:
             reasons.append(f"cooldown: {hrs:.1f}h since last (need {MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT}h)")
+    today = _posts_today(account_name)
+    if today >= MAX_POSTS_PER_ACCOUNT_PER_DAY:
+        reasons.append(f"daily cap: {today}/{MAX_POSTS_PER_ACCOUNT_PER_DAY} today")
     wk = _posts_in_last_week(account_name)
     if wk >= MAX_POSTS_PER_ACCOUNT_PER_WEEK:
         reasons.append(f"weekly cap: {wk}/{MAX_POSTS_PER_ACCOUNT_PER_WEEK}")

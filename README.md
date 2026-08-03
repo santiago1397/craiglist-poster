@@ -1,8 +1,9 @@
 # Craigslist Auto-Poster
 
-Anti-detect Craigslist roofing ad poster for South Florida. Rotates 3 accounts
-across machines, uses real Chrome via patchright, human-like typing, photo +
-content deduplication, strict cooldowns, and an anonymous ghost-check.
+Anti-detect Craigslist roofing ad poster for South Florida. Rotates 4 accounts
+across machines — eight ads a weekday, two per account, one in the morning and
+one in the afternoon — uses real Chrome via patchright, human-like typing, photo
++ content deduplication, strict cooldowns, and an anonymous ghost-check.
 
 > **The posting model has changed.** `cl post` no longer generates an ad from
 > `data/ads.xlsx` at post time. It claims a pre-written draft from the dashboard
@@ -33,8 +34,8 @@ Then:
    `posting_title` and `description` support spintax `{a|b|c}` and tokens
    `{city}`, `{county}`, `{zip_code}`, `{phone}`, `{license}`, `{service}`.
 
-2. **Drop unique photos** in `data/photos/craigs1/`, `craigs2/`, `craigs3/`.
-   No overlap — Craigslist detects reused images.
+2. **Drop unique photos** in `data/photos/craigs1/`, `craigs2/`, `craigs3/`,
+   `craigs4/`. No overlap — Craigslist detects reused images.
 
    **Cover images** (optional but recommended): drop edited "thumbnail" images
    in `data/covers/unclaimed/`. See [Cover images](#cover-images) below.
@@ -49,6 +50,7 @@ Then:
    uv run cl init-account craigs1
    uv run cl init-account craigs2
    uv run cl init-account craigs3
+   uv run cl init-account craigs4
    ```
    The login persists in `profiles/<account>/`. Don't delete that folder.
 
@@ -206,20 +208,37 @@ page Craigslist actually served.
 Evaluated **on the server**, not on this machine. An account can post only if
 **all** of these pass:
 
-- Current time (America/New_York) is between **8 AM and 7 PM**.
+- Current time (America/New_York) is between **8 AM and 6 PM**.
 - Current day is **Monday through Friday**.
-- Fewer than **3 posts in the last 24h across all accounts**.
-- This account has fewer than **7 posts in the last 7 days**.
-- At least **20 hours** since this account's last post.
+- Fewer than **9 posts in the last 24h across all accounts**.
+- This account has posted fewer than **2 times today**.
+- This account has fewer than **11 posts in the last 7 days**.
+- At least **5 hours** since this account's last post.
 - The account has at least one queued draft.
+- No post is already in flight for this account.
 - The account's `allowed_machine` matches the current machine.
 
-Tune the first five in the dashboard under **Settings → Guardrails**. The
-desktop clamps whatever the server sends to hard ceilings compiled into
-`src/craigslist_auto/config.py` (max 5/day, max 10/week, minimum 18h cooldown,
-06:00–22:00) and reports a `flow_error` when it has to clamp — so a mistyped
-setting can't get an account banned. Raising a *ceiling* is a deliberate code
-change and redeploy.
+> **Two of those numbers are one higher than the figure they enforce, and that
+> is deliberate.** The 24-hour and 7-day caps are counted over a **rolling
+> window**, not a calendar day or week. A post lands a few minutes after its
+> scheduled fire, so yesterday's post at the same clock time is always still
+> inside the window — at every fire the rolling count already reads 8. Set the
+> daily cap to 8 and *every* fire is refused, which looks exactly like a broken
+> scheduler. Hence 9 for 8 ads a day, and 11 for 10 a week.
+>
+> The per-account daily cap is the exception: it is a **calendar day** in ET, so
+> it is set to the number it means. That is what makes "two per account" a rule
+> rather than something inferred from the cooldown.
+
+Tune all of these in the dashboard under **Settings → Guardrails**. The desktop
+also clamps whatever the server sends to ceilings compiled into
+`src/craigslist_auto/config.py` (max 10/day, max 2/account/day, max 12/week,
+minimum 5h cooldown, 06:00–22:00) — but be clear on what that does: it is an
+**alarm, not a gate**. Only the reporter daemon reads it, and all it does is
+report a `flow_error` you will see in Diagnostics. The server is authoritative
+for whether a post goes out. Keeping each ceiling one notch above the live value
+is what makes a mistyped setting show up quickly instead of quietly changing
+behaviour overnight. Raising a ceiling is a deliberate code change and redeploy.
 
 ---
 
@@ -231,7 +250,8 @@ seconds and runs the ordinary posting flow against that draft.
 
 It changes *when* a post is attempted and *which* draft goes — never whether it
 is allowed. Every guardrail below still applies, evaluated on the server exactly
-as for a 9am fire, and the post counts against the day's cap like any other. If
+as for a scheduled fire, and the post counts against the day's cap like any
+other. If
 the account cannot post right now you are told why immediately and nothing is
 queued, so a click can never surface as a surprise post hours later.
 
@@ -243,9 +263,20 @@ says so on the draft.
 
 ## Run it automatically every day
 
-A Scheduled Task fires `cl post` at **9am, 1pm, 5pm** on **weekdays (Mon-Fri)**.
-Most fires no-op because of the cooldowns — that's intentional. The script
-self-throttles.
+A Scheduled Task fires `cl post` **eight times a weekday (Mon-Fri)** — hourly
+from **8am to 11am**, then hourly from **2pm to 5pm**. One ad per fire, four
+accounts, two each: the server's longest-idle-first rotation gives every account
+one morning fire and one afternoon fire without the schedule having to know
+which is which. The midday gap is what makes the pairing land six hours apart,
+an hour clear of the 5-hour cooldown.
+
+A fire that can't post no-ops — that's intentional, the script self-throttles.
+
+Three places describe this same schedule and must stay in step:
+`scripts/install-schedule.ps1` (the trigger itself), `TASK_FIRE_HOURS` in
+`backend/app/services/queue.py` (the forecast on Review), and
+`POSTING_SLOT_HOURS` in `src/craigslist_auto/edit_worker.py` (the guard that
+keeps an edit from starting just before a fire).
 
 ### Start the background task
 
@@ -419,17 +450,28 @@ can no longer happen by accident, which it used to do on every top-up run.
 
 ### Keeping the stacks full
 
-24-image posts need roughly **1,035 standing photos** and about **69 a day**.
-Generation is manual — press **Generate** on the Images page, or upload — and
-the Images page carries a running "photo stack short by N" line so the gap is
-never silent. Drafts fill with whatever exists and publish thinner; nothing
-blocks.
+At eight posts a day, 24-image ads burn about **166 photos a day** (8 × 23,
+less the ~1-in-10 imageless roll). Because `pick_for_draft` refuses anything
+published in the last 30 days, the pool that has to be *standing* is roughly
+**5,000** — about 1,245 per account once `owner_account` claims settle. That is
+the number to plan against; the "photo stack short by N" line on the Images page
+counts the reservation the current queue needs, which is a much smaller figure.
 
-A background refill loop exists and is **off by default**. Turn on
-`image_topup_enabled` under **Settings → Generation** once the image prompts are
-settled; it generates photos straight into Available (covers always stay manual)
-whenever depth drops below `image_stack_floor`. At $0.0035 an image, steady
-state is roughly $7/month.
+**Covers are hand-picked and now run to 8 a day, 40 a week.** If the cover stack
+empties, slot 1 goes out empty and the first roof photo becomes the Craigslist
+thumbnail — the worst quality failure in this system. It reports itself as a
+`cover_auto_chosen` entry in Diagnostics every time, so falling behind is loud.
+
+Generation is manual — press **Generate** on the Images page, or upload. Drafts
+fill with whatever exists and publish thinner; nothing blocks.
+
+A background refill loop exists and is **off by default**, which at this volume
+is a deliberate choice rather than an oversight: the image prompts are still
+being tuned and there is no point spending on output you don't want yet. Turn on
+`image_topup_enabled` under **Settings → Generation** when they're settled; it
+generates photos straight into Available (covers always stay manual) whenever
+depth drops below `image_stack_floor`. At $0.0035 an image and 166 a day, steady
+state is roughly **$18/month**.
 
 ## Letting an AI read the system
 

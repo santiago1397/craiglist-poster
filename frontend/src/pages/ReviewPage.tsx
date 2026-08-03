@@ -699,7 +699,7 @@ function QueueHealth({ health, accounts }: { health: Health; accounts: string[] 
           Nothing can post right now: {health.global_blocks.join("; ")}
         </p>
       )}
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         {accounts.map((name) => {
           const a = health.accounts[name];
           if (!a) return null;
@@ -783,8 +783,8 @@ function Calendar({ entries }: { entries: ScheduleEntry[] }) {
         ))}
       </div>
       <p className="text-[11px] text-fg-subtle mt-2">
-        Estimated from the 9am / 1pm / 5pm task fires and the current caps. A
-        pause, a failed post or a reorder will shift it.
+        Estimated from the eight weekday task fires (8&ndash;11am, 2&ndash;5pm)
+        and the current caps. A pause, a failed post or a reorder will shift it.
       </p>
     </section>
   );

@@ -103,8 +103,11 @@ if near_posting_slot is not None:
     # An edit started at 08:58 could still be typing into a form at 09:00.
     if not near_posting_slot(at(8, 58)):
         failures.append("08:58 was not treated as too close to the 09:00 slot")
-    if not near_posting_slot(at(13, 5)):
-        failures.append("13:05 was not treated as too close to the 13:00 slot")
+    if not near_posting_slot(at(14, 5)):
+        failures.append("14:05 was not treated as too close to the 14:00 slot")
+    # Between the two blocks, and half an hour clear of the 11:00 fire.
+    if near_posting_slot(at(12, 30)):
+        failures.append("12:30 was wrongly treated as near a posting slot")
     if near_posting_slot(at(11, 30)):
         failures.append("11:30 was wrongly treated as near a posting slot")
     if near_posting_slot(at(22, 0)):

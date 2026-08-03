@@ -114,7 +114,7 @@ assert not rep["accounts"]["craigs1"]["eligible"]
 assert any("cooldown" in r for r in rep["accounts"]["craigs1"]["reasons"])
 with tx() as c:
     assert queue_svc.claim_next(c, machine="m1", candidate_accounts=["craigs1"], now=NOW)["draft"] is None
-ok.append("20h cooldown blocks the claim (3h since last post)")
+ok.append("the cooldown blocks the claim (3h since last post)")
 
 # --- 6. daily cap blocks everything ----------------------------------------
 reset()
@@ -124,6 +124,47 @@ add_draft("craigs1", "capped out")
 rep = queue_svc.evaluate_eligibility(conn().__enter__(), ACCOUNTS, now=NOW)
 assert any("daily cap" in b for b in rep["global_blocks"]), rep["global_blocks"]
 ok.append("3 posts in 24h trips the global daily cap")
+
+# --- 6b. per-account daily cap: two a day, and only today counts -----------
+# The cooldown is dropped to an hour here on purpose. With the production 5h
+# cooldown and a 10h window the cap is very nearly implied, so a test run at the
+# real settings would pass whether or not the check existed — it would be the
+# cooldown doing the work. This isolates the cap itself.
+reset()
+with tx() as c:
+    c.execute("UPDATE guardrail_settings SET min_hours_between_posts_same_account = 1, "
+              "max_posts_per_day_total = 9, max_posts_per_account_per_day = 2 "
+              "WHERE singleton")
+# NOW is 14:00 ET, so these land at 08:00 and 11:00 the same local day.
+add_post("craigs1", "morning", NOW - timedelta(hours=6))
+add_post("craigs1", "midday", NOW - timedelta(hours=3))
+add_draft("craigs1", "a third today")
+rep = queue_svc.evaluate_eligibility(conn().__enter__(), ["craigs1"], now=NOW)
+assert not rep["accounts"]["craigs1"]["eligible"], rep["accounts"]["craigs1"]
+assert any("daily cap" in r and "today" in r for r in rep["accounts"]["craigs1"]["reasons"]), \
+    rep["accounts"]["craigs1"]["reasons"]
+assert rep["accounts"]["craigs1"]["posts_today"] == 2
+with tx() as c:
+    assert queue_svc.claim_next(
+        c, machine="m1", candidate_accounts=["craigs1"], now=NOW
+    )["draft"] is None, "claimed a third post on a day already holding two"
+ok.append("a third post in one day is refused for that account")
+
+# Yesterday's posts must not count against today, or the morning slot would
+# never open — this is the whole reason the cap is a calendar day rather than a
+# rolling 24 hours like the two caps either side of it.
+reset()
+with tx() as c:
+    c.execute("UPDATE guardrail_settings SET min_hours_between_posts_same_account = 1, "
+              "max_posts_per_day_total = 9, max_posts_per_account_per_day = 2 "
+              "WHERE singleton")
+add_post("craigs1", "yesterday am", NOW - timedelta(hours=30))
+add_post("craigs1", "yesterday pm", NOW - timedelta(hours=24))
+add_draft("craigs1", "fresh day")
+rep = queue_svc.evaluate_eligibility(conn().__enter__(), ["craigs1"], now=NOW)
+assert rep["accounts"]["craigs1"]["posts_today"] == 0, rep["accounts"]["craigs1"]
+assert rep["accounts"]["craigs1"]["eligible"], rep["accounts"]["craigs1"]["reasons"]
+ok.append("yesterday's two posts do not block today's first")
 
 # --- 7. weekend / out-of-window are global blocks --------------------------
 sat = datetime(2026, 8, 1, 18, 0, tzinfo=timezone.utc)   # Saturday

@@ -27,6 +27,7 @@ type Guardrails = {
   edits_paused_reason: string | null;
   min_hours_between_posts_same_account: number;
   max_posts_per_day_total: number;
+  max_posts_per_account_per_day: number;
   max_posts_per_account_per_week: number;
   post_window_start_hour: number;
   post_window_end_hour: number;
@@ -58,9 +59,10 @@ type Generation = {
 // into the desktop and changing one is a deliberate code change plus redeploy,
 // so they move roughly never.
 const LIMITS = {
-  maxPostsPerDay: 5,
-  maxPostsPerWeek: 10,
-  minCooldownHours: 18,
+  maxPostsPerDay: 10,
+  maxPostsPerAccountPerDay: 2,
+  maxPostsPerWeek: 12,
+  minCooldownHours: 5,
   earliestHour: 6,
   latestHour: 22,
   // Editing is driven by hand and changes an ad that is already up, so its
@@ -658,17 +660,26 @@ function GuardrailForm({
       <div className="grid gap-4 sm:grid-cols-2">
         <NumberField
           label="Posts per day, all accounts"
-          hint="Counted over a rolling 24 hours, not a calendar day."
-          ceiling={`Desktop refuses anything above ${LIMITS.maxPostsPerDay}.`}
+          hint="Counted over a rolling 24 hours, not a calendar day — so this needs to be one higher than the number of ads you want per day."
+          ceiling={`Above ${LIMITS.maxPostsPerDay} the desktop reports a clamp in Diagnostics.`}
           value={f.max_posts_per_day_total}
           min={1}
           max={LIMITS.maxPostsPerDay}
           onChange={(n) => set("max_posts_per_day_total", n)}
         />
         <NumberField
+          label="Posts per account, per day"
+          hint="A calendar day in ET, unlike the caps either side of it — so this one is the number of ads you actually want per account."
+          ceiling={`Above ${LIMITS.maxPostsPerAccountPerDay} the desktop reports a clamp in Diagnostics.`}
+          value={f.max_posts_per_account_per_day}
+          min={1}
+          max={LIMITS.maxPostsPerAccountPerDay}
+          onChange={(n) => set("max_posts_per_account_per_day", n)}
+        />
+        <NumberField
           label="Posts per account, per week"
-          hint="Rolling 7 days."
-          ceiling={`Desktop refuses anything above ${LIMITS.maxPostsPerWeek}.`}
+          hint="Rolling 7 days, so this also needs to be one above the weekly figure you want."
+          ceiling={`Above ${LIMITS.maxPostsPerWeek} the desktop reports a clamp in Diagnostics.`}
           value={f.max_posts_per_account_per_week}
           min={1}
           max={LIMITS.maxPostsPerWeek}
@@ -676,8 +687,8 @@ function GuardrailForm({
         />
         <NumberField
           label="Hours between posts on one account"
-          hint="Cooldown measured from that account's last successful post."
-          ceiling={`Desktop raises anything below ${LIMITS.minCooldownHours} back up.`}
+          hint="Cooldown measured from that account's last successful post. This is what separates its morning ad from its afternoon one."
+          ceiling={`Below ${LIMITS.minCooldownHours} the desktop reports a clamp in Diagnostics.`}
           value={f.min_hours_between_posts_same_account}
           min={LIMITS.minCooldownHours}
           max={168}
@@ -1334,7 +1345,7 @@ function ApiKeys() {
 
       {scope === "post" && (
         <p className="text-xs text-warn-fg">
-          A publish key can consume one of the three daily posting slots. It can
+          A publish key can consume one of the day's posting slots. It can
           only publish drafts you have already marked reviewed, and every
           guardrail still applies — but the ad goes live, and there is no undo
           once the desktop has picked it up.

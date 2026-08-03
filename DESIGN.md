@@ -25,7 +25,7 @@ DASHBOARD (VPS)                      DESKTOP (Windows)
   prompt library + generation            |- prefetch top-N <-- /queue
   image store (sha256)                   \- heartbeat
   error log + artifacts
-        ^                              cl post @ 9/1/5
+        ^                              cl post @ 8-11, 14-17
         \--------- claim -------------->  POST /queue/claim
                                           -> draft + image list
                                           -> patchright publishes
@@ -293,6 +293,6 @@ eligibility, desktop claims late, errors report end to end — before any image
 pipeline exists. Posts with no images are already valid; ~10% are meant to go
 out that way.
 
-**Prerequisite, not part of this design:** all three accounts have been logged
+**Prerequisite, not part of this design:** all accounts have been logged
 out since 2026-07-01, and the local venv points at a `uv` Python install with no
 `python.exe`. Running phase 1 needs `uv sync` and three `cl init-account` logins.

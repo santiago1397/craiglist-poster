@@ -117,7 +117,7 @@ def schedule(
 ) -> dict:
     """Forecast when each queued draft will publish.
 
-    Replays the claim decision against the real 9am/1pm/5pm fire times and every
+    Replays the claim decision against the real scheduled fire times and every
     guardrail. Approximate by nature — pausing, a failed post or an edit shifts
     it — so it answers "roughly when", not "definitely then".
     """

@@ -115,7 +115,7 @@ DASHBOARD (VPS)                        DESKTOP (Windows)
     and 15, so there is one mental model. New knobs: `edits_enabled`,
     `min_hours_between_edits_same_post`, `max_edits_per_account_per_day`,
     `max_edits_per_post_lifetime`, `edit_window_start/end_hour`. Without this,
-    a bulk re-edit could put more anomalous activity on three accounts in an
+    a bulk re-edit could put more anomalous activity on every account in an
     afternoon than the posting cadence allows in a fortnight.
 
 31. **Failed attempts consume a guardrail slot.** A failure still burned a real
@@ -280,7 +280,7 @@ What changed to make running without the spike survivable:
 
 Recommended order once you can log in again:
 
-1. `uv sync` and `cl init-account` for all three accounts — the accounts have
+1. `uv sync` and `cl init-account` for every account — the accounts have
    been logged out since 2026-07-01 and nothing here works without that.
 2. Run the spike. Answer the six questions — above all, *can images be removed
    from a live post's edit form?* Decision 33 and the whole image half depend on

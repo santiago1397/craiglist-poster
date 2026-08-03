@@ -61,7 +61,7 @@ def get(draft_id: int) -> dict:
 
 # --- 1. the request is refused synchronously when guardrails say no --------
 reset()
-add_post("craigs1", "recent", NOW - timedelta(hours=3))  # inside the 20h cooldown
+add_post("craigs1", "recent", NOW - timedelta(hours=3))  # inside this test's cooldown
 d1 = add_draft("craigs1", "blocked by cooldown")
 try:
     with tx() as c:

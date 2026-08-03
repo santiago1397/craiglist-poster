@@ -25,13 +25,28 @@ CL_SEARCH_URL = "https://miami.craigslist.org/search/sss"
 CL_ACCOUNT_URL = "https://accounts.craigslist.org/login/home"
 
 # Anti-ban guardrails. Do NOT raise these without proving accounts survive.
-MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 20
-MAX_POSTS_PER_DAY_TOTAL = 3
-MAX_POSTS_PER_ACCOUNT_PER_WEEK = 7
+#
+# Sized for four accounts posting twice a day — once in the morning block
+# (08/09/10/11) and once in the afternoon block (14/15/16/17), eight ads a day.
+#
+# Two of these numbers are deliberately one higher than the figure they enforce,
+# and the obvious value is wrong in a way nothing else catches. Both the daily
+# and the weekly cap are counted over a **rolling window** (`_posts_last_24h_total`
+# and `_posts_last_7d_by_account` in backend/app/services/queue.py), not over a
+# calendar day or week. A post lands a few minutes *after* its scheduled fire, so
+# yesterday's post at the same clock time is always still inside the window: at
+# every fire in steady state the rolling count already reads 8. Setting the cap
+# to 8 would therefore block every fire, all day. The cap must be the calendar
+# target plus one.
+MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 5
+MAX_POSTS_PER_ACCOUNT_PER_DAY = 2
+MAX_POSTS_PER_DAY_TOTAL = 9        # rolling 24h -> 8 calendar posts/day
+MAX_POSTS_PER_ACCOUNT_PER_WEEK = 11  # rolling 7d -> 10 calendar posts/week
 
 # Posting window (local time, 24h). Roofing buyers browse during business hours.
+# `hour < END`, so 17:00 is the last fire that may publish.
 POST_WINDOW_START_HOUR = 8
-POST_WINDOW_END_HOUR = 19
+POST_WINDOW_END_HOUR = 18
 
 # Restrict posting to Mon-Fri (local time). Roofing buyers are B2C but lead
 # follow-up happens during the business week; weekend posts also stand out as
@@ -42,17 +57,30 @@ POST_WEEKDAYS_ONLY = True
 # ---------------------------------------------------------------------------
 # Compiled ceilings (decision 14)
 #
-# The dashboard owns the live throttles, but these are the outer bounds it can
-# never talk this machine past. A fat-fingered "30 posts/day" on the server
-# arrives here, gets clamped to CEILING_MAX_POSTS_PER_DAY_TOTAL, and emits a
-# flow_error so the mistake is visible instead of silent.
+# These are an **alarm, not a gate**, and it is worth being honest about that.
+# `clamp_guardrails` has exactly one caller — the reporter daemon's sync loop in
+# cli.py — where the clamped values are logged and any clamp note is reported as
+# a flow_error. Nothing in the posting path consults them: `cl post` asks the
+# server for a draft and `evaluate_eligibility` on the VPS is the sole
+# enforcement point.
+#
+# So a fat-fingered "30 posts/day" in the dashboard is not stopped here. What
+# happens is that it shows up in Diagnostics within two minutes, named, instead
+# of quietly changing behaviour overnight. Keeping each ceiling one notch above
+# the live value is what makes that alarm meaningful — set them far above and a
+# real mistake never trips them, set them below and the permanent flow_error
+# becomes noise nobody reads.
 #
 # Changing a ceiling is a deliberate code change + redeploy. That is the point.
 # ---------------------------------------------------------------------------
 
-CEILING_MAX_POSTS_PER_DAY_TOTAL = 5
-CEILING_MAX_POSTS_PER_ACCOUNT_PER_WEEK = 10
-FLOOR_MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 18
+CEILING_MAX_POSTS_PER_DAY_TOTAL = 10
+CEILING_MAX_POSTS_PER_ACCOUNT_PER_DAY = 2
+CEILING_MAX_POSTS_PER_ACCOUNT_PER_WEEK = 12
+FLOOR_MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 5
+# Deliberately left wide. These bound the *edit* window as well as the posting
+# window (see the clamps below), so tightening them to the posting hours would
+# raise a permanent clamp note against a perfectly good edit window.
 EARLIEST_POST_HOUR = 6
 LATEST_POST_HOUR = 22
 
@@ -90,6 +118,7 @@ class Guardrails:
     post_window_start_hour: int
     post_window_end_hour: int
     post_weekdays_only: bool
+    max_posts_per_account_per_day: int = MAX_POSTS_PER_ACCOUNT_PER_DAY
 
     # Editing (DESIGN_EDITS.md decision 30)
     edits_enabled: bool = EDITS_ENABLED
@@ -105,6 +134,7 @@ def compiled_guardrails() -> Guardrails:
     return Guardrails(
         min_hours_between_posts_same_account=MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT,
         max_posts_per_day_total=MAX_POSTS_PER_DAY_TOTAL,
+        max_posts_per_account_per_day=MAX_POSTS_PER_ACCOUNT_PER_DAY,
         max_posts_per_account_per_week=MAX_POSTS_PER_ACCOUNT_PER_WEEK,
         post_window_start_hour=POST_WINDOW_START_HOUR,
         post_window_end_hour=POST_WINDOW_END_HOUR,
@@ -154,6 +184,13 @@ def clamp_guardrails(remote: dict) -> tuple[Guardrails, list[str]]:
                 lo=0,
                 hi=CEILING_MAX_POSTS_PER_DAY_TOTAL,
                 default=base.max_posts_per_day_total,
+            ),
+            max_posts_per_account_per_day=_clamp(
+                "max_posts_per_account_per_day",
+                remote.get("max_posts_per_account_per_day"),
+                lo=0,
+                hi=CEILING_MAX_POSTS_PER_ACCOUNT_PER_DAY,
+                default=base.max_posts_per_account_per_day,
             ),
             max_posts_per_account_per_week=_clamp(
                 "max_posts_per_account_per_week",
@@ -258,6 +295,13 @@ ACCOUNTS: list[Account] = [
         email="craigs3@dreamteammetalroofingandsolar.com",
         profile_dir=PROFILES_DIR / "craigs3",
         photo_dir=PHOTOS_DIR / "craigs3",
+        allowed_machine="desktop-eseva3c",
+    ),
+    Account(
+        name="craigs4",
+        email="santiago@dreamteammetalroofingandsolar.com",
+        profile_dir=PROFILES_DIR / "craigs4",
+        photo_dir=PHOTOS_DIR / "craigs4",
         allowed_machine="desktop-eseva3c",
     ),
 ]

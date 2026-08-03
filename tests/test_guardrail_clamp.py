@@ -5,7 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from craigslist_auto.config import (  # noqa: E402
-    CEILING_MAX_POSTS_PER_ACCOUNT_PER_WEEK, CEILING_MAX_POSTS_PER_DAY_TOTAL,
+    CEILING_MAX_POSTS_PER_ACCOUNT_PER_DAY, CEILING_MAX_POSTS_PER_ACCOUNT_PER_WEEK,
+    CEILING_MAX_POSTS_PER_DAY_TOTAL,
     FLOOR_MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT, clamp_guardrails, compiled_guardrails,
 )
 
@@ -26,6 +27,18 @@ if g.min_hours_between_posts_same_account != FLOOR_MIN_HOURS_BETWEEN_POSTS_SAME_
 g, _ = clamp_guardrails({"max_posts_per_account_per_week": 999})
 if g.max_posts_per_account_per_week != CEILING_MAX_POSTS_PER_ACCOUNT_PER_WEEK:
     failures.append("weekly cap not clamped")
+
+# "Two per account per day" is the whole shape of the schedule — a morning ad
+# and an afternoon one. A server asking for more is asking to change that, and
+# unlike the other caps there is no legitimate reason to, so the ceiling sits
+# exactly on the live value.
+g, notes = clamp_guardrails({"max_posts_per_account_per_day": 6})
+if g.max_posts_per_account_per_day != CEILING_MAX_POSTS_PER_ACCOUNT_PER_DAY:
+    failures.append(
+        f"per-account daily cap not clamped: got {g.max_posts_per_account_per_day}"
+    )
+if not notes:
+    failures.append("per-account daily clamp produced no note")
 
 # A legal tightening must pass through untouched and silently.
 g, notes = clamp_guardrails({"max_posts_per_day_total": 2, "min_hours_between_posts_same_account": 24})

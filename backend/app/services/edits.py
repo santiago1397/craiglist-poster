@@ -62,9 +62,10 @@ PARKED_STATUSES = ("parked_stale", "parked_gone", "degraded_live", "failed")
 
 # The desktop refuses to begin a reconcile this close to a scheduled posting
 # slot (DESIGN_EDITS decision 28: an edit is never worth delaying a post).
-# Mirrored here so the dashboard can say so. Without it, pressing Apply now in
-# the twenty minutes around 9, 1 or 5 looked exactly like pressing a dead
-# button: accepted, then silence, then a twenty-minute expiry.
+# Mirrored here so the dashboard can say so, reading the same TASK_FIRE_HOURS the
+# forecast does. Without it, pressing Apply now in the twenty minutes around a
+# fire looked exactly like pressing a dead button: accepted, then silence, then a
+# twenty-minute expiry.
 SLOT_GUARD_MINUTES = 10
 
 

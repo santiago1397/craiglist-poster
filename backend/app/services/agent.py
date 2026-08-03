@@ -257,7 +257,7 @@ def render_status(d: dict) -> str:
             f"\"{nxt['title']}\" (draft {nxt['draft_id']})."
         )
         lines.append(
-            "  That time is a forecast, not a promise: it replays the 9am/1pm/5pm "
+            "  That time is a forecast, not a promise: it replays the scheduled "
             "fires against today's guardrails, and a pause, a failed post or an "
             "edit moves it."
         )

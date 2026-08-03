@@ -221,15 +221,16 @@ dashboard whatever the key says. The only write that reaches Craigslist is
 
 - The draft must already be marked **reviewed** by a human. An agent can decide
   *which approved draft goes next*, never *what the ad says*.
-- Every guardrail is evaluated server-side exactly as for a scheduled 9am fire —
-  posting window, weekday rule, 3-per-24h cap, 7-per-account-per-week cap,
-  20-hour cooldown. A refusal comes back as a 409 with the reasons verbatim and
+- Every guardrail is evaluated server-side exactly as for a scheduled fire —
+  posting window, weekday rule, 9-per-rolling-24h cap, 2-per-account-per-day
+  cap, 11-per-account-per-week cap, 5-hour cooldown. A refusal comes back as a
+  409 with the reasons verbatim and
   an instruction not to retry, because a guardrail is not a transient error.
 - The request is attributed as `agent:<key label>`, so a post that went out
   off-cadence can be explained later.
 
 It publishes to a live classifieds site under a real licence number, and one of
-only three posting slots a day. That is why the review gate is not optional.
+only eight posting slots a day. That is why the review gate is not optional.
 
 ---
 
@@ -251,7 +252,7 @@ it, because an agent asked "how many views yesterday" would report that number
 and be confidently wrong on any post that spiked early and went flat.
 
 **2. Post times are forecasts.** `/agent/status` and `/agent/queue` project
-when a draft will publish by replaying the 9am/1pm/5pm fires against current
+when a draft will publish by replaying the scheduled fires against current
 guardrails. A pause, a failed post or an edit moves them.
 
 **3. Silence is not health.** Every error record has to be *sent* by a posting

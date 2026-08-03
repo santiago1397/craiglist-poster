@@ -15,7 +15,7 @@ rather than losing it — same contract as posting.
 
 Edits never contend with posting. The browser lease is taken non-blocking, so a
 post in flight makes the worker skip and try again next cycle, and decision 28's
-posting-slot guard keeps it from starting a long edit right before 9/1/5.
+posting-slot guard keeps it from starting a long edit right before a fire.
 """
 from __future__ import annotations
 
@@ -32,7 +32,14 @@ from .lease import LeaseBusy
 ET = ZoneInfo("America/New_York")
 
 # Task Scheduler fires `cl post` at these local hours (scripts/install-schedule.ps1).
-POSTING_SLOT_HOURS = (9, 13, 17)
+# A morning block and an afternoon block, eight fires a weekday. Keep this in
+# step with TASK_FIRE_HOURS in backend/app/services/queue.py — the two describe
+# the same schedule, one to stay out of its way and one to forecast it.
+#
+# Eight slots at +/-10 minutes is 160 minutes a day where this worker stands
+# down, leaving 40-minute working gaps inside each block. If reconciles start
+# running longer than that, the knob to turn is SLOT_GUARD_MINUTES.
+POSTING_SLOT_HOURS = (8, 9, 10, 11, 14, 15, 16, 17)
 # Decision 28: an edit is never worth delaying a post, and a reconcile with five
 # image uploads can run for minutes. Stay out of the way around each slot.
 SLOT_GUARD_MINUTES = 10
