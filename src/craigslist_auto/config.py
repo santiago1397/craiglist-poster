@@ -17,6 +17,12 @@ GHOST_LOG = LOGS_DIR / "ghost_checks.jsonl"
 CL_SITE = "https://miami.craigslist.org"
 CL_POST_URL = "https://post.craigslist.org/c/mia"
 CL_SEARCH_URL = "https://miami.craigslist.org/search/sss"
+# Signed in, this is the account's own postings table: every posting it owns,
+# each row pairing Craigslist's numeric PostingID with the live /view/d/ link.
+# It is the only place that mapping can be read back — public search ignores
+# ?postingID= entirely — so both the stats scrape and the poster resolve URLs
+# here. Lives in config because stats.py imports poster.py, not the reverse.
+CL_ACCOUNT_URL = "https://accounts.craigslist.org/login/home"
 
 # Anti-ban guardrails. Do NOT raise these without proving accounts survive.
 MIN_HOURS_BETWEEN_POSTS_SAME_ACCOUNT = 20
