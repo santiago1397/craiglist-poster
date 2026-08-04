@@ -286,5 +286,38 @@ with tx() as c:
 assert got == [], got
 ok.append("an empty stack produces a text-only draft rather than an error")
 
+# --- the cover overlay needs a real font -----------------------------------
+# `ImageFont.load_default()` returns a fixed ~11px bitmap face that ignores the
+# size it is asked for, so `_fit()`'s scaling silently does nothing and the
+# phone number renders at 11px on a 1365px-wide cover. That shipped undetected
+# for the whole life of this system: the container had no fonts at all, and the
+# fallback logged one line and carried on producing images that looked finished.
+import io  # noqa: E402
+
+from PIL import Image, ImageFont  # noqa: E402
+
+from app.services import overlay as overlay_svc  # noqa: E402
+
+big, small = overlay_svc._font(96), overlay_svc._font(24)
+assert isinstance(big, ImageFont.FreeTypeFont), (
+    "no TrueType font is installed, so cover text would render illegibly small. "
+    "The runtime image needs fonts-dejavu-core."
+)
+assert big.getbbox("ROOF")[3] > small.getbbox("ROOF")[3] * 2, \
+    "the requested font size is not being honoured"
+ok.append("a real TrueType face loads and honours the size it is given")
+
+buf = io.BytesIO()
+Image.new("RGB", (1365, 1024), (90, 100, 110)).save(buf, format="JPEG")
+flat = buf.getvalue()
+composited = overlay_svc.render(
+    flat, overlay_svc.DEFAULT_TEMPLATE,
+    {"phone": "(954) 555-0100", "license": "CCC1334317", "city": ""},
+)
+assert composited != flat, "render returned the source untouched"
+with Image.open(io.BytesIO(composited)) as im:
+    assert im.size == (1365, 1024), im.size
+ok.append("render composites the call-to-action without resizing the cover")
+
 print("\n".join(f"  OK  {line}" for line in ok))
 print(f"\n{len(ok)} checks passed")

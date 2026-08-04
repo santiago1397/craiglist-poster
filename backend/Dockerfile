@@ -11,6 +11,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # ---- deps stage ----
 FROM base AS deps
 WORKDIR /app
+
+# Fonts for the cover overlay. python:3.12-slim ships with NO font files at all
+# — not one .ttf anywhere on the filesystem — and Pillow does not bundle any for
+# runtime use. Without this, `overlay._font()` falls through to
+# `ImageFont.load_default()`, a fixed ~11px bitmap face that ignores the size it
+# is given, so every composited cover goes out with a phone number too small to
+# read. That was true for the entire life of this system before it was caught.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends fonts-dejavu-core && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY backend/pyproject.toml ./
 RUN pip install --upgrade pip && \
     pip install \
