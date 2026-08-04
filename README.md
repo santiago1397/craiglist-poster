@@ -208,7 +208,7 @@ page Craigslist actually served.
 Evaluated **on the server**, not on this machine. An account can post only if
 **all** of these pass:
 
-- Current time (America/New_York) is between **8 AM and 6 PM**.
+- Current time (America/New_York) is between **8 AM and 5 PM**.
 - Current day is **Monday through Friday**.
 - Fewer than **9 posts in the last 24h across all accounts**.
 - This account has posted fewer than **2 times today**.
@@ -263,19 +263,28 @@ says so on the draft.
 
 ## Run it automatically every day
 
-A Scheduled Task fires `cl post` **eight times a weekday (Mon-Fri)** — hourly
-from **8am to 11am**, then hourly from **2pm to 5pm**. One ad per fire, four
-accounts, two each: the server's longest-idle-first rotation gives every account
-one morning fire and one afternoon fire without the schedule having to know
-which is which. The midday gap is what makes the pairing land six hours apart,
-an hour clear of the 5-hour cooldown.
+A Scheduled Task fires `cl post` **eight times a weekday (Mon-Fri)** — every 45
+minutes from **8:00 to 10:15am**, then from **2:00 to 4:15pm**, inside an
+08:00–17:00 window. One ad per fire, four accounts, two each: the server's
+longest-idle-first rotation gives every account one morning fire and one
+afternoon fire without the schedule having to know which is which. The midday
+gap is what makes the pairing land six hours apart, an hour clear of the 5-hour
+cooldown.
+
+> **Why 45 minutes and not the hour.** Each block spans 2h15m, so fire *k* and
+> fire *k+4* are always six hours apart. Widen a block and that clearance
+> shrinks by the same amount — at a three-hour block the pairs sit exactly five
+> hours apart, and since a post lands minutes *after* the fire that produced it
+> and the cooldown is measured from the post, every afternoon fire would be
+> refused. The last fire is 4:15pm rather than 5pm because the window check is
+> `start <= hour < end`.
 
 A fire that can't post no-ops — that's intentional, the script self-throttles.
 
 Three places describe this same schedule and must stay in step:
-`scripts/install-schedule.ps1` (the trigger itself), `TASK_FIRE_HOURS` in
+`scripts/install-schedule.ps1` (the trigger itself), `TASK_FIRE_TIMES` in
 `backend/app/services/queue.py` (the forecast on Review), and
-`POSTING_SLOT_HOURS` in `src/craigslist_auto/edit_worker.py` (the guard that
+`POSTING_SLOT_TIMES` in `src/craigslist_auto/edit_worker.py` (the guard that
 keeps an edit from starting just before a fire).
 
 ### Start the background task

@@ -15,9 +15,10 @@ from app.schemas.events import PostContent, PostEditAttempt
 init_pool()
 
 # Thursday 2026-07-30 12:30 America/New_York — inside the edit window, and in the
-# midday gap between the morning and afternoon posting blocks. That second part
+# midday gap between the morning and afternoon posting blocks — the blocks now
+# end at 10:15 and start at 14:00, so 12:30 is still comfortably clear. That
 # matters: the edit guardrails stand down within ten minutes of any fire in
-# TASK_FIRE_HOURS, so a fixture clock sitting on a slot fails every eligibility
+# TASK_FIRE_TIMES, so a fixture clock sitting on a slot fails every eligibility
 # check below for a reason that has nothing to do with what is being tested.
 NOW = datetime(2026, 7, 30, 16, 30, tzinfo=timezone.utc)
 ACCOUNTS = ["craigs1", "craigs2", "craigs3"]

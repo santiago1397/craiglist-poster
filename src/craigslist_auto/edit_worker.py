@@ -31,15 +31,21 @@ from .lease import LeaseBusy
 
 ET = ZoneInfo("America/New_York")
 
-# Task Scheduler fires `cl post` at these local hours (scripts/install-schedule.ps1).
+# Task Scheduler fires `cl post` at these local times (scripts/install-schedule.ps1).
 # A morning block and an afternoon block, eight fires a weekday. Keep this in
-# step with TASK_FIRE_HOURS in backend/app/services/queue.py — the two describe
+# step with TASK_FIRE_TIMES in backend/app/services/queue.py — the two describe
 # the same schedule, one to stay out of its way and one to forecast it.
 #
-# Eight slots at +/-10 minutes is 160 minutes a day where this worker stands
-# down, leaving 40-minute working gaps inside each block. If reconciles start
-# running longer than that, the knob to turn is SLOT_GUARD_MINUTES.
-POSTING_SLOT_HOURS = (8, 9, 10, 11, 14, 15, 16, 17)
+# Eight slots at +/-10 minutes is still 160 minutes a day where this worker
+# stands down, but the fires are now 45 minutes apart rather than 60, so the
+# working gaps inside a block are 25 minutes rather than 40. A reconcile that
+# runs longer than that will keep getting deferred; the knob is
+# SLOT_GUARD_MINUTES, and edits are opportunistic by design so deferral costs
+# latency rather than correctness.
+POSTING_SLOT_TIMES = (
+    (8, 0), (8, 45), (9, 30), (10, 15),
+    (14, 0), (14, 45), (15, 30), (16, 15),
+)
 # Decision 28: an edit is never worth delaying a post, and a reconcile with five
 # image uploads can run for minutes. Stay out of the way around each slot.
 SLOT_GUARD_MINUTES = 10
@@ -47,8 +53,8 @@ SLOT_GUARD_MINUTES = 10
 
 def near_posting_slot(now: datetime | None = None) -> bool:
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
-    for hour in POSTING_SLOT_HOURS:
-        slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    for hour, minute in POSTING_SLOT_TIMES:
+        slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if abs((now - slot).total_seconds()) <= SLOT_GUARD_MINUTES * 60:
             return True
     return False

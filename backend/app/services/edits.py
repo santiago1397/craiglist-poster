@@ -29,7 +29,7 @@ import psycopg
 from ..config import get_settings
 from . import drafts as drafts_svc
 from . import images as images_svc
-from .queue import TASK_FIRE_HOURS, get_guardrails
+from .queue import TASK_FIRE_TIMES, get_guardrails
 
 # Fields the operator may set on a desired state. Images are not here: they are
 # rows in `post_desired_images`, managed through attach/detach so ownership and
@@ -62,7 +62,7 @@ PARKED_STATUSES = ("parked_stale", "parked_gone", "degraded_live", "failed")
 
 # The desktop refuses to begin a reconcile this close to a scheduled posting
 # slot (DESIGN_EDITS decision 28: an edit is never worth delaying a post).
-# Mirrored here so the dashboard can say so, reading the same TASK_FIRE_HOURS the
+# Mirrored here so the dashboard can say so, reading the same TASK_FIRE_TIMES the
 # forecast does. Without it, pressing Apply now in the twenty minutes around a
 # fire looked exactly like pressing a dead button: accepted, then silence, then a
 # twenty-minute expiry.
@@ -71,8 +71,8 @@ SLOT_GUARD_MINUTES = 10
 
 def _near_posting_slot(local: datetime) -> int | None:
     """Minutes until the guard lifts, or None if we are clear of a slot."""
-    for hour in TASK_FIRE_HOURS:
-        slot = local.replace(hour=hour, minute=0, second=0, microsecond=0)
+    for hour, minute in TASK_FIRE_TIMES:
+        slot = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
         delta = (local - slot).total_seconds() / 60
         if abs(delta) <= SLOT_GUARD_MINUTES:
             return max(1, int(SLOT_GUARD_MINUTES - delta) + 1)

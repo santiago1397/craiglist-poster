@@ -54,8 +54,9 @@ tz = get_settings().display_zoneinfo
 for p in plan:
     local = p["at"].astimezone(tz)
     assert local.weekday() < 5, f"scheduled on a weekend: {local}"
-    assert local.hour in queue_svc.TASK_FIRE_HOURS, f"not a task fire hour: {local}"
-ok.append("every slot is a real weekday task fire from TASK_FIRE_HOURS")
+    assert (local.hour, local.minute) in queue_svc.TASK_FIRE_TIMES, \
+        f"not a task fire time: {local}"
+ok.append("every slot is a real weekday task fire from TASK_FIRE_TIMES")
 
 # Queue order is preserved within an account.
 for acct in ACCOUNTS:

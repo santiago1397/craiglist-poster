@@ -1,5 +1,5 @@
 # Installs a Windows Scheduled Task that runs `cl post` eight times a weekday --
-# hourly from 8:00 AM to 11:00 AM, then hourly from 2:00 PM to 5:00 PM. The
+# every 45 minutes from 8:00 to 10:15 AM, then from 2:00 to 4:15 PM. The
 # server's own cooldowns, caps, weekday gate and posting window handle skipping,
 # so this is fire-and-forget.
 #
@@ -35,18 +35,25 @@ $action = New-ScheduledTaskAction `
     -Argument "run cl post" `
     -WorkingDirectory $projectRoot
 
-# Two Mon-Fri blocks, each starting on the hour and repeating hourly for three
-# more hours -> 8:00/9:00/10:00/11:00 and 14:00/15:00/16:00/17:00, eight fires on
+# Two Mon-Fri blocks, each starting on the hour and repeating every 45 minutes
+# for 2h15m -> 8:00/8:45/9:30/10:15 and 14:00/14:45/15:30/16:15, eight fires on
 # weekdays only. One post per fire.
 #
-# Keep these hours in step with TASK_FIRE_HOURS in
-# backend/app/services/queue.py (the schedule forecast) and POSTING_SLOT_HOURS in
+# Keep these times in step with TASK_FIRE_TIMES in
+# backend/app/services/queue.py (the schedule forecast) and POSTING_SLOT_TIMES in
 # src/craigslist_auto/edit_worker.py (the edit worker's stay-out-of-the-way
 # guard). All three describe the same eight fires.
 #
 # The midday gap is not decoration: fire k and fire k+4 land six hours apart,
 # which is the clearance the server's five-hour same-account cooldown needs for
 # an account to take both a morning and an afternoon slot.
+#
+# 45 minutes rather than an hour is what buys that clearance inside an
+# 08:00-17:00 window. A block spanning three hours would put the pairs exactly
+# five hours apart, and since a post lands minutes *after* its fire and the
+# cooldown is measured from the post, every afternoon fire would be refused.
+# Last fire is 16:15, not 17:00, because the server's window check is
+# `start <= hour < end`.
 $morningStart   = (Get-Date).Date.AddHours(8)
 $afternoonStart = (Get-Date).Date.AddHours(14)
 
@@ -54,15 +61,15 @@ $morning = New-ScheduledTaskTrigger -Weekly `
     -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday `
     -At $morningStart
 $morning.Repetition = (New-ScheduledTaskTrigger -Once -At $morningStart `
-    -RepetitionInterval (New-TimeSpan -Hours 1) `
-    -RepetitionDuration (New-TimeSpan -Hours 3)).Repetition
+    -RepetitionInterval (New-TimeSpan -Minutes 45) `
+    -RepetitionDuration (New-TimeSpan -Minutes 135)).Repetition
 
 $afternoon = New-ScheduledTaskTrigger -Weekly `
     -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday `
     -At $afternoonStart
 $afternoon.Repetition = (New-ScheduledTaskTrigger -Once -At $afternoonStart `
-    -RepetitionInterval (New-TimeSpan -Hours 1) `
-    -RepetitionDuration (New-TimeSpan -Hours 3)).Repetition
+    -RepetitionInterval (New-TimeSpan -Minutes 45) `
+    -RepetitionDuration (New-TimeSpan -Minutes 135)).Repetition
 
 $trigger = @($morning, $afternoon)
 
@@ -92,7 +99,7 @@ Install-ClScheduledTask `
     -ExpectedExecute $uv `
     -ExpectedWorkingDirectory $projectRoot
 
-Write-Host "  Fires Mon-Fri at: 8, 9, 10, 11 AM and 2, 3, 4, 5 PM (8 per day)"
+Write-Host "  Fires Mon-Fri at: 8:00, 8:45, 9:30, 10:15 AM and 2:00, 2:45, 3:30, 4:15 PM (8 per day)"
 Write-Host ""
 Write-Host "To stop:    scripts\uninstall-schedule.ps1"
 Write-Host "To pause:   Disable-ScheduledTask -TaskName '$TaskName'"
