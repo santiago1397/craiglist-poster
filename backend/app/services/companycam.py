@@ -137,24 +137,50 @@ def list_photos(
     per_page: int = PER_PAGE,
     pacer: _Pacer | None = None,
 ) -> Iterator[dict]:
-    """Yield photo objects, oldest page first, paging until the API runs dry.
+    """Yield photo objects, paging until the API runs dry.
 
     A generator on purpose — see the module docstring. Consume it lazily.
+
+    **The first request carries no pagination parameter at all.** The published
+    reference lists `page` alongside the cursor params, but the live API rejects
+    it outright:
+
+        HTTP 400 {"errors":["Invalid cursor format - please use cursor from the
+        headers of a previous response as a 'before' or 'after' param"]}
+
+    So pagination is cursor-only in practice: ask for the first page bare, read
+    `X-Next-Cursor` off the response, pass it back as `after`. Offset paging
+    survives only as a fallback for the case where a full page comes back with
+    no cursor header, and a 400 on that fallback ends the walk with a warning
+    rather than throwing away the photos already yielded.
     """
     pacer = pacer or _Pacer()
     url = f"{api_base.rstrip('/')}/photos"
     params: dict = {"per_page": per_page, **(filters or {})}
     cursor: str | None = None
-    page = 1
+    page: int | None = None  # stays None unless we fall back to offset paging
 
     while True:
         query = dict(params)
         if cursor:
             query["after"] = cursor
-        else:
+        elif page is not None:
             query["page"] = page
 
-        response = _get(client, url, token=token, pacer=pacer, params=query)
+        try:
+            response = _get(client, url, token=token, pacer=pacer, params=query)
+        except CompanyCamError:
+            # The bare first request failing is a real error worth surfacing.
+            # The offset fallback failing just means this API is cursor-only,
+            # which is the documented-vs-actual mismatch above.
+            if page is None:
+                raise
+            logger.warning(
+                "companycam refused offset paging; stopping after the pages "
+                "already read. Some photos may not have been seen."
+            )
+            return
+
         try:
             batch = response.json()
         except ValueError as e:
@@ -174,7 +200,7 @@ def list_photos(
 
         cursor = response.headers.get("X-Next-Cursor") or None
         if not cursor:
-            page += 1
+            page = 2 if page is None else page + 1
             if page > 1000:  # runaway guard; 100k photos
                 logger.warning("companycam paging hit the 1000-page guard")
                 return
