@@ -45,7 +45,6 @@ import psycopg
 from loguru import logger
 
 from .. import storage
-from ..config import get_settings
 from .imagegen import ImageGenError, build_provider
 
 # Matches the desktop's historic photo rule: an image may be reused within its
@@ -148,20 +147,43 @@ def generate_images(
     """Generate into the pending shelf. Never raises for provider problems —
     returns what succeeded plus the error, because a failed batch must not take
     the caller down with it."""
+    from . import providers as providers_svc
+
     rng = rng or random.Random()
-    g = conn.execute("SELECT * FROM generation_settings LIMIT 1").fetchone()
-    settings = get_settings()
 
     template = (prompt_override or "").strip() or _default_prompt(conn, kind)
     kinds = _kinds(conn)
-    unit_cost = float(g["image_cost_usd"] or 0)
+
+    # Model, endpoint, aspect and cost all travel together in the active
+    # provider's entry. Reading cost from anywhere else is how `key_usage()` —
+    # the only control on uncapped agent spend — starts reporting a stale price.
+    cfg = providers_svc.active_config(conn, kind="image")
+    unit_cost = float(cfg.get("cost_usd") or 0)
+    aspect = cfg.get("aspect") or "4:3"
+    model = cfg.get("model") or ""
+
+    # Checked here rather than left to the adapter so the message can name the
+    # environment variable that would fix it. A key problem and a bad endpoint
+    # read identically otherwise, and this is the one people actually hit.
+    if not cfg["api_key"]:
+        env_var = providers_svc.env_var_name(cfg["provider"])
+        return {
+            "created": 0,
+            "images": [],
+            "error": cfg.get("key_error") or (
+                f"no API key is configured for {cfg['provider']}"
+                + (f" — set {env_var} or enter one in Settings" if env_var else "")
+            ),
+            "cost_usd": 0.0,
+        }
 
     try:
         provider = build_provider(
-            "minimax",
-            api_key=settings.minimax_api_key,
-            api_base=g["image_api_base"],
-            model=g["image_model"],
+            cfg["provider"],
+            api_key=cfg["api_key"],
+            api_base=cfg.get("api_base") or "",
+            model=model,
+            options=cfg.get("options"),
         )
     except ImageGenError as e:
         return {"created": 0, "images": [], "error": str(e), "cost_usd": 0.0}
@@ -180,7 +202,7 @@ def generate_images(
             logger.warning(f"prompt has an unrecognised placeholder ({e}); using it literally")
             prompt = template
         try:
-            blobs = provider.generate(prompt, aspect=g["image_aspect"], n=1)
+            blobs = provider.generate(prompt, aspect=aspect, n=1)
         except ImageGenError as e:
             error = str(e)
             logger.warning(f"image generation failed: {e}")
@@ -190,7 +212,7 @@ def generate_images(
                 row = _store(
                     conn, data,
                     source="generated", kind=kind, prompt=prompt,
-                    provider=provider.name, model=g["image_model"], cost=unit_cost,
+                    provider=provider.name, model=model, cost=unit_cost,
                     status=status, created_by_key_id=created_by_key_id,
                 )
             except OSError as e:

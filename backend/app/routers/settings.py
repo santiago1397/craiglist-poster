@@ -11,7 +11,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from ..auth import require_admin
-from ..config import get_settings
 from ..db import conn, tx
 from ..security import (
     issue_api_key,
@@ -129,11 +128,28 @@ def put_guardrails(body: GuardrailUpdate) -> dict:
         return queue_svc.update_guardrails(c, patch)
 
 
-class GenerationUpdate(BaseModel):
-    enabled: bool | None = None
+class ProviderEntryUpdate(BaseModel):
+    """One provider's config. Applies to the provider named in the same request,
+    or to the active one if the request is not changing it."""
+
     model: str | None = Field(default=None, max_length=100)
     api_base: str | None = Field(default=None, max_length=300)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    aspect: str | None = Field(default=None, max_length=20)
+    cost_usd: float | None = Field(default=None, ge=0.0, le=100.0)
+    options: dict | None = None
+    # Omit to leave the stored key alone; send "" to clear it. The UI renders a
+    # last-four hint and never echoes it back here, so a plain form submit
+    # cannot overwrite a real key with its own fingerprint.
+    api_key: str | None = Field(default=None, max_length=500)
+
+
+class GenerationUpdate(BaseModel):
+    enabled: bool | None = None
+    text_provider: str | None = Field(default=None, max_length=40)
+    image_provider: str | None = Field(default=None, max_length=40)
+    text_provider_config: ProviderEntryUpdate | None = None
+    image_provider_config: ProviderEntryUpdate | None = None
     system_prompt: str | None = None
     user_template: str | None = None
     tail_template: str | None = None
@@ -150,13 +166,25 @@ class GenerationUpdate(BaseModel):
 
 @router.get("/generation")
 def get_generation() -> dict:
-    """Prompts, model and run stats. `seed_ads` count tells you whether the
-    workbook fallback has anything to fall back to."""
-    from ..services import generator
+    """Prompts, providers and run stats. `seed_ads` count tells you whether the
+    workbook fallback has anything to fall back to.
+
+    Provider entries come back redacted — each carries a `key` status, never a
+    key. `tests/test_provider_keys.py` asserts that this response contains
+    neither the ciphertext nor the plaintext.
+    """
+    from ..services import generator, providers as providers_svc
 
     with conn() as c:
         g = generator.get_generation_settings(c)
-        g["api_key_configured"] = bool(get_settings().minimax_api_key)
+        # The banner this feeds is about ad copy, so it tracks the active *text*
+        # provider — the one whose absence silently degrades every draft to
+        # workbook copy.
+        g["api_key_configured"] = bool(
+            providers_svc.active_config(c, kind="text")["api_key"]
+        )
+        g["known_text_providers"] = list(providers_svc.TEXT_PROVIDERS)
+        g["known_image_providers"] = list(providers_svc.IMAGE_PROVIDERS)
         g["seed_ads"] = c.execute(
             "SELECT COUNT(*) AS n FROM seed_ads WHERE active"
         ).fetchone()["n"]
@@ -165,9 +193,22 @@ def get_generation() -> dict:
 
 @router.put("/generation")
 def put_generation(body: GenerationUpdate) -> dict:
-    from ..services import generator
+    from ..services import generator, providers as providers_svc
 
     patch = body.model_dump(exclude_unset=True)
+
+    known = {"text": providers_svc.TEXT_PROVIDERS, "image": providers_svc.IMAGE_PROVIDERS}
+    for kind, names in known.items():
+        chosen = patch.get(f"{kind}_provider")
+        if chosen is not None and chosen not in names:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"unknown {kind} provider {chosen!r}. Known: "
+                    f"{', '.join(names)}."
+                ),
+            )
+
     with tx() as c:
         # Check against the merged result, not the patch: sending only
         # photos_max could otherwise invert the range against the stored min.
@@ -189,7 +230,54 @@ def put_generation(body: GenerationUpdate) -> dict:
                     f"exceed image_stack_target ({merged['image_stack_target']})"
                 ),
             )
-        return generator.update_generation_settings(c, patch)
+
+        # Provider entries are written before the selector, so a key supplied in
+        # this same request counts toward the check below. Everything here is
+        # one transaction, so a refusal rolls the key write back with it.
+        touched: list[str] = []
+        for kind in ("text", "image"):
+            entry = patch.pop(f"{kind}_provider_config", None)
+            selected = patch.get(f"{kind}_provider")
+            if entry is None and selected is None:
+                continue
+            touched.append(kind)
+            target = selected or merged[f"{kind}_provider"]
+            if entry:
+                generator.update_provider_entry(
+                    c, kind=kind, provider=target, patch=entry
+                )
+
+        result = generator.update_generation_settings(c, patch)
+
+        # Refuse a provider with no reachable key. Only for the generators this
+        # request actually touched — saving a photo count should not fail
+        # because some other provider is half-configured.
+        #
+        # This matters most for text, which fails *silently*: build_draft falls
+        # back to workbook copy so the queue keeps filling, and weeks of
+        # repeated copy is the documented cause of ghosting. An image provider
+        # with no key announces itself the first time you press Generate.
+        for kind in touched:
+            cfg = providers_svc.active_config(c, kind=kind)
+            if not cfg["api_key"]:
+                env_var = providers_svc.env_var_name(cfg["provider"])
+                remedy = (
+                    f" Enter one in its section, or set {env_var} on the server "
+                    f"and redeploy."
+                    if env_var
+                    else " Enter one in its section."
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(
+                        cfg.get("key_error")
+                        or (
+                            f"{cfg['provider']} has no API key, so it cannot be "
+                            f"the {kind} provider.{remedy}"
+                        )
+                    ),
+                )
+        return result
 
 
 @router.get("/machine-tokens")

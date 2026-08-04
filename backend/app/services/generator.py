@@ -24,8 +24,8 @@ from datetime import datetime, timezone
 import httpx
 import psycopg
 from loguru import logger
+from psycopg.types.json import Json
 
-from ..config import get_settings
 from ..reference import subarea_supported
 from . import drafts as drafts_svc
 
@@ -112,16 +112,26 @@ def get_generation_settings(conn: psycopg.Connection) -> dict:
         or (g.get("tail_template") or "")
     )
     g["user_template"] = (g.get("user_template") or "").strip() or DEFAULT_USER_TEMPLATE
+
+    # Redacted, always. This dict is what `GET /settings/generation` returns
+    # wholesale, so a plaintext or encrypted key reaching it would serialize
+    # straight to the browser. `providers.active_config` is the only route to a
+    # usable key — see DESIGN_PROVIDERS decision 9, and the test that enforces it.
+    from . import providers as providers_svc
+
+    g["text_providers"] = providers_svc.redacted(g, kind="text")
+    g["image_providers"] = providers_svc.redacted(g, kind="image")
     return g
 
 
 def update_generation_settings(conn: psycopg.Connection, values: dict) -> dict:
     allowed = {
-        "enabled", "model", "api_base", "temperature",
+        "enabled",
         "system_prompt", "user_template", "tail_template",
         "photos_min", "photos_max", "imageless_rate",
         "image_topup_enabled", "image_stack_floor", "image_stack_target",
         "image_topup_batch",
+        "text_provider", "image_provider",
     }
     patch = {k: v for k, v in values.items() if k in allowed and v is not None}
     if patch:
@@ -131,6 +141,53 @@ def update_generation_settings(conn: psycopg.Connection, values: dict) -> dict:
             patch,
         )
     return get_generation_settings(conn)
+
+
+def update_provider_entry(
+    conn: psycopg.Connection, *, kind: str, provider: str, patch: dict
+) -> None:
+    """Merge one provider's config, encrypting `api_key` if it is present.
+
+    Written as a jsonb merge rather than a whole-blob write so that saving the
+    image provider cannot clobber a text key typed in the same form, and so an
+    absent `api_key` means "leave the stored one alone" rather than "clear it".
+    Clearing is explicit: send an empty string.
+    """
+    from . import providers as providers_svc
+    from . import secrets as secrets_svc
+
+    if kind not in ("text", "image"):
+        raise ValueError(f"kind must be 'text' or 'image', got {kind!r}")
+    column = f"{kind}_providers"
+
+    entry = {k: v for k, v in (patch or {}).items() if k != "api_key" and v is not None}
+    if "api_key" in (patch or {}) and patch["api_key"] is not None:
+        supplied = str(patch["api_key"]).strip()
+        # An empty string is the clear signal; anything else is a new key. The
+        # redacted hint the UI renders is never echoed back as a value, so a
+        # form submit cannot accidentally re-save "…4f2a" as the key itself.
+        entry["api_key_enc"] = secrets_svc.encrypt(supplied) if supplied else None
+
+    if not entry:
+        return
+    conn.execute(
+        f"""
+        UPDATE generation_settings
+        SET {column} = jsonb_strip_nulls(
+                COALESCE({column}, '{{}}'::jsonb)
+                || jsonb_build_object(
+                       %(provider)s::text,
+                       COALESCE({column} -> %(provider)s::text, '{{}}'::jsonb)
+                           || %(entry)s::jsonb
+                   )
+            ),
+            updated_at = NOW()
+        WHERE singleton
+        """,
+        {"provider": provider, "entry": Json(entry)},
+    )
+    if provider not in providers_svc.TEXT_PROVIDERS + providers_svc.IMAGE_PROVIDERS:
+        logger.warning(f"stored config for unknown provider {provider!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -244,11 +301,30 @@ def _validate(data: dict, seed: dict) -> tuple[str, str]:
     return title, head
 
 
-def call_model(settings_row: dict, seed: dict, angle: str) -> tuple[str, str]:
-    """Ask the model for a title + head. Raises GenerationError on any problem."""
-    api_key = get_settings().minimax_api_key
+def call_model(
+    conn: psycopg.Connection, settings_row: dict, seed: dict, angle: str
+) -> tuple[str, str]:
+    """Ask the model for a title + head. Raises GenerationError on any problem.
+
+    Every supported text provider speaks the OpenAI chat-completions shape —
+    MiniMax included — so there is one code path here and the differences live
+    in config. `options` rides along untouched, which is where JSON mode goes
+    for providers that support it: `_extract_json` and `_salvage` below exist
+    because MiniMax does not, and they stay as the net for anything that ignores
+    the request.
+    """
+    from . import providers as providers_svc
+
+    cfg = providers_svc.active_config(conn, kind="text")
+    api_key = cfg["api_key"]
     if not api_key:
-        raise GenerationError("MINIMAX_API_KEY is not configured")
+        env_var = providers_svc.env_var_name(cfg["provider"])
+        raise GenerationError(
+            cfg.get("key_error") or (
+                f"no API key is configured for the {cfg['provider']} text provider"
+                + (f" — set {env_var} or enter one in Settings" if env_var else "")
+            )
+        )
 
     user = settings_row["user_template"].format(
         city=seed["city"],
@@ -260,14 +336,15 @@ def call_model(settings_row: dict, seed: dict, angle: str) -> tuple[str, str]:
         angle=angle or "none",
     )
     payload = {
-        "model": settings_row["model"],
+        "model": cfg.get("model") or "",
         "messages": [
             {"role": "system", "content": settings_row["system_prompt"]},
             {"role": "user", "content": user},
         ],
-        "temperature": settings_row["temperature"],
+        "temperature": cfg.get("temperature", 0.9),
+        **(cfg.get("options") or {}),
     }
-    url = settings_row["api_base"].rstrip("/") + "/chat/completions"
+    url = (cfg.get("api_base") or "").rstrip("/") + "/chat/completions"
     try:
         resp = httpx.post(
             url,
@@ -348,7 +425,7 @@ def build_draft(
 
     angle = rng.choice(ANGLES)
     try:
-        title, head = call_model(g, seed, angle)
+        title, head = call_model(conn, g, seed, angle)
         source = "ai"
     except GenerationError as e:
         # This is the designed path, not an outage. Log it, record it, continue.

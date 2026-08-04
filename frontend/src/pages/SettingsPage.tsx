@@ -36,11 +36,34 @@ type Guardrails = {
   queue_depth_target: number;
 };
 
+// The server never sends a key, encrypted or otherwise — only whether one
+// resolves, which one it is, and where it came from. See DESIGN_PROVIDERS
+// decision 9 and tests/test_provider_keys.py.
+type ProviderKeyStatus = {
+  configured: boolean;
+  hint: string | null;
+  source: "stored" | "environment" | null;
+  error: string | null;
+};
+
+type ProviderEntry = {
+  model?: string;
+  api_base?: string;
+  temperature?: number;
+  aspect?: string;
+  cost_usd?: number;
+  options?: Record<string, unknown>;
+  key: ProviderKeyStatus;
+};
+
 type Generation = {
   enabled: boolean;
-  model: string;
-  api_base: string;
-  temperature: number;
+  text_provider: string;
+  image_provider: string;
+  text_providers: Record<string, ProviderEntry>;
+  image_providers: Record<string, ProviderEntry>;
+  known_text_providers: string[];
+  known_image_providers: string[];
   photos_min: number;
   photos_max: number;
   imageless_rate: number;
@@ -53,6 +76,13 @@ type Generation = {
   generated_total: number;
   fallback_total: number;
   last_error: string | null;
+};
+
+// `*_provider_config` are write-side only — they carry a key up and are never
+// part of what comes back down.
+type GenerationPatch = Partial<Generation> & {
+  text_provider_config?: Record<string, unknown>;
+  image_provider_config?: Record<string, unknown>;
 };
 
 // Mirrors craigslist_auto/config.py. Kept in sync by hand — these are compiled
@@ -95,7 +125,7 @@ export default function SettingsPage() {
   });
 
   const saveGeneration = useMutation({
-    mutationFn: (patch: Partial<Generation>) => api.put("/settings/generation", patch),
+    mutationFn: (patch: GenerationPatch) => api.put("/settings/generation", patch),
     onSuccess: () => {
       setSaved("Generation settings saved.");
       void qc.invalidateQueries({ queryKey: ["settings"] });
@@ -854,6 +884,51 @@ function EditGuardrailForm({
   );
 }
 
+/** Write-only key input. Shows what is stored without showing the key. */
+function ProviderKeyField({
+  label,
+  status,
+  value,
+  onChange,
+}: {
+  label: string;
+  status: ProviderKeyStatus;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-sm text-fg">{label}</span>
+      <input
+        type="password"
+        autoComplete="off"
+        value={value}
+        placeholder={status.configured ? `stored ${status.hint ?? ""}` : "not set"}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+      />
+      {status.error ? (
+        <span className="text-xs text-danger-fg mt-1 block">{status.error}</span>
+      ) : status.source === "environment" ? (
+        <span className="text-xs text-fg-subtle mt-1 block">
+          Coming from the server environment. Typing here stores one instead.
+        </span>
+      ) : (
+        <span className="text-xs text-fg-subtle mt-1 block">
+          Leave blank to keep the stored key. Stored encrypted; never sent back.
+        </span>
+      )}
+    </label>
+  );
+}
+
+const EMPTY_KEY: ProviderKeyStatus = {
+  configured: false,
+  hint: null,
+  source: null,
+  error: null,
+};
+
 function GenerationForm({
   value,
   busy,
@@ -861,11 +936,79 @@ function GenerationForm({
 }: {
   value: Generation;
   busy: boolean;
-  onSave: (patch: Partial<Generation>) => void;
+  onSave: (patch: GenerationPatch) => void;
 }) {
   const [f, setF] = useState(value);
-  useEffect(() => setF(value), [value]);
-  const dirty = JSON.stringify(f) !== JSON.stringify(value);
+  // Keys are write-only: they are never sent to the browser, so the inputs
+  // start blank and an untouched blank means "leave the stored one alone".
+  const [textKey, setTextKey] = useState("");
+  const [imageKey, setImageKey] = useState("");
+  useEffect(() => {
+    setF(value);
+    setTextKey("");
+    setImageKey("");
+  }, [value]);
+
+  const tCfg = f.text_providers[f.text_provider] ?? { key: EMPTY_KEY };
+  const iCfg = f.image_providers[f.image_provider] ?? { key: EMPTY_KEY };
+  const setTextCfg = (patch: Partial<ProviderEntry>) =>
+    setF({
+      ...f,
+      text_providers: { ...f.text_providers, [f.text_provider]: { ...tCfg, ...patch } },
+    });
+  const setImageCfg = (patch: Partial<ProviderEntry>) =>
+    setF({
+      ...f,
+      image_providers: { ...f.image_providers, [f.image_provider]: { ...iCfg, ...patch } },
+    });
+
+  // A provider block is sent only when it changed. The server re-checks a
+  // provider's key whenever a request touches it, so including both blocks on
+  // every save would let a half-configured image provider reject a change to a
+  // photo count. `api_base` is never sent: it belongs to the provider, and a
+  // hand-typed one is how OpenAI's payload ends up at api.minimax.io.
+  const buildPatch = (): GenerationPatch => {
+    const patch: GenerationPatch = {
+      photos_min: f.photos_min,
+      photos_max: f.photos_max,
+      imageless_rate: f.imageless_rate,
+      image_topup_enabled: f.image_topup_enabled,
+      image_stack_floor: f.image_stack_floor,
+      image_stack_target: f.image_stack_target,
+      image_topup_batch: f.image_topup_batch,
+    };
+
+    if (
+      f.text_provider !== value.text_provider ||
+      JSON.stringify(tCfg) !== JSON.stringify(value.text_providers[f.text_provider]) ||
+      textKey
+    ) {
+      patch.text_provider = f.text_provider;
+      patch.text_provider_config = {
+        model: tCfg.model,
+        temperature: tCfg.temperature,
+        ...(textKey ? { api_key: textKey } : {}),
+      };
+    }
+
+    if (
+      f.image_provider !== value.image_provider ||
+      JSON.stringify(iCfg) !== JSON.stringify(value.image_providers[f.image_provider]) ||
+      imageKey
+    ) {
+      patch.image_provider = f.image_provider;
+      patch.image_provider_config = {
+        model: iCfg.model,
+        aspect: iCfg.aspect,
+        cost_usd: iCfg.cost_usd,
+        ...(imageKey ? { api_key: imageKey } : {}),
+      };
+    }
+    return patch;
+  };
+
+  const dirty =
+    JSON.stringify(f) !== JSON.stringify(value) || !!textKey || !!imageKey;
   const rangeInvalid =
     f.photos_min > f.photos_max || f.image_stack_floor > f.image_stack_target;
 
@@ -880,19 +1023,7 @@ function GenerationForm({
             // `enabled` is deliberately not sent: it is owned by the Queue size
             // switch above and applies immediately. Including it here would let
             // a stale copy of this form silently flip it back on Save.
-            onClick={() =>
-              onSave({
-                model: f.model,
-                temperature: f.temperature,
-                photos_min: f.photos_min,
-                photos_max: f.photos_max,
-                imageless_rate: f.imageless_rate,
-                image_topup_enabled: f.image_topup_enabled,
-                image_stack_floor: f.image_stack_floor,
-                image_stack_target: f.image_stack_target,
-                image_topup_batch: f.image_topup_batch,
-              })
-            }
+            onClick={() => onSave(buildPatch())}
             className="px-3 py-1.5 rounded text-sm bg-primary text-primary-fg hover:bg-primary-hover disabled:opacity-40"
           >
             {busy ? "Saving…" : "Save generation"}
@@ -910,42 +1041,129 @@ function GenerationForm({
     >
       {!value.api_key_configured && (
         <p className="rounded border border-warn-border bg-warn px-3 py-2 text-sm text-warn-fg">
-          No MiniMax API key is configured, so every draft uses the workbook copy
-          verbatim. That copy repeats across accounts, which is the documented
-          cause of ghosting. Set MINIMAX_API_KEY on the server to enable AI copy.
+          No API key resolves for the <b>{value.text_provider}</b> text provider, so
+          every draft uses the workbook copy verbatim. That copy repeats across
+          accounts, which is the documented cause of ghosting. Enter a key below,
+          or set its environment variable on the server.
         </p>
       )}
 
+      {/* Text provider */}
+      <div className="space-y-3">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="block">
+            <span className="text-sm text-fg">Text provider</span>
+            <select
+              value={f.text_provider}
+              onChange={(e) => setF({ ...f, text_provider: e.target.value })}
+              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+            >
+              {value.known_text_providers.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+            <span className="text-xs text-fg-subtle mt-1 block">
+              Writes the ad copy. Sent to {tCfg.api_base ?? "—"}
+            </span>
+          </label>
+          <label className="block">
+            <span className="text-sm text-fg">Model</span>
+            <input
+              value={tCfg.model ?? ""}
+              onChange={(e) => setTextCfg({ model: e.target.value })}
+              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm text-fg">Temperature</span>
+            <input
+              type="number"
+              step="0.1"
+              min={0}
+              max={2}
+              value={tCfg.temperature ?? 0.9}
+              onChange={(e) => {
+                const n = Number.parseFloat(e.target.value);
+                if (Number.isFinite(n)) setTextCfg({ temperature: Math.max(0, Math.min(2, n)) });
+              }}
+              className="w-full sm:w-32 mt-1 block bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+            />
+            <span className="text-xs text-fg-subtle mt-1 block">
+              Higher wanders more. 0–2.
+            </span>
+          </label>
+          <ProviderKeyField
+            label={`${f.text_provider} API key`}
+            status={tCfg.key}
+            value={textKey}
+            onChange={setTextKey}
+          />
+        </div>
+      </div>
+
+      {/* Image provider */}
+      <div className="pt-3 border-t border-border space-y-3">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="block">
+            <span className="text-sm text-fg">Image provider</span>
+            <select
+              value={f.image_provider}
+              onChange={(e) => setF({ ...f, image_provider: e.target.value })}
+              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+            >
+              {value.known_image_providers.map((p) => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+            <span className="text-xs text-fg-subtle mt-1 block">
+              Draws covers and photos. Sent to {iCfg.api_base ?? "—"}
+            </span>
+          </label>
+          <label className="block">
+            <span className="text-sm text-fg">Model</span>
+            <input
+              value={iCfg.model ?? ""}
+              onChange={(e) => setImageCfg({ model: e.target.value })}
+              className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+            />
+          </label>
+          <label className="block">
+            <span className="text-sm text-fg">Cost per image (USD)</span>
+            <input
+              type="number"
+              step="0.0001"
+              min={0}
+              value={iCfg.cost_usd ?? 0}
+              onChange={(e) => {
+                const n = Number.parseFloat(e.target.value);
+                if (Number.isFinite(n)) setImageCfg({ cost_usd: Math.max(0, n) });
+              }}
+              className="w-full sm:w-40 mt-1 block bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
+            />
+            <span className="text-xs text-fg-subtle mt-1 block">
+              Stamped on every image and totalled per API key. If this is wrong,
+              agent spend under-reports — it is the only cap there is.
+            </span>
+          </label>
+          <ProviderKeyField
+            label={`${f.image_provider} API key`}
+            status={iCfg.key}
+            value={imageKey}
+            onChange={setImageKey}
+          />
+        </div>
+        {f.image_provider === "openai" && (
+          <p className="text-xs text-fg-subtle">
+            OpenAI has no 4:3 size. Images are requested at 1536×1024 and cropped
+            to 1365×1024, because Craigslist's own display variant is 1200×900 —
+            anything else gets cropped by the site instead, taking the phone
+            number off the cover. Quality tier lives in this provider's options
+            and drives the cost above.
+          </p>
+        )}
+      </div>
+
       <div className="grid gap-4 sm:grid-cols-2">
-        <label className="block">
-          <span className="text-sm text-fg">Model</span>
-          <input
-            value={f.model}
-            onChange={(e) => setF({ ...f, model: e.target.value })}
-            className="w-full mt-1 bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-          />
-          <span className="text-xs text-fg-subtle mt-1 block">
-            Sent to {value.api_base}
-          </span>
-        </label>
-        <label className="block">
-          <span className="text-sm text-fg">Temperature</span>
-          <input
-            type="number"
-            step="0.1"
-            min={0}
-            max={2}
-            value={f.temperature}
-            onChange={(e) => {
-              const n = Number.parseFloat(e.target.value);
-              if (Number.isFinite(n)) setF({ ...f, temperature: Math.max(0, Math.min(2, n)) });
-            }}
-            className="w-full sm:w-32 mt-1 block bg-bg border border-border-strong rounded px-2 py-1.5 text-sm"
-          />
-          <span className="text-xs text-fg-subtle mt-1 block">
-            Higher wanders more. 0–2.
-          </span>
-        </label>
         <NumberField
           label="Fewest photos per post"
           hint="Craigslist allows up to 24."
