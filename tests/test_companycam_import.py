@@ -207,6 +207,32 @@ assert len(ids) == len(set(ids)), \
 assert set(ids) == {other_id, third_id}, f"expected both images, got {ids}"
 ok.append("curate lists one row per image even when several remote ids map to it")
 
+# --- a rich-text description does not kill the run -------------------------
+# `description` is documented as a string and is usually null or a string, but
+# about one photo in a thousand returns a rich-text object. psycopg refuses to
+# adapt a dict, and a single one of those ended an import 550 photos in.
+rich = {"id": "23041662", "html_content": "<p>No entry to find leak</p>",
+        "plain_text_content": "No entry to find leak"}
+assert image_import.as_text(rich) == "No entry to find leak"
+assert image_import.as_text({"html_content": "<p>x</p>"}) == "<p>x</p>"
+assert image_import.as_text({}) is None
+assert image_import.as_text(None) is None
+assert image_import.as_text("") is None
+assert image_import.as_text("plain") == "plain"
+assert image_import.as_text(123) == "123"
+
+with tx() as c:
+    tmp_id, _ = image_import.store_external(
+        c, image_import.normalise(jpeg(colour="purple")), source=SOURCE
+    )
+    # The call that used to raise ProgrammingError.
+    image_import.record(c, source=SOURCE, external_id="cc-rich", state="imported",
+                        image_id=tmp_id, description=rich)
+with conn() as c:
+    e = image_import.ledger_entry(c, source=SOURCE, external_id="cc-rich")
+assert e["description"] == "No entry to find leak", e["description"]
+ok.append("a rich-text description is flattened instead of ending the import")
+
 # --- the first page request carries no pagination parameter ----------------
 # The published reference lists `page` alongside the cursor params, but the live
 # API answers HTTP 400 "Invalid cursor format - please use cursor from the

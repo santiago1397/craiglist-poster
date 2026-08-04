@@ -200,13 +200,48 @@ def record(
                           + CASE WHEN EXCLUDED.state = 'failed' THEN 1 ELSE 0 END,
             updated_at  = NOW()
         """,
+        # Every text field goes through `as_text`, not just description. A
+        # remote API is free to change the shape of any of these, and an import
+        # that dies half way through is a worse outcome than a field we could
+        # not parse.
         (
-            source, str(external_id), image_id, sha256, remote_hash, remote_url,
-            captured_at, project_id, (description or None), state,
-            (error or None)[:500] if error else None,
+            source, str(external_id), image_id, as_text(sha256),
+            as_text(remote_hash), as_text(remote_url),
+            captured_at, as_text(project_id), as_text(description), state,
+            (as_text(error) or "")[:500] or None,
             1 if state == "failed" else 0,
         ),
     )
+
+
+def as_text(value) -> str | None:
+    """Coerce a remote field to something a TEXT column will accept.
+
+    CompanyCam's `description` is documented as a string and is usually null or
+    a string — but roughly one photo in a thousand returns a rich-text object:
+
+        {"id": "23041662",
+         "html_content": "<p>No entry to find leak</p>",
+         "plain_text_content": "No entry to find leak"}
+
+    psycopg refuses to adapt a dict, so a single one of those killed an import
+    550 photos in. Prefer the plain-text field, fall back to any string value,
+    and never let an unexpected shape stop a run — the description is a nicety
+    for the review session, not something worth failing over.
+    """
+    if value is None or isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        for key in ("plain_text_content", "text", "content", "html_content"):
+            inner = value.get(key)
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip()
+        return None
+    if isinstance(value, (list, tuple)):
+        parts = [as_text(v) for v in value]
+        joined = " ".join(p for p in parts if p)
+        return joined or None
+    return str(value)
 
 
 def unix_to_dt(value) -> datetime | None:
