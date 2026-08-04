@@ -52,6 +52,31 @@ class OverlayTemplate:
     title_scale: float = 0.085
     padding_scale: float = 0.035
 
+    # A frame around the whole image, as in the flyer-style ads that stand out
+    # in Craigslist's gallery. None disables it.
+    border_colour: tuple[int, int, int] | None = None
+    border_scale: float = 0.012          # fraction of the shorter edge
+
+    # Per-line overrides, index-aligned with `lines`. Anything past the end of
+    # these lists falls back to the title/accent behaviour, so an existing
+    # template that sets neither renders exactly as it did before.
+    #
+    # These exist because the default — first line one colour, every other line
+    # the same accent at the same size — makes a three-line block read as one
+    # undifferentiated stack. The phone number is the line that has to win.
+    line_colours: list[tuple[int, int, int]] = field(default_factory=list)
+    line_scales: list[float] = field(default_factory=list)
+
+    def _scale_for(self, i: int) -> float:
+        if i < len(self.line_scales):
+            return self.line_scales[i]
+        return 1.0 if i == 0 else 0.7
+
+    def _colour_for(self, i: int) -> tuple[int, int, int]:
+        if i < len(self.line_colours):
+            return self.line_colours[i]
+        return self.text_colour if i == 0 else self.accent_colour
+
     @classmethod
     def from_dict(cls, d: dict) -> "OverlayTemplate":
         known = {f for f in cls.__dataclass_fields__}
@@ -110,7 +135,7 @@ def render(image_bytes: bytes, template: OverlayTemplate, tokens: dict[str, str]
 
     fonts, heights = [], []
     for i, line in enumerate(lines):
-        target = int(H * template.title_scale * (1.0 if i == 0 else 0.7))
+        target = int(H * template.title_scale * template._scale_for(i))
         f = _fit(draw, line, target, W - 2 * pad)
         fonts.append(f)
         box = draw.textbbox((0, 0), line, font=f)
@@ -131,8 +156,18 @@ def render(image_bytes: bytes, template: OverlayTemplate, tokens: dict[str, str]
             fill=(*template.band_colour, template.band_opacity),
         )
 
+    # Drawn after the band so the frame sits over it, and before the text so it
+    # never covers the phone number.
+    if template.border_colour and template.border_scale > 0:
+        bw = max(1, int(min(W, H) * template.border_scale))
+        draw.rectangle(
+            [0, 0, W - 1, H - 1],
+            outline=(*template.border_colour, 255),
+            width=bw,
+        )
+
     for i, (line, f, h) in enumerate(zip(lines, fonts, heights)):
-        colour = template.text_colour if i == 0 else template.accent_colour
+        colour = template._colour_for(i)
         w = draw.textlength(line, font=f)
         draw.text(((W - w) / 2, text_y), line, font=f, fill=(*colour, 255))
         text_y += h + gap
