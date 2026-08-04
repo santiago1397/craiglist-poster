@@ -952,6 +952,11 @@ def inventory_report(conn: psycopg.Connection) -> dict:
         "buckets": stats["buckets"],
         "stack_health": stats["stack_health"],
         "spend_usd": stats["spend_usd"],
+        # Both are operator-tunable (migration 0027), so they are read rather
+        # than described from memory — an assistant told "30 days" while the
+        # setting says 7 will reason about depth from a number that is wrong.
+        "reuse_cooldown_days": images_svc.reuse_cooldown_days(conn),
+        "owner_binding": images_svc.owner_binding_enabled(conn),
     }
 
 
@@ -992,13 +997,21 @@ def render_inventory(d: dict) -> str:
         lines += ["", f"{kind.capitalize()} stack:"]
         for bucket, n in counts.items():
             lines.append(f"  {bucket}: {n}")
+    cooldown = d.get("reuse_cooldown_days", 30)
     lines += [
         "",
         "Pending review images cannot be attached to anything until approved. "
         "Assigned means reserved by a queued draft or a staged edit. Published "
-        "images are blocked for a 30-day cooldown because Craigslist detects "
-        "reuse.",
+        f"images are blocked for a {cooldown}-day cooldown because Craigslist "
+        "detects reuse.",
     ]
+    if not d.get("owner_binding", True):
+        lines += [
+            "",
+            "Note: images are NOT bound to one account. The same picture may be "
+            "used by any account once its cooldown expires, so depth figures "
+            "are pool-wide rather than per-account.",
+        ]
 
     lines += [
         "",

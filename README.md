@@ -427,13 +427,88 @@ Each stack shows the same five, and an image is in exactly one:
 | **Pending review** | freshly generated, unusable until approved |
 | **Available** | approved and free to be attached |
 | **Assigned** | reserved by a queued draft or a live posting's pending edit |
-| **Published** | Craigslist has seen it; blocked for a 30-day cooldown |
+| **Published** | Craigslist has seen it; blocked until its reuse cooldown expires |
 | **Rejected** | you said no |
 
 **Assigned means reserved.** An image attached to a live draft is not offered to
 any other draft. You can still force it — the picker shows reserved images
 greyed with the draft holding them, and clicking asks you to confirm — but it
 can no longer happen by accident, which it used to do on every top-up run.
+
+### Reuse — two settings, and what they cost
+
+Two rules used to be fixed in code and are now under **Settings → Guardrails**:
+
+| Setting | Ships as | Was |
+|---|---|---|
+| `image_reuse_cooldown_days` | **7** | 30 |
+| `image_owner_binding` | **off** | permanently on |
+
+Together they decided how big the photo pool had to be. At ~166 photos a day, a
+30-day cooldown needs ~4,980 standing photos, and the per-account claim then
+split that four ways. At 7 days with no account binding the same queue runs on
+roughly **1,160 photos shared across all four accounts** — which is what makes
+importing a few hundred real job-site pictures a workable alternative to
+generating thousands.
+
+> **Know what this trades away.** A Craigslist ad stays live about 30 days, so a
+> 7-day cooldown means the same photo is *expected* to be visible on two ads
+> under two different accounts at once. Duplicate images across sellers is the
+> classic reason posts get ghosted. This was chosen deliberately, with the
+> reasoning in [DESIGN.md](DESIGN.md).
+>
+> **If posts start disappearing, these are the first two things to move.** Raise
+> the cooldown toward 30 and switch `image_owner_binding` back on. Claims
+> written before the change were never deleted, so turning binding back on
+> re-enforces them immediately — no deploy, no data migration.
+
+Note the accounts are already linkable by other means: every ad body carries the
+same `LICENSE_NUMBER`, and tracking numbers rotate across accounts rather than
+being bound to one. Photo reuse adds a signal rather than creating the first one.
+
+## Photos from CompanyCam
+
+Your crews' own job-site photos can fill the photo slots instead of generated
+roof shots. The importer is a command run on the server, not a dashboard button:
+
+```bash
+# how many photos are there? downloads nothing
+docker compose exec api python -m app.importers.companycam_import \
+    --count-only --token "$TOK"
+
+# pull a batch — everything lands on the pending shelf for review
+docker compose exec api python -m app.importers.companycam_import \
+    --limit 150 --token "$TOK"
+
+# review from the command line, since the Images grid tops out around 200 rows
+docker compose exec api python -m app.importers.curate list    --source companycam --limit 20
+docker compose exec api python -m app.importers.curate approve --source companycam --limit 50 --yes
+```
+
+Nothing it imports can publish until you approve it — imports land `pending`
+like generated images do.
+
+**Every photo is re-encoded on the way in** to a 1600px JPEG at q85 (~250–400KB).
+That is not just to save space:
+
+- iPhone originals are **HEIC**, which the storage layer would file as `.bin` and
+  the desktop would then hand to Craigslist's upload control at post time — so
+  the failure would land on a live account hours after the import.
+- Phone photos rely on an EXIF `Orientation` tag. Stripping EXIF without
+  applying it first publishes a large share of them **sideways**, permanently.
+- These are photographs of customers' homes and carry **GPS coordinates**. The
+  re-encode drops the whole EXIF block.
+
+Re-running is free: the `image_sources` ledger keys on CompanyCam's own photo id,
+so nothing is downloaded twice, and a photo you rejected or deleted stays gone
+rather than reappearing on the next run.
+
+`--token` exists because `docker compose` bakes `env_file` at container creation,
+so a token added to `.env.prod` is invisible until you restart. Filters:
+`--start-date`, `--end-date`, `--project-ids`, `--tag-ids`, `--limit`.
+
+Photos still come in as `kind='photo'` — **the cover stack is untouched** and
+covers stay hand-picked. Promote one with "Make this a cover" on the Images page.
 
 ### Per-post logic
 
@@ -451,11 +526,20 @@ can no longer happen by accident, which it used to do on every top-up run.
 ### Keeping the stacks full
 
 At eight posts a day, 24-image ads burn about **166 photos a day** (8 × 23,
-less the ~1-in-10 imageless roll). Because `pick_for_draft` refuses anything
-published in the last 30 days, the pool that has to be *standing* is roughly
-**5,000** — about 1,245 per account once `owner_account` claims settle. That is
-the number to plan against; the "photo stack short by N" line on the Images page
-counts the reservation the current queue needs, which is a much smaller figure.
+less the ~1-in-10 imageless roll). The standing pool you need is that figure
+times the reuse cooldown:
+
+| `image_reuse_cooldown_days` | Standing pool |
+|---|---|
+| 30 (the old fixed value) | ~4,980 |
+| 14 | ~2,320 |
+| **7 (ships)** | **~1,160** |
+
+With `image_owner_binding` off that pool is shared across all four accounts
+rather than split into per-account quarters, so ~1,160 is the whole requirement
+— not 1,160 each. That is the number to plan against; the "photo stack short by
+N" line on the Images page counts the reservation the current queue needs, which
+is a much smaller figure.
 
 **Covers are hand-picked and now run to 8 a day, 40 a week.** If the cover stack
 empties, slot 1 goes out empty and the first roof photo becomes the Craigslist

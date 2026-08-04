@@ -81,6 +81,11 @@ def update_guardrails(conn: psycopg.Connection, values: dict) -> dict:
         "edit_window_start_hour",
         "edit_window_end_hour",
         "edits_paused_reason",
+        # Image reuse (migration 0027). Here rather than in generation_settings
+        # because these constrain what may go out, like the posting caps above —
+        # generation_settings is about what it costs to make things.
+        "image_owner_binding",
+        "image_reuse_cooldown_days",
     }
     patch = {k: v for k, v in values.items() if k in allowed and v is not None}
     if not patch:

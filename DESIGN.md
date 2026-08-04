@@ -237,6 +237,56 @@ Settled in a second design interview. These supersede parts of 10-13.
     refused. The daemon holds its flusher for the duration
     (`reporter.pause_flushing`).
 
+37. **The reuse cooldown and the account claim became settings, and both were
+    loosened.** Decision 13 bound an image permanently to the first account that
+    attached it, and the cooldown was a compiled 30 days. Between them they set
+    the pool size: ~166 photos a day against 30 days needs ~4,980 standing
+    photos, quartered by the account claim. The operator wanted real CompanyCam
+    job-site photos instead of generated ones, and a few hundred of those is a
+    realistic library where five thousand is not. At `image_reuse_cooldown_days
+    = 7` with `image_owner_binding` off, the same queue runs on ~1,160 photos
+    shared across all four accounts.
+
+    **This knowingly weakens an anti-detection rule.** A Craigslist ad runs
+    about 30 days, so a 7-day cooldown does not merely permit the same photo on
+    two accounts' live ads simultaneously — it makes it the normal case. That is
+    the duplicate-image signal decision 26 exists to avoid. It was put to the
+    operator twice, with the arithmetic, and chosen deliberately.
+
+    Two things make it survivable. Both values live in `guardrail_settings`, so
+    reverting is an UPDATE rather than a deploy — the `edits_enabled` argument
+    from decision 30. And `owner_account` values already written are never
+    wiped, so switching binding back on re-enforces the existing claims
+    immediately rather than starting from an empty slate. `attach` gates the
+    write on the same flag that gates the read, because recording claims nobody
+    enforces would lock images two accounts had already both used the moment the
+    flag went back on — a revert that cannot be reverted.
+
+    Context that made this less alarming than it first looked: the four accounts
+    are already linkable without any image analysis. `reference.LICENSE_NUMBER`
+    is one hardcoded string interpolated into every ad body, and
+    `contacts.pick` rotates tracking numbers randomly rather than binding one
+    per account. Photo reuse adds a second link, not the first.
+
+38. **CompanyCam photos are re-encoded on import, not stored as fetched.** The
+    operator asked for bytes-as-is. Three facts overrode it: iPhone originals
+    are HEIC, which `storage.relative_path` files as `.bin` and the desktop then
+    feeds to Craigslist's upload control at post time — a live-account failure
+    hours after the import; phone photos carry an EXIF `Orientation` the viewer
+    applies, so stripping GPS without transposing first publishes a large share
+    of them sideways and permanently; and 3,000 originals is 9–15GB against a
+    512MB container, which is the opposite of the space saving that motivated
+    the request. A 1600px q85 JPEG fixes all three and lands ~1GB.
+
+39. **Idempotency keys on the remote id, in a side table.** A `source_ref`
+    column on `images` cannot express it: crews photograph the same finished
+    roof twice, two CompanyCam ids normalise to identical bytes, `ON CONFLICT
+    (sha256) DO NOTHING` writes no second row, and there is nowhere to record
+    the second id was ever seen — so it re-downloads forever. `image_sources`
+    records the duplicate pointing at the row that won. It also decouples the
+    dedupe key from Pillow's encoder, so a library upgrade does not re-import
+    the library.
+
 ---
 
 ## Derived requirements

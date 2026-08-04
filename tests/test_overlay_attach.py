@@ -147,12 +147,24 @@ with tx() as c:
         assert "detach" in str(e), e
 ok.append("kind is editable, but not while a live draft holds the image")
 
-# --- attaching claims every image for that account -------------------------
+# --- attaching claims every image, when binding is on -----------------------
+# The claim is now `guardrail_settings.image_owner_binding` (migration 0027) and
+# ships off, so this asserts the flag's behaviour rather than an invariant.
+# Autofill is the highest-volume attach path in the system — if gating the claim
+# broke anywhere, it would break here first.
+with conn() as c:
+    binding = images_svc.owner_binding_enabled(c)
 with conn() as c:
     for r in rows:
         got = c.execute("SELECT owner_account FROM images WHERE id=%s", (r["id"],)).fetchone()
-        assert got["owner_account"] == "craigs1", r["id"]
-ok.append("every auto-attached image is claimed by the draft's account")
+        if binding:
+            assert got["owner_account"] == "craigs1", r["id"]
+        else:
+            assert got["owner_account"] is None, \
+                f"image {r['id']} was claimed while image_owner_binding is off"
+ok.append(
+    "auto-attached images are claimed by the draft's account, iff binding is on"
+)
 
 # --- roughly one post in ten carries no images -----------------------------
 counts = [images_svc.roll_photo_count(random.Random(s)) for s in range(2000)]
