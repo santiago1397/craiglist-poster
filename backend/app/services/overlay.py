@@ -16,11 +16,22 @@ from dataclasses import dataclass, field
 from loguru import logger
 from PIL import Image, ImageDraw, ImageFont
 
-# DejaVu ships with the Pillow wheels' Debian base; fall back to the bitmap
-# default rather than failing to render at all.
+# The runtime image installs fonts-dejavu-core explicitly (backend/Dockerfile).
+# It does NOT come for free: this comment used to claim DejaVu ships with the
+# Pillow wheels' Debian base, and that was simply wrong — python:3.12-slim has
+# no font files at all. The consequence is not a different-looking font, it is
+# an unreadable one: `load_default()` returns a fixed ~11px bitmap face that
+# ignores the size argument, so `_fit()`'s scaling silently does nothing and the
+# phone number renders at 11px on a 1365px-wide cover.
+#
+# The macOS and Windows paths are here so a developer running the API locally
+# sees what production renders instead of a bitmap approximation of it.
 _FONT_CANDIDATES = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/arial.ttf",
 ]
 
 
@@ -53,7 +64,13 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             return ImageFont.truetype(path, size)
         except OSError:
             continue
-    logger.warning("no TrueType font found; falling back to the bitmap default")
+    # An error, not a warning: the fallback does not merely look different, it
+    # renders the call-to-action and the phone number illegibly small. A cover
+    # is the one image anyone actually looks at, so this is a quality failure.
+    logger.error(
+        "no TrueType font found — cover text will render at a fixed ~11px and "
+        "be unreadable. Install fonts-dejavu-core."
+    )
     return ImageFont.load_default()
 
 
