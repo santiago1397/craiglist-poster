@@ -47,9 +47,77 @@ from loguru import logger
 from .. import storage
 from .imagegen import ImageGenError, build_provider
 
-# Matches the desktop's historic photo rule: an image may be reused within its
-# owning account, but not for 30 days.
-REUSE_COOLDOWN_DAYS = 30
+# Fallback only. The live value is `guardrail_settings.image_reuse_cooldown_days`
+# (migration 0027) — read it through `reuse_cooldown_days()` rather than using
+# this constant, which exists for the case where the settings row cannot be read
+# at all.
+#
+# It was 30 days and permanent per-account binding, which between them set the
+# size of the photo pool: ~166 photos a day against a 30-day cooldown needs
+# ~4,980 standing photos, split four ways by the account claim. Both are now
+# operator-tunable so the pool can be a few hundred shared photos instead.
+#
+# The risk that buys is real and worth stating where it will be read: a
+# Craigslist ad lives about 30 days, so a cooldown shorter than that means the
+# same picture is *expected* to be live under two accounts at once, which is the
+# duplicate-image signal that gets ads ghosted. If posts start disappearing,
+# raise `image_reuse_cooldown_days` and set `image_owner_binding` — both are
+# UPDATEs, not deploys.
+REUSE_COOLDOWN_DAYS = 7
+
+# Both knobs are read per call rather than cached: the whole point of moving
+# them into the database was that flipping one takes effect without a restart.
+_GUARDRAIL_DEFAULTS = {
+    "image_reuse_cooldown_days": REUSE_COOLDOWN_DAYS,
+    "image_owner_binding": False,
+}
+
+
+def _guardrail(conn: psycopg.Connection, key: str):
+    """Read one image guardrail, falling back to the compiled default.
+
+    Never raises. These sit on the path that fills every draft with pictures,
+    and an unreadable settings row should degrade to the safe compiled value
+    rather than stop the queue.
+    """
+    try:
+        row = conn.execute(
+            f"SELECT {key} AS v FROM guardrail_settings LIMIT 1"
+        ).fetchone()
+    except Exception as e:  # pragma: no cover — pre-0027 schema, or no row
+        logger.warning(f"could not read {key}; using the compiled default: {e}")
+        return _GUARDRAIL_DEFAULTS[key]
+    if row is None or row["v"] is None:
+        return _GUARDRAIL_DEFAULTS[key]
+    return row["v"]
+
+
+def reuse_cooldown_days(conn: psycopg.Connection) -> int:
+    """Days a published image is withheld before it may be used again."""
+    return int(_guardrail(conn, "image_reuse_cooldown_days"))
+
+
+def owner_binding_enabled(conn: psycopg.Connection) -> bool:
+    """Is an image permanently bound to the first account that attached it?
+
+    Gates the enforcement *and* the write, together and deliberately. Enforcing
+    a claim that is no longer being recorded, or recording one that is not
+    enforced, both produce the same trap: turning the flag back on would lock
+    images that two accounts have already both used, and a revert that cannot be
+    reverted is not a switch.
+    """
+    return bool(_guardrail(conn, "image_owner_binding"))
+
+
+def _owner_clause(conn: psycopg.Connection, params: dict, *, column: str = "owner_account") -> str:
+    """SQL fragment for 'this account may use this image', honouring the flag.
+
+    Written once because `pick_for_draft`, `list_images` and `bucket_counts`
+    must agree exactly — a grid that calls an image available while selection
+    skips it is a bug report.
+    """
+    params["bind"] = owner_binding_enabled(conn)
+    return f"(NOT %(bind)s OR {column} IS NULL OR {column} = %(account)s)"
 
 # Craigslist's real per-posting limit: one thumbnail plus 23 more.
 MAX_SLOTS = 24
@@ -384,8 +452,9 @@ def list_images(
         where.append("kind = %(kind)s")
         params["kind"] = kind
     if account:
-        # Available to this account: unclaimed, or already theirs.
-        where.append("(owner_account IS NULL OR owner_account = %(account)s)")
+        # Available to this account: unclaimed, or already theirs — unless
+        # binding is off, in which case every approved image is fair game.
+        where.append(_owner_clause(conn, params))
         params["account"] = account
     clause = " AND ".join(where)
     rows = conn.execute(
@@ -416,7 +485,7 @@ def bucket_counts(conn: psycopg.Connection, *, account: str | None = None) -> di
     where = ["TRUE"]
     params: dict = {"live": list(LIVE_DRAFT_STATUSES)}
     if account:
-        where.append("(owner_account IS NULL OR owner_account = %(account)s)")
+        where.append(_owner_clause(conn, params))
         params["account"] = account
     rows = conn.execute(
         f"""
@@ -640,7 +709,7 @@ def stack_health(conn: psycopg.Connection) -> dict:
         (COVER_SLOT,),
     ).fetchone()["n"]
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=REUSE_COOLDOWN_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=reuse_cooldown_days(conn))
     available = conn.execute(
         f"""
         SELECT COUNT(*) AS n FROM images
@@ -652,13 +721,18 @@ def stack_health(conn: psycopg.Connection) -> dict:
     ).fetchone()["n"]
 
     demand = max(0, queued * per_draft - filled)
+    # Covers use the same cooldown as photos. They used to be counted with a
+    # bare `used_at IS NULL`, which disagreed with `pick_for_draft` — the picker
+    # would happily hand back a cover the health panel had written off. Invisible
+    # while the cooldown was 30 days; at 7 it would under-report constantly.
     covers = conn.execute(
         f"""
         SELECT COUNT(*) AS n FROM images
-        WHERE status = 'approved' AND kind = 'cover' AND used_at IS NULL
+        WHERE status = 'approved' AND kind = 'cover'
+          AND (used_at IS NULL OR used_at < %(cutoff)s)
           AND NOT {_RESERVED_SQL}
         """,
-        {"live": list(LIVE_DRAFT_STATUSES)},
+        {"cutoff": cutoff, "live": list(LIVE_DRAFT_STATUSES)},
     ).fetchone()["n"]
 
     return {
@@ -705,11 +779,18 @@ def _check_attachable(
         raise ValueError("image not found")
     if img["status"] != "approved":
         raise ValueError("image is not approved yet")
-    if img["owner_account"] and img["owner_account"] != account:
-        raise ValueError(
-            f"image belongs to {img['owner_account']} and cannot be reused by "
-            f"{account}"
-        )
+    # The account claim, when it is switched on. Note this sits *above* the
+    # `allow_double_book` branch and is not bypassable by it: forcing a reuse
+    # within one account is an operator decision, but handing a published photo
+    # to a second seller used to be refused outright. Turning
+    # `image_owner_binding` off is what makes that possible, and it is the one
+    # setting in this file that materially raises the risk of being ghosted.
+    if owner_binding_enabled(conn):
+        if img["owner_account"] and img["owner_account"] != account:
+            raise ValueError(
+                f"image belongs to {img['owner_account']} and cannot be reused by "
+                f"{account}"
+            )
     # The partition. Slot 1 is the Craigslist thumbnail and the only place a
     # cover belongs; a cover anywhere else publishes a phone number in the
     # middle of the gallery, and a photo in slot 1 throws away the one visual
@@ -768,14 +849,19 @@ def attach(
         """,
         (draft_id, image_id, slot),
     )
-    # The claim. Permanent from here.
-    if img["owner_account"] is None:
+    # The claim. Permanent from here — but only recorded while the rule that
+    # reads it is on, so the two can never disagree.
+    owner = img["owner_account"]
+    if owner_binding_enabled(conn) and owner is None:
         conn.execute(
             "UPDATE images SET owner_account = %s, updated_at = NOW() WHERE id = %s",
             (draft["account"], image_id),
         )
+        owner = draft["account"]
+    # Report what is actually on the row. Returning the draft's account
+    # unconditionally would describe a claim that was never written.
     return {"draft_id": draft_id, "image_id": image_id, "slot": slot,
-            "owner_account": draft["account"]}
+            "owner_account": owner}
 
 
 def detach(conn: psycopg.Connection, *, draft_id: int, image_id: int) -> bool:
@@ -846,9 +932,9 @@ def attach_to_post(
 ) -> dict:
     """Bind an image to a slot of a live posting's desired set.
 
-    Same rules as `attach`, including decision 13's permanent account claim: an
-    approved image with no owner becomes this account's the moment it is staged
-    on one of its listings.
+    Same rules as `attach`, including decision 13's account claim when
+    `image_owner_binding` is on: an approved image with no owner becomes this
+    account's the moment it is staged on one of its listings.
     """
     img = _check_attachable(
         conn,
@@ -866,13 +952,15 @@ def attach_to_post(
         """,
         (post_id, image_id, slot),
     )
-    if img["owner_account"] is None:
+    owner = img["owner_account"]
+    if owner_binding_enabled(conn) and owner is None:
         conn.execute(
             "UPDATE images SET owner_account = %s, updated_at = NOW() WHERE id = %s",
             (account, image_id),
         )
+        owner = account
     return {"post_id": post_id, "image_id": image_id, "slot": slot,
-            "owner_account": account}
+            "owner_account": owner}
 
 
 def fill_post_photo_slots(
@@ -1112,19 +1200,22 @@ def pick_for_draft(
     queued drafts at once.
     """
     rng = rng or random.Random()
-    cutoff = datetime.now(timezone.utc) - timedelta(days=REUSE_COOLDOWN_DAYS)
+    params: dict = {}
+    owner_clause = _owner_clause(conn, params)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=reuse_cooldown_days(conn))
     rows = conn.execute(
         f"""
         SELECT * FROM images
         WHERE status = 'approved'
           AND kind = %(kind)s
-          AND (owner_account IS NULL OR owner_account = %(account)s)
+          AND {owner_clause}
           AND (used_at IS NULL OR used_at < %(cutoff)s)
           AND NOT {_RESERVED_SQL}
         ORDER BY used_at NULLS FIRST, random()
         LIMIT %(count)s
         """,
         {
+            **params,
             "kind": kind,
             "account": account,
             "cutoff": cutoff,

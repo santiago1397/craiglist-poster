@@ -94,23 +94,39 @@ def dashboard_accounts(conn: psycopg.Connection) -> list[dict]:
                 SELECT image_id FROM post_desired_images
             ) held
         ),
+        -- The reuse cooldown and the account claim are operator-tunable
+        -- (migration 0027), so read them rather than hardcoding. They were
+        -- literal `INTERVAL '30 days'` and a literal owner predicate here,
+        -- which is a second copy of rules whose first copy lives in
+        -- images.py — this page would have gone on reporting the old rules
+        -- while the picker used the new ones.
+        rules AS (
+            SELECT image_reuse_cooldown_days AS cooldown_days,
+                   image_owner_binding       AS owner_binding
+            FROM guardrail_settings LIMIT 1
+        ),
         stack AS (
             SELECT
                 a.account,
                 COUNT(*) FILTER (
                     WHERE i.kind = 'photo' AND r.image_id IS NULL
-                      AND (i.used_at IS NULL OR i.used_at < NOW() - INTERVAL '30 days')
+                      AND (i.used_at IS NULL
+                           OR i.used_at < NOW() - make_interval(days => g.cooldown_days))
                 ) AS photos_available,
                 COUNT(*) FILTER (
                     WHERE i.kind = 'cover' AND r.image_id IS NULL
-                      AND (i.used_at IS NULL OR i.used_at < NOW() - INTERVAL '30 days')
+                      AND (i.used_at IS NULL
+                           OR i.used_at < NOW() - make_interval(days => g.cooldown_days))
                 ) AS covers_available,
                 COUNT(*) FILTER (WHERE r.image_id IS NOT NULL) AS images_assigned,
                 COUNT(*) FILTER (WHERE i.used_at IS NOT NULL) AS images_published
             FROM accounts a
+            CROSS JOIN rules g
             LEFT JOIN images i
                    ON i.status = 'approved'
-                  AND (i.owner_account IS NULL OR i.owner_account = a.account)
+                  AND (NOT g.owner_binding
+                       OR i.owner_account IS NULL
+                       OR i.owner_account = a.account)
             LEFT JOIN reserved r ON r.image_id = i.id
             GROUP BY a.account
         ),

@@ -43,6 +43,18 @@ class Settings(BaseSettings):
     minimax_api_key: str = ""
     openai_api_key: str = ""
     gemini_api_key: str = ""
+
+    # --- CompanyCam photo import ---
+    # Not a generation provider: nothing here writes copy or draws pictures, it
+    # only pulls the crews' own job-site photos into the image stack. So it is a
+    # plain env var rather than an entry in generation_settings' encrypted
+    # provider blob.
+    #
+    # docker-compose bakes `env_file` at container creation, so a token added to
+    # .env.prod is invisible to an already-running container. The importer takes
+    # --token for exactly that reason; this is the fallback once you restart.
+    companycam_api_token: str = ""
+    companycam_api_base: str = "https://api.companycam.com/v2"
     # How often the background top-up checks queue depth. 0 disables the loop
     # (useful if you would rather drive generation from host cron).
     generation_interval_minutes: int = 30

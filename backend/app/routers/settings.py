@@ -46,6 +46,13 @@ class GuardrailUpdate(BaseModel):
     edit_window_end_hour: int | None = Field(default=None, ge=1, le=24)
     edits_paused_reason: str | None = Field(default=None, max_length=200)
 
+    # Image reuse (migration 0027). These are the revert path for the loosened
+    # reuse rules: turning binding back on and raising the cooldown are the two
+    # moves if duplicate photos start getting ads ghosted, and both must be
+    # possible without a deploy.
+    image_owner_binding: bool | None = None
+    image_reuse_cooldown_days: int | None = Field(default=None, ge=0, le=365)
+
 
 class TokenCreate(BaseModel):
     machine: str

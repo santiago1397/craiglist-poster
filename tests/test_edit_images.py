@@ -200,15 +200,19 @@ check("autofill reports what it managed to fill", "filled" in result and "reques
 check("autofill leaves the chosen cover in slot 1", after_fill.get(1) == cover["id"],
       str(after_fill.get(1)))
 
-# --- detach releases the claim only when nothing else holds it --------------
+# --- detach releases only when nothing else holds it ------------------------
+# The account claim is now a setting that ships off (migration 0027), so
+# `owner_account` no longer proves anything here. The property that still
+# matters — and the one that actually keeps a picture off two ads — is the
+# reservation: while any other holder has it, the image stays out of the pool.
 with tx() as c:
     assert edits_svc.detach_image(c, post_id=OTHER_POST, image_id=photo_b["id"])
 with conn() as c:
-    owner = c.execute(
-        "SELECT owner_account FROM images WHERE id = %s", (photo_b["id"],)
-    ).fetchone()["owner_account"]
-check("detaching from one holder keeps the claim while another holds it",
-      owner == "craigs1", str(owner))
+    still_held = images_svc.reserved_by(c, photo_b["id"]) is not None or (
+        images_svc.reserved_by_post(c, photo_b["id"]) is not None
+    )
+check("detaching from one holder leaves the image reserved by the other",
+      still_held, "image was released while another holder still has it")
 
 if failures:
     print("\n".join(f"  --  {line}" for line in failures))

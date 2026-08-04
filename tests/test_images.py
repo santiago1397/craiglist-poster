@@ -1,8 +1,20 @@
 """Image stack: storage, the pending shelf, and the per-account claim.
 
-The claim is the one with real consequences — Craigslist notices the same photo
-appearing under different sellers, so an image bound to craigs1 must never be
-usable by craigs2. These assert that, not just that the column gets written.
+The claim used to be absolute — Craigslist notices the same photo appearing
+under different sellers, so an image bound to craigs1 could never be used by
+craigs2. Migration 0027 made it an operator setting
+(`guardrail_settings.image_owner_binding`) and it now ships **off**, so the same
+picture can go out under several accounts once its cooldown expires.
+
+That makes the flag itself the thing worth testing, in both positions. The
+`image_owner_binding = TRUE` half is not legacy coverage: it is the revert path,
+and a revert nobody exercises is not a revert. If duplicate photos ever start
+getting ads ghosted, turning that flag back on is the fix, and these assertions
+are what say it still works.
+
+The same goes for the cooldown. It was 30 days and is now 7, so the old fixture
+— age a row 31 days, assert it is offered — would still pass while asserting
+nothing at all. The probes below straddle whatever `reuse_cooldown_days` says.
 """
 import os
 import tempfile
@@ -16,6 +28,29 @@ from app.services import images as images_svc  # noqa: E402
 
 init_pool()
 ok = []
+
+
+def set_binding(on: bool) -> None:
+    """Flip the account claim, the way Settings → Guardrails does."""
+    with tx() as c:
+        c.execute(
+            "UPDATE guardrail_settings SET image_owner_binding = %s WHERE singleton",
+            (on,),
+        )
+
+
+def set_cooldown(days: int) -> None:
+    with tx() as c:
+        c.execute(
+            "UPDATE guardrail_settings SET image_reuse_cooldown_days = %s "
+            "WHERE singleton",
+            (days,),
+        )
+
+
+with conn() as c:
+    _ORIGINAL_BINDING = images_svc.owner_binding_enabled(c)
+    _ORIGINAL_COOLDOWN = images_svc.reuse_cooldown_days(c)
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake image bytes for testing" * 4
 PNG2 = b"\x89PNG\r\n\x1a\n" + b"a different picture entirely" * 4
@@ -70,6 +105,12 @@ with tx() as c:
         assert "not approved" in str(e), e
 ok.append("an image on the pending shelf cannot be attached to a draft")
 
+# === WITH BINDING ON — the revert path ======================================
+# Everything down to the detach block runs with image_owner_binding = TRUE.
+# This is the behaviour an operator gets back by flipping one setting, so it has
+# to keep working even though the shipped default is off.
+set_binding(True)
+
 # --- attaching claims the image for that account, permanently --------------
 with tx() as c:
     images_svc.set_status(c, pending["id"], "approved")
@@ -78,7 +119,7 @@ assert r["owner_account"] == "craigs1"
 with conn() as c:
     got = c.execute("SELECT owner_account FROM images WHERE id=%s", (pending["id"],)).fetchone()
 assert got["owner_account"] == "craigs1"
-ok.append("attaching binds the image to that draft's account")
+ok.append("binding ON: attaching binds the image to that draft's account")
 
 # --- and another account is refused ----------------------------------------
 with tx() as c:
@@ -87,7 +128,7 @@ with tx() as c:
         raise AssertionError("a second account reused a claimed image")
     except ValueError as e:
         assert "craigs1" in str(e), e
-ok.append("a claimed image is refused to any other account")
+ok.append("binding ON: a claimed image is refused to any other account")
 
 # --- an image held by a live draft is out of the pool ----------------------
 # draft_images has no uniqueness on image_id, so without this the same photo
@@ -131,19 +172,97 @@ with conn() as c:
 assert got["used_at"] is not None
 assert got["owner_account"] == "craigs1", \
     "a published image was released back to the pool - it could reappear under another account"
-ok.append("detach releases an unpublished image but never a published one")
+ok.append("binding ON: detach releases an unpublished image but never a published one")
+
+# === WITH BINDING OFF — what actually ships =================================
+# The published image above is still stamped owner_account='craigs1'. With the
+# flag off that stamp must stop being enforced — otherwise every image attached
+# before the change stays locked to one account forever and the loosening does
+# nothing for the existing pool.
+set_binding(False)
+with tx() as c:
+    c.execute("UPDATE images SET used_at = NULL WHERE id=%s", (pending["id"],))
+    r2 = images_svc.attach(c, draft_id=d_b["id"], image_id=pending["id"], slot=2,
+                           allow_double_book=True)
+assert r2["owner_account"] == "craigs1", \
+    "the historic claim was overwritten; flipping binding back on would be a lie"
+ok.append("binding OFF: a second account may use an image claimed by the first")
+
+# --- and the stamp is preserved, so the revert is real ---------------------
+with conn() as c:
+    got = c.execute("SELECT owner_account FROM images WHERE id=%s",
+                    (pending["id"],)).fetchone()
+assert got["owner_account"] == "craigs1", "existing owner_account was wiped"
+set_binding(True)
+with tx() as c:
+    try:
+        images_svc.attach(c, draft_id=d_b["id"], image_id=pending["id"], slot=3,
+                          allow_double_book=True)
+        raise AssertionError("binding was turned back on but is not enforced")
+    except ValueError as e:
+        assert "craigs1" in str(e), e
+ok.append("the revert works: turning binding back on re-enforces the old claims")
+
+# --- a fresh attach under binding OFF records no claim ---------------------
+# Gating the read without gating the write would leave new images silently
+# stamped, so flipping binding back on would lock pictures two accounts had
+# already both used.
+set_binding(False)
+with tx() as c:
+    unowned = images_svc._store(c, PNG2 + b"third", source="generated", kind="photo")
+    images_svc.set_status(c, unowned["id"], "approved")
+    r3 = images_svc.attach(c, draft_id=d_a["id"], image_id=unowned["id"], slot=4)
+assert r3["owner_account"] is None, "attach reported a claim it did not write"
+with conn() as c:
+    got = c.execute("SELECT owner_account FROM images WHERE id=%s",
+                    (unowned["id"],)).fetchone()
+assert got["owner_account"] is None, "binding is off but a claim was still written"
+ok.append("binding OFF: no claim is written, so the flag reads and writes agree")
 
 # --- published images stay inside the reuse cooldown -----------------------
+# Probes straddle the configured value rather than a hardcoded 31 days, which
+# at a 7-day cooldown would assert nothing.
+#
+# Release the cross-account attachment made above first. An image held by a live
+# draft is excluded by the reservation whatever its age, so leaving it attached
+# would make every probe below pass for the wrong reason — including the one
+# asserting the cooldown has expired.
+with tx() as c:
+    images_svc.detach(c, draft_id=d_b["id"], image_id=pending["id"])
+with conn() as c:
+    assert images_svc.reserved_by(c, pending["id"]) is None, \
+        "the cooldown probes would be measuring the reservation, not the cooldown"
+
+set_cooldown(7)
+with conn() as c:
+    days = images_svc.reuse_cooldown_days(c)
+assert days == 7
+with tx() as c:
+    c.execute("UPDATE images SET used_at = NOW() WHERE id=%s", (pending["id"],))
 with conn() as c:
     fresh = images_svc.pick_for_draft(c, account="craigs1", count=10)
 assert pending["id"] not in [i["id"] for i in fresh], "just-published image offered again"
+
 with tx() as c:
-    c.execute("UPDATE images SET used_at = NOW() - INTERVAL '31 days' WHERE id=%s",
-              (pending["id"],))
+    c.execute(
+        "UPDATE images SET used_at = NOW() - make_interval(days => %s) WHERE id=%s",
+        (days - 3, pending["id"]),
+    )
+with conn() as c:
+    inside = images_svc.pick_for_draft(c, account="craigs1", count=10)
+assert pending["id"] not in [i["id"] for i in inside], \
+    f"an image used {days - 3} days ago was offered inside a {days}-day cooldown"
+
+with tx() as c:
+    c.execute(
+        "UPDATE images SET used_at = NOW() - make_interval(days => %s) WHERE id=%s",
+        (days + 1, pending["id"]),
+    )
 with conn() as c:
     aged = images_svc.pick_for_draft(c, account="craigs1", count=10)
-assert pending["id"] in [i["id"] for i in aged], "image still blocked after 30 days"
-ok.append("reuse cooldown blocks for 30 days, then allows it again")
+assert pending["id"] in [i["id"] for i in aged], \
+    f"an image used {days + 1} days ago is still blocked by a {days}-day cooldown"
+ok.append("the reuse cooldown tracks the configured value on both sides")
 
 # --- deleting keeps the bytes of anything already published ----------------
 with conn() as c:
@@ -154,6 +273,12 @@ with tx() as c:
     images_svc.delete_image(c, pending["id"])
 assert path.exists(), "bytes of a published image were deleted; the live ad is now unauditable"
 ok.append("deleting a published image keeps its bytes for audit")
+
+# Put the operator's settings back. This test drives real guardrails on whatever
+# database it is pointed at, and leaving binding flipped would quietly change
+# how the next posting run picks pictures.
+set_binding(_ORIGINAL_BINDING)
+set_cooldown(_ORIGINAL_COOLDOWN)
 
 print("\n".join(f"  OK  {line}" for line in ok))
 print(f"\n{len(ok)} checks passed")
