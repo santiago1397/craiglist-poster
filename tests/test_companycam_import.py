@@ -207,6 +207,53 @@ assert len(ids) == len(set(ids)), \
 assert set(ids) == {other_id, third_id}, f"expected both images, got {ids}"
 ok.append("curate lists one row per image even when several remote ids map to it")
 
+# --- the first page request carries no pagination parameter ----------------
+# The published reference lists `page` alongside the cursor params, but the live
+# API answers HTTP 400 "Invalid cursor format - please use cursor from the
+# headers of a previous response". So the first request must go bare and every
+# later one must use the cursor off X-Next-Cursor. This cost a failed run
+# against the real API; it should not cost a second one.
+class _Resp:
+    status_code = 200
+
+    def __init__(self, data, headers=None):
+        self._data, self.headers = data, (headers or {})
+
+    def json(self):
+        return self._data
+
+
+class _Client:
+    def __init__(self, responses):
+        self._responses, self.calls = responses, []
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.calls.append(dict(params or {}))
+        return self._responses[len(self.calls) - 1]
+
+
+fake = _Client([
+    _Resp([{"id": "1"}, {"id": "2"}], {"X-Next-Cursor": "CURSOR_A"}),
+    _Resp([{"id": "3"}]),
+])
+got = list(companycam.list_photos(
+    fake, token="t", api_base="https://api.companycam.com/v2", per_page=2
+))
+assert "page" not in fake.calls[0], \
+    f"the first request sent a page param; the live API 400s on it: {fake.calls[0]}"
+assert "after" not in fake.calls[0], "the first request sent a cursor it could not have"
+assert fake.calls[1].get("after") == "CURSOR_A", \
+    f"the second request did not use X-Next-Cursor: {fake.calls[1]}"
+assert [p["id"] for p in got] == ["1", "2", "3"], got
+ok.append("paging goes bare then cursor-only, never page= on the first request")
+
+# --- a short page ends the walk without a second call ----------------------
+short = _Client([_Resp([{"id": "1"}])])
+assert len(list(companycam.list_photos(
+    short, token="t", api_base="https://x/v2", per_page=2))) == 1
+assert len(short.calls) == 1, "a short page should not trigger another request"
+ok.append("a short page ends the walk immediately")
+
 with tx() as c:
     c.execute("DELETE FROM image_sources WHERE source = %s", (SOURCE,))
     c.execute("DELETE FROM images WHERE source = %s", (SOURCE,))
