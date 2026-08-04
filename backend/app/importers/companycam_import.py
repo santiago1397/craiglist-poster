@@ -147,7 +147,8 @@ def _import_loop(client, db, args, *, token, api_base, filters) -> int:
             "project_id": (
                 str(photo["project_id"]) if photo.get("project_id") else None
             ),
-            "description": photo.get("description"),
+            # Sometimes a rich-text object rather than the documented string.
+            "description": image_import.as_text(photo.get("description")),
         }
 
         reason = _skip_reason(photo)
