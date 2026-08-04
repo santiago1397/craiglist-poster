@@ -58,6 +58,12 @@ def _filters(args) -> dict:
         out["start_date"] = start
     if end := _parse_date(args.end_date):
         out["end_date"] = end
+    # The `[]` suffix is the Rails array convention, and CompanyCam is a Rails
+    # app — but this is the one thing in the importer that was not verified
+    # against the live API, because it needs a token. The documented parameter
+    # names are `project_ids` and `tag_ids`, typed as arrays; if a filtered run
+    # comes back with everything or nothing, drop the brackets here first.
+    # `--count-only` shows the mismatch without downloading anything.
     if args.project_ids:
         out["project_ids[]"] = [p.strip() for p in args.project_ids.split(",") if p.strip()]
     if args.tag_ids:

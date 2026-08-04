@@ -80,6 +80,11 @@ def _guardrail(conn: psycopg.Connection, key: str):
     and an unreadable settings row should degrade to the safe compiled value
     rather than stop the queue.
     """
+    # `key` is interpolated into SQL rather than bound, because a column name
+    # cannot be a parameter. Every caller in this module passes a literal, and
+    # this keeps it that way should one ever grow an argument.
+    if key not in _GUARDRAIL_DEFAULTS:
+        raise ValueError(f"unknown image guardrail {key!r}")
     try:
         row = conn.execute(
             f"SELECT {key} AS v FROM guardrail_settings LIMIT 1"

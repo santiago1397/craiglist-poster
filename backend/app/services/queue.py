@@ -672,11 +672,26 @@ def _backstop_cover(conn: psycopg.Connection, draft: dict) -> None:
 # are six hours apart, an hour clear of the five-hour cooldown, so a slow run or
 # one displaced slot does not cost a fire.
 #
-# Whole hours, at least an hour apart, is load-bearing rather than aesthetic:
-# `_next_fire` below builds each fire with `c.replace(hour=hour)` and
-# `project_schedule` steps its cursor forward one hour at a time. Anything finer
-# would need both rewritten.
-TASK_FIRE_HOURS = (8, 9, 10, 11, 14, 15, 16, 17)
+# (hour, minute) pairs in DISPLAY_TZ. These were whole hours until the posting
+# window narrowed to 08:00-17:00, which does not contain eight whole hours that
+# also clear the cooldown -- see below -- so `_next_fire` and `project_schedule`
+# were rewritten to carry minutes.
+#
+# **The 45-minute spacing is what makes the cooldown work.** Each block spans
+# 2h15m, so fire k and fire k+4 are always six hours apart: 08:00 pairs with
+# 14:00, 10:15 with 16:15. That is an hour of clearance over the five-hour
+# same-account cooldown, which an account needs to take both a morning and an
+# afternoon slot. Widen a block and that clearance shrinks by the same amount;
+# at a three-hour block it reaches exactly five hours and every afternoon fire
+# starts getting refused, because a post lands minutes *after* the fire that
+# produced it and the cooldown is measured from the post.
+#
+# The last fire is 16:15 rather than 17:00 on purpose: the window check is
+# `start <= hour < end`, so an end hour of 17 refuses anything from 17:00:00.
+TASK_FIRE_TIMES = (
+    (8, 0), (8, 45), (9, 30), (10, 15),
+    (14, 0), (14, 45), (15, 30), (16, 15),
+)
 
 
 def project_schedule(
@@ -729,15 +744,19 @@ def project_schedule(
 
     out: list[dict] = []
     local = now.astimezone(tz)
-    cursor = local.replace(minute=0, second=0, microsecond=0)
+    # Minutes are kept. Truncating to the hour used to be harmless because no
+    # two fires shared one; now it would re-offer 08:00 at 08:30.
+    cursor = local.replace(second=0, microsecond=0)
 
-    for _ in range(horizon_days * len(TASK_FIRE_HOURS)):
+    for _ in range(horizon_days * len(TASK_FIRE_TIMES)):
         if not any(queues.values()):
             break
         fire = _next_fire(cursor, g, tz)
         if (fire - local).days > horizon_days:
             break
-        cursor = fire + timedelta(hours=1)
+        # One minute, not one hour: fires are 45 minutes apart, so stepping an
+        # hour would skip the next one.
+        cursor = fire + timedelta(minutes=1)
         fire_utc = fire.astimezone(timezone.utc)
 
         if sum(1 for _, t in history if t >= fire_utc - timedelta(hours=24)) >= g["max_posts_per_day_total"]:
@@ -787,15 +806,17 @@ def _next_fire(cursor: datetime, g: dict, tz) -> datetime:
     c = cursor
     for _ in range(400):
         if g["post_weekdays_only"] and c.weekday() >= 5:
-            c = (c + timedelta(days=1)).replace(hour=0)
+            c = (c + timedelta(days=1)).replace(hour=0, minute=0)
             continue
-        for hour in TASK_FIRE_HOURS:
-            if hour < c.hour:
+        for hour, minute in TASK_FIRE_TIMES:
+            # Compared as a pair: hour alone would return a slot already gone
+            # past earlier in the same hour, now that two can share one.
+            if (hour, minute) < (c.hour, c.minute):
                 continue
             if not (g["post_window_start_hour"] <= hour < g["post_window_end_hour"]):
                 continue
-            return c.replace(hour=hour)
-        c = (c + timedelta(days=1)).replace(hour=0)
+            return c.replace(hour=hour, minute=minute)
+        c = (c + timedelta(days=1)).replace(hour=0, minute=0)
     return c
 
 
@@ -877,9 +898,10 @@ def mark_posted(
     post_id: str | None,
     posted_at: datetime | None = None,
 ) -> None:
-    # Stamp the attached images as published. That starts their 30-day reuse
-    # cooldown and makes the account claim permanent — Craigslist has now seen
-    # these photos under this seller.
+    # Stamp the attached images as published. That starts their reuse cooldown
+    # (`image_reuse_cooldown_days`) and, while `image_owner_binding` is on,
+    # makes the account claim permanent — Craigslist has now seen these photos
+    # under this seller.
     from . import images as images_svc
 
     images_svc.mark_used(

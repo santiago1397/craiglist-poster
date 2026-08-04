@@ -146,7 +146,6 @@ def list_photos(
     params: dict = {"per_page": per_page, **(filters or {})}
     cursor: str | None = None
     page = 1
-    seen = 0
 
     while True:
         query = dict(params)
@@ -167,9 +166,7 @@ def list_photos(
         if not batch:
             return
 
-        for photo in batch:
-            seen += 1
-            yield photo
+        yield from batch
 
         # A short page means the end regardless of what the cursor says.
         if len(batch) < per_page:
