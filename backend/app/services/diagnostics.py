@@ -130,7 +130,10 @@ _STEP_HELP: dict[str, str] = {
     ),
     "billing": (
         "Craigslist's paid-category checkout did not complete. The ad may or may "
-        "not have published — check the account before requeueing."
+        "not have published — check the account before requeueing. If the error "
+        "says no payment method, add a card to that Craigslist account: this "
+        "will not fix itself, and the account is now backed off for "
+        "billing_failure_backoff_minutes so it stops consuming posting slots."
     ),
     "confirmation": (
         "The form submitted but the confirmation page gave us no post URL. The "

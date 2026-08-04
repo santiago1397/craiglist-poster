@@ -73,6 +73,9 @@ def update_guardrails(conn: psycopg.Connection, values: dict) -> dict:
         "post_weekdays_only",
         "queue_depth_floor",
         "queue_depth_target",
+        # How long a failed account stands down (migration 0029).
+        "failure_backoff_minutes",
+        "billing_failure_backoff_minutes",
         # Editing (DESIGN_EDITS.md decision 30)
         "edits_enabled",
         "min_hours_between_edits_same_post",
@@ -108,6 +111,44 @@ def _last_post_by_account(conn: psycopg.Connection) -> dict[str, datetime]:
         "WHERE posted_ts IS NOT NULL GROUP BY account"
     ).fetchall()
     return {r["account"]: r["last_at"] for r in rows}
+
+
+# Steps whose failure is a configuration problem rather than a blip. A missing
+# payment method fails identically on every retry, and each retry parks another
+# draft and burns another set of uploaded images, so it gets the long backoff.
+CONFIG_FAILURE_STEPS = ("billing",)
+
+
+def _last_failure_by_account(
+    conn: psycopg.Connection, now: datetime, lookback_hours: int = 48
+) -> dict[str, dict]:
+    """Most recent failed attempt per account, with the step it died on.
+
+    The rotation used to be blind to this: every count in `evaluate_eligibility`
+    reads `posts`, which only ingest fills on success, so an account that failed
+    stayed the longest-idle one and was handed the very next fire. One account
+    with a broken card consumed all eight fires of a day while the other three
+    posted nothing.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ON (account) account, ts, failed_step, error_message
+        FROM post_attempts
+        WHERE outcome LIKE 'failed%%'
+          AND ts >= %s
+          AND account <> '(none)'
+        ORDER BY account, ts DESC
+        """,
+        (now - timedelta(hours=lookback_hours),),
+    ).fetchall()
+    return {r["account"]: dict(r) for r in rows}
+
+
+def _failure_backoff(g: dict, failed_step: str | None) -> int:
+    """Minutes an account waits after a failure, by kind of failure."""
+    if failed_step in CONFIG_FAILURE_STEPS:
+        return int(g.get("billing_failure_backoff_minutes") or 0)
+    return int(g.get("failure_backoff_minutes") or 0)
 
 
 def _posts_last_24h_total(conn: psycopg.Connection, now: datetime) -> int:
@@ -209,6 +250,7 @@ def evaluate_eligibility(
         )
 
     last_post = _last_post_by_account(conn)
+    last_fail = _last_failure_by_account(conn, now)
     today = _posts_today_by_account(conn, now)
     weekly = _posts_last_7d_by_account(conn, now)
     depths = queue_depths(conn)
@@ -250,10 +292,37 @@ def evaluate_eligibility(
         if depth == 0:
             reasons.append("queue empty: no drafts for this account")
 
+        # Back off after a failure so one broken account cannot take every fire
+        # of the day. This is not a kill switch: it expires on its own, so a
+        # transient failure costs one slot and needs nobody.
+        fail = last_fail.get(name)
+        backoff_until = None
+        if fail is not None:
+            minutes = _failure_backoff(g, fail["failed_step"])
+            if minutes > 0:
+                until = fail["ts"] + timedelta(minutes=minutes)
+                if until > now:
+                    backoff_until = until
+                    mins_left = int((until - now).total_seconds() // 60) + 1
+                    step = fail["failed_step"] or "an unknown step"
+                    extra = (
+                        " — this is a setup problem, not a blip: check the "
+                        "account's payment method"
+                        if fail["failed_step"] in CONFIG_FAILURE_STEPS
+                        else ""
+                    )
+                    reasons.append(
+                        f"backing off after a failure at {step}: "
+                        f"{mins_left}m left{extra}"
+                    )
+
         out[name] = {
             "eligible": not reasons,
             "reasons": reasons,
             "last_post_at": last,
+            "last_failure_at": fail["ts"] if fail else None,
+            "last_failure_step": fail["failed_step"] if fail else None,
+            "backoff_until": backoff_until,
             "posts_today": td,
             "posts_last_7d": wk,
             "queue_depth": depth,
@@ -517,8 +586,12 @@ def claim_next(
 
     # Longest-idle first. Accounts that have never posted sort first.
     def _idle_key(name: str):
-        last = report["accounts"][name]["last_post_at"]
-        return last or datetime.min.replace(tzinfo=timezone.utc)
+        # Ranked on the last time we *tried*, not the last time we succeeded.
+        # On success alone, an account that keeps failing never advances its
+        # timestamp, stays the longest-idle one, and wins every fire forever.
+        info = report["accounts"][name]
+        stamps = [t for t in (info["last_post_at"], info.get("last_failure_at")) if t]
+        return max(stamps) if stamps else datetime.min.replace(tzinfo=timezone.utc)
 
     if target is not None:
         # One account, one draft, no fallback. If its account is blocked the

@@ -36,6 +36,11 @@ class GuardrailUpdate(BaseModel):
     queue_depth_floor: int | None = Field(default=None, ge=0, le=500)
     queue_depth_target: int | None = Field(default=None, ge=1, le=1000)
 
+    # How long an account stands down after a failed post, so one broken
+    # account cannot consume every fire of the day. Zero disables the backoff.
+    failure_backoff_minutes: int | None = Field(default=None, ge=0, le=1440)
+    billing_failure_backoff_minutes: int | None = Field(default=None, ge=0, le=10080)
+
     # Editing (DESIGN_EDITS.md decision 30). Bounds here are a first line of
     # defence; the desktop clamps again to ceilings compiled into config.py.
     edits_enabled: bool | None = None

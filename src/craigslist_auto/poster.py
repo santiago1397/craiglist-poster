@@ -805,6 +805,47 @@ def _on_billing_page(page: Page) -> bool:
     return False
 
 
+def _needs_payment_method(page: Page) -> bool:
+    """Is checkout asking us to *enter* a card rather than confirm a saved one?
+
+    Deliberately looks for the input fields rather than the words: 'credit card'
+    appears on a review page that has a card on file just as readily as on one
+    that does not, but a card-number box only appears when there is nothing to
+    charge.
+    """
+    for sel in (
+        "input[name*='card' i]",
+        "input[id*='cardnumber' i]",
+        "input[autocomplete='cc-number']",
+        "iframe[title*='card number' i]",
+        "input[name*='cvv' i]",
+        "input[name*='cvc' i]",
+    ):
+        try:
+            if page.locator(sel).first.count():
+                return True
+        except Exception:
+            continue
+    try:
+        if page.locator(
+            "text=/add a (payment|credit card)|no card on file|enter your card/i"
+        ).first.count():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _billing_stall_reason(page: Page) -> str:
+    if _needs_payment_method(page):
+        return (
+            "no payment method on this account — Craigslist is asking for card "
+            "details at checkout. Add a card to the account; retrying will not "
+            "help"
+        )
+    return "billing flow stuck — no matching button found"
+
+
 def _handle_billing(page: Page, account_name: str, max_steps: int = 4) -> None:
     """
     Drive through CL's paid-category checkout using the card already saved on
@@ -869,8 +910,14 @@ def _handle_billing(page: Page, account_name: str, max_steps: int = 4) -> None:
             # No dump here: post_ad's own handler captures the same page a
             # moment later, and capturing twice uploads two copies of one
             # screenshot. Raise with the URL so the artifact is identifiable.
+            #
+            # Separate the two reasons this happens, because they need opposite
+            # responses. A page asking for card details means no payment method
+            # is saved on the account: no retry will ever pass, and the fix is
+            # in Craigslist's account settings, not in these selectors. Anything
+            # else is a selector that has drifted.
             raise RuntimeError(
-                f"billing flow stuck — no matching button found on {page.url}"
+                f"{_billing_stall_reason(page)} (on {page.url})"
             )
 
     if _on_billing_page(page):
