@@ -33,6 +33,7 @@ os.environ.setdefault("IMAGES_DIR", tempfile.mkdtemp())
 from PIL import Image  # noqa: E402
 
 from app.db import conn, init_pool, tx  # noqa: E402
+from app.importers import curate  # noqa: E402
 from app.services import companycam  # noqa: E402
 from app.services import image_import  # noqa: E402
 
@@ -176,6 +177,35 @@ thumb_only = {"uris": [{"type": "thumbnail", "url": "https://x/t.jpg"}]}
 assert companycam.pick_uri(thumb_only) is None, \
     "a thumbnail was selected as an ad photo"
 ok.append("a thumbnail-only photo is skipped rather than published tiny")
+
+# --- curate counts images, not ledger rows ---------------------------------
+# The ledger is N→1 by design, so a plain LEFT JOIN returns one row per remote
+# photo rather than per image. That would eat the --limit and double-count the
+# byte total, which is exactly the wrong way for a bulk tool to be wrong.
+second = image_import.normalise(jpeg(colour="green"))
+with tx() as c:
+    other_id, _ = image_import.store_external(c, second, source=SOURCE)
+    image_import.record(c, source=SOURCE, external_id="cc-3", state="imported",
+                        image_id=other_id)
+    # first_id was deleted above; re-create a two-ledger-row image.
+    third_id, _ = image_import.store_external(
+        c, image_import.normalise(jpeg(colour="orange")), source=SOURCE
+    )
+    image_import.record(c, source=SOURCE, external_id="cc-4", state="imported",
+                        image_id=third_id)
+    image_import.record(c, source=SOURCE, external_id="cc-5", state="duplicate",
+                        image_id=third_id)
+
+args = curate.build_parser().parse_args(
+    ["list", "--source", SOURCE, "--status", "pending", "--limit", "50"]
+)
+with conn() as c:
+    rows = curate._select(c, args)
+ids = [r["id"] for r in rows]
+assert len(ids) == len(set(ids)), \
+    f"curate returned an image more than once: {ids}"
+assert set(ids) == {other_id, third_id}, f"expected both images, got {ids}"
+ok.append("curate lists one row per image even when several remote ids map to it")
 
 with tx() as c:
     c.execute("DELETE FROM image_sources WHERE source = %s", (SOURCE,))

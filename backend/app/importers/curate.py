@@ -93,14 +93,27 @@ def _select(db, args) -> list[dict]:
     where, params = _where(args)
     params["lim"] = args.limit
     rows = db.execute(
+        # DISTINCT ON (i.id) because image_sources is deliberately N→1: two
+        # CompanyCam photos that normalise to identical bytes share one image
+        # row, and a plain LEFT JOIN would then return that image once per
+        # ledger entry. That is not cosmetic — the duplicates would eat the
+        # LIMIT, so `--limit 50` would act on fewer than 50 distinct images and
+        # report a count and a byte total that double-count.
+        #
+        # The inner ORDER BY picks which ledger row represents the image (the
+        # most recently captured); the outer one is the display order.
         f"""
-        SELECT i.id, i.status, i.kind, i.source, i.bytes_size, i.used_at,
-               i.owner_account,
-               s.external_id, s.project_id, s.captured_at, s.description
-        FROM images i
-        LEFT JOIN image_sources s ON s.image_id = i.id
-        WHERE {where}
-        ORDER BY s.captured_at DESC NULLS LAST, i.id DESC
+        SELECT * FROM (
+            SELECT DISTINCT ON (i.id)
+                   i.id, i.status, i.kind, i.source, i.bytes_size, i.used_at,
+                   i.owner_account,
+                   s.external_id, s.project_id, s.captured_at, s.description
+            FROM images i
+            LEFT JOIN image_sources s ON s.image_id = i.id
+            WHERE {where}
+            ORDER BY i.id, s.captured_at DESC NULLS LAST
+        ) x
+        ORDER BY x.captured_at DESC NULLS LAST, x.id DESC
         LIMIT %(lim)s
         """,
         params,
