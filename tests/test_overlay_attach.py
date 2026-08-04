@@ -319,5 +319,35 @@ with Image.open(io.BytesIO(composited)) as im:
     assert im.size == (1365, 1024), im.size
 ok.append("render composites the call-to-action without resizing the cover")
 
+# --- per-line formatting and the frame -------------------------------------
+# Without these, every line after the first renders in the same colour at the
+# same size, so a three-line block reads as one undifferentiated stack and the
+# phone number — the line that has to win — does not.
+plain = overlay_svc.OverlayTemplate(lines=["A", "B", "C"])
+assert plain._scale_for(0) == 1.0 and plain._scale_for(2) == 0.7
+assert plain._colour_for(0) == plain.text_colour
+assert plain._colour_for(1) == plain.accent_colour
+ok.append("a template with no overrides keeps the original title/accent behaviour")
+
+styled = overlay_svc.OverlayTemplate(
+    lines=["A", "B", "C"], line_scales=[1.0, 1.3], line_colours=[(255, 0, 0)]
+)
+assert styled._scale_for(1) == 1.3, "a per-line scale override was ignored"
+assert styled._scale_for(2) == 0.7, "an unlisted line did not fall back"
+assert styled._colour_for(0) == (255, 0, 0)
+assert styled._colour_for(1) == styled.accent_colour, "an unlisted colour did not fall back"
+ok.append("per-line scale and colour overrides apply, and short lists fall back")
+
+framed = overlay_svc.render(
+    flat,
+    overlay_svc.OverlayTemplate(lines=["FRAMED"], border_colour=(255, 0, 0),
+                                border_scale=0.02),
+    {"phone": "", "license": "", "city": ""},
+)
+with Image.open(io.BytesIO(framed)) as im:
+    r, g, b = im.convert("RGB").getpixel((3, 3))
+assert r > 180 and g < 80 and b < 80, f"the frame did not draw: {(r, g, b)}"
+ok.append("a border colour draws a frame at the image edge")
+
 print("\n".join(f"  OK  {line}" for line in ok))
 print(f"\n{len(ok)} checks passed")
