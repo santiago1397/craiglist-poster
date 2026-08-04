@@ -473,6 +473,45 @@ generates photos straight into Available (covers always stay manual) whenever
 depth drops below `image_stack_floor`. At $0.0035 an image and 166 a day, steady
 state is roughly **$18/month**.
 
+## Switching the model providers
+
+**Settings → Draft generation** picks who writes the copy and who draws the
+pictures. Both default to MiniMax; OpenAI is configured and selectable. Each
+provider carries its own model, endpoint, cost and API key, so switching is one
+dropdown and switching back loses nothing.
+
+Keys are entered in the panel and stored **encrypted** — the field is
+write-only, showing a last-four fingerprint rather than the key, and nothing
+sends one back to the browser. If a provider's key is missing the save is
+refused, naming the environment variable that would also fix it
+(`MINIMAX_API_KEY`, `OPENAI_API_KEY`). Those variables remain a permanent
+fallback, read whenever nothing is stored.
+
+Two things are worth knowing before you switch the image provider:
+
+- **Set the cost.** It is stamped on every image and totalled per API key on the
+  Settings page, and that total is the only control on agent image generation,
+  which is deliberately uncapped. The seeded OpenAI figure is a high placeholder
+  on purpose — a low one would under-report spend silently. Replace it with the
+  real price for the quality tier you settle on.
+- **Photos are the bill, not covers.** Covers run ~8 a day; photos run ~166. At
+  present that is dormant because `image_topup_enabled` ships off, so photos are
+  only generated when you press Generate. Turning it on at a premium provider's
+  rates is a budget decision worth making deliberately.
+
+OpenAI has no 4:3 size, so its adapter requests 1536×1024 and crops to
+1365×1024. That is not cosmetic: Craigslist's own display variant is 1200×900,
+and an image at any other ratio gets cropped by the site instead — which on a
+cover takes the composited phone number with it.
+
+The encryption key is derived from `JWT_SECRET`. Rotating it makes the stored
+provider keys unreadable; the dashboard keeps working and generation falls back
+to the environment variables, and re-entering the keys is the whole fix. See
+[DESIGN_PROVIDERS.md](DESIGN_PROVIDERS.md) for that and the rest of the
+reasoning, including why Gemini ("nano banana") has a seam but no adapter yet.
+
+---
+
 ## Letting an AI read the system
 
 **Settings → API keys** issues a key for the `/agent` API — a read-only view of

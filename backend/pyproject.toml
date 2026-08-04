@@ -11,6 +11,11 @@ dependencies = [
     "psycopg[binary,pool]>=3.2.0",
     "argon2-cffi>=23.1.0",
     "python-jose[cryptography]>=3.3.0",
+    # Fernet, for the one secret in this system that has to be read back: the
+    # outbound model-provider API keys. Everything else is an argon2 hash.
+    # Declared directly rather than leaned on via python-jose's extra, so a
+    # future jose bump cannot quietly take decryption with it.
+    "cryptography>=42.0.0",
     "python-multipart>=0.0.12",
     "slowapi>=0.1.9",
     "alembic>=1.14.0",

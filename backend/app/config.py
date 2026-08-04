@@ -32,9 +32,17 @@ class Settings(BaseSettings):
     ingest_bearer_token: str = Field(min_length=16)
 
     # --- Draft generation ---
-    # Optional. Without it, generation still runs but every draft falls back to
-    # the workbook copy in seed_ads, so the queue keeps filling either way.
+    # Provider keys are normally stored (encrypted) in generation_settings and
+    # edited in the dashboard. These are the break-glass fallback, read only
+    # when nothing is stored or when a stored key will not decrypt — which is
+    # the recovery path if JWT_SECRET is ever rotated, since that is what the
+    # provider keys are encrypted with. See DESIGN_PROVIDERS.md decision 7.
+    #
+    # Without any key, generation still runs but every draft falls back to the
+    # workbook copy in seed_ads, so the queue keeps filling either way.
     minimax_api_key: str = ""
+    openai_api_key: str = ""
+    gemini_api_key: str = ""
     # How often the background top-up checks queue depth. 0 disables the loop
     # (useful if you would rather drive generation from host cron).
     generation_interval_minutes: int = 30

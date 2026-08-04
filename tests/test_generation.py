@@ -68,7 +68,7 @@ ok.append("Monroe seeds excluded from generation (not routable)")
 
 # --- 4. AI path records itself distinctly ----------------------------------
 real_call = generator.call_model
-generator.call_model = lambda s, seed, angle: (
+generator.call_model = lambda c, s, seed, angle: (
     f"Metal Roofing and Repair in {seed['city']} - Free Estimate",
     f"Hi neighbours in {seed['city']}.\n\nWe reroof.\n\nWe repair.\n\n"
     f"Licensed and insured.\n\nCall {seed['phone_number']}.",
