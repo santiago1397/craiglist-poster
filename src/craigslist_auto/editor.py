@@ -484,6 +484,43 @@ def _count(page: Page, key: str) -> int:
     return n
 
 
+def _copy_rejection(page: Page) -> str | None:
+    """Why Craigslist redisplayed the copy form, or None if we left it.
+
+    `submit_copy` clicked save and the flow assumed it landed. Craigslist
+    answers a rejected *edit* form exactly the way it answers a rejected
+    *posting* form — HTTP 200, the same page back, errors inline — so the click
+    looks identical whether it saved or not, and `page.wait_for_load_state`
+    is satisfied either way.
+
+    It did not save on 2026-08-05: five fields filled, `submit_copy` green,
+    `applied` reported, and a live posting whose `content_hash` never moved. The
+    image replace that followed worked perfectly, which is precisely what made
+    it read as a working edit — the gallery changed, so nobody doubted the copy.
+
+    Structural, not textual: the body textarea only exists on the copy page, so
+    finding it means the submission did not advance. The error strings are for
+    the operator; their absence is not evidence of success.
+    """
+    try:
+        if not _count(page, "edit_body"):
+            return None
+    except Exception:  # navigating out from under us — that is the good case
+        return None
+    messages: list[str] = []
+    errors = page.locator("div.error-list, span.err")
+    for i in range(min(errors.count(), 6)):
+        try:
+            text = (errors.nth(i).inner_text() or "").strip()
+        except Exception:  # detached mid-read; not worth failing over
+            continue
+        if text:
+            messages.append(" ".join(text.split()))
+    return " | ".join(dict.fromkeys(messages))[:400] or (
+        "the copy form was redisplayed with no visible reason"
+    )
+
+
 def _goto_image_step(page: Page, hub_url: str) -> bool:
     """Open the gallery sub-page. True only if we actually arrived.
 
@@ -1237,6 +1274,27 @@ def reconcile_post(
                 save.first.click()
                 page.wait_for_load_state("domcontentloaded")
                 sleep_jitter(1.2)
+                # Did that save actually take? Everything below assumes the copy
+                # is committed to Craigslist's draft, and a rejected form looks
+                # exactly like an accepted one until the gallery lands and the
+                # attempt reports `applied` over text that never changed.
+                #
+                # mutated=False is the honest signal: a form that was refused
+                # committed nothing, the live posting still reads as it did, and
+                # the images below have not been touched yet — so this requeues
+                # instead of parking, and no gallery is torn down for an edit
+                # that got no further than its first page.
+                rejected = _copy_rejection(page)
+                if rejected is not None:
+                    artifact_ids.extend(artifacts.capture_page(
+                        page, flow="edit_reconcile", label="copy_rejected",
+                        post_id=post_id, account=account.name,
+                    ))
+                    raise EditFailure(
+                        "submit_copy",
+                        f"Craigslist did not accept the copy edit: {rejected}",
+                        mutated=False,
+                    )
 
             final_images = len(live_images)
             # `images_differ`, not `manage_images`. Taking control of a gallery
