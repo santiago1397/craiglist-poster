@@ -53,6 +53,20 @@ class PostRun:
         self.warnings.append(message[:300])
 
 
+# Geoverify's region disambiguation, shown when the ZIP geocodes outside the
+# region we post from. Both buttons carry `class="continue"`, so to a selector
+# they are indistinguishable from a continue button — and to a human they are a
+# business decision. Named here so `_continue` can refuse them and
+# `_answer_region_prompt` can own the choice.
+REGION_KEEP = "button[name='keep_old_area']"
+REGION_CHANGE = "button[name='area_change_ok']"
+REGION_KEEP_VISIBLE = f"{REGION_KEEP}:visible"
+REGION_PROMPT = f"{REGION_KEEP_VISIBLE}, {REGION_CHANGE}:visible"
+# Appended to the generic continue selectors so `.first` can never answer the
+# region question by DOM order — which picks "move the ad to the other region".
+NOT_REGION = ":not([name='keep_old_area']):not([name='area_change_ok'])"
+
+
 class PosterFailure(RuntimeError):
     """A post_ad failure that remembers which step it died on.
 
@@ -311,6 +325,17 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             # Again after the map step: geoverify can bounce us back to the
             # form, and the same silence applies.
             _assert_form_accepted(page)
+            # The region question is injected once the ZIP has geocoded, which
+            # can land either side of the click above — so ask after it, not
+            # before, and continue again once the answer has re-rendered the
+            # page with its real continue button back.
+            if _answer_region_prompt(page):
+                _assert_form_accepted(page)
+                _continue(page, optional=True)
+
+            step = "map_validation"
+            logger.debug(f"step: {step}")
+            _assert_left_map(page)
 
             step = "photo_upload"
             logger.info(f"[{account.name}] photo_upload: {len(ad.photos)} file(s) queued")
@@ -321,7 +346,16 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
                     f"  slot {idx + 1}: [{tag}] {photo.name}  ({size_kb:.0f} KB)  path={photo}"
                 )
             if ad.photos:
-                page.wait_for_selector("input[type='file']", timeout=30_000)
+                # `state="attached"`, not the default `visible`: Craigslist's
+                # uploader input is styled opacity-0 and absolutely positioned,
+                # and is driven with set_input_files rather than by clicking
+                # "Add Images" — which works on a hidden input and does not need
+                # it painted. editor.py has waited this way since it was written;
+                # this side had kept the default, one CSS change away from a
+                # 30-second timeout on an uploader that was there all along.
+                page.wait_for_selector(
+                    "input[type='file']", state="attached", timeout=30_000
+                )
                 file_input = page.locator("input[type='file']")
                 for i, photo in enumerate(ad.photos, 1):
                     is_cover = is_cover_path(photo)
@@ -706,10 +740,20 @@ def _continue(page: Page, optional: bool = False) -> None:
     """Click the 'continue' button. If optional and missing, skip."""
     # Try specific continue selectors first; some pages also have a disabled
     # secondary submit button (e.g. geoverify's "find").
+    #
+    # `:visible` is load-bearing. Geoverify ships `#regular_continue_button`
+    # with `style="display: none"` while it is waiting for the region question
+    # to be answered, and a hidden button still satisfies `:not([disabled])`.
+    # Clicking it submitted nothing, `optional=True` swallowed the miss, and the
+    # run went to photo_upload still standing on the map — where it spent 30s
+    # waiting for a file input that page has never had (craigs3, 2026-08-05).
+    #
+    # `NOT_REGION` is the other half: the region pickbuttons are `continue`-
+    # classed *answers*, not continues, and `.first` would answer by DOM order.
     candidates = [
-        "button.continue:not([disabled])",
-        "button[name='go'][value='continue']:not([disabled])",
-        "button[type='submit']:not([disabled])",
+        f"button.continue:visible{NOT_REGION}:not([disabled])",
+        "button[name='go'][value='continue']:visible:not([disabled])",
+        f"button[type='submit']:visible{NOT_REGION}:not([disabled])",
     ]
     btn = None
     for sel in candidates:
@@ -724,6 +768,78 @@ def _continue(page: Page, optional: bool = False) -> None:
     human_click(page, btn)
     page.wait_for_load_state("domcontentloaded")
     sleep_jitter(1.2)
+
+
+def _answer_region_prompt(page: Page) -> bool:
+    """Answer geoverify's "which region should this be searchable in?".
+
+    Craigslist asks whenever the ZIP geocodes outside the region the account
+    posts from: 33410 (Palm Beach Gardens) resolves to Treasure Coast while the
+    run is posting South Florida. Until it is answered the page **hides its
+    continue button**, so this is not a nicety — an unanswered prompt is a dead
+    run, and it killed craigs3's 08:47 slot on 2026-08-05.
+
+    We always keep the region we are posting from. Everything else about the run
+    is South Florida — `/c/mia`, category 83, the account, the other seventeen
+    queued drafts — and `area_change_ok` would move this one ad to a region
+    where none of that holds, in front of an audience outside the service area.
+    Craigslist's own default is the same: it offers to keep, and asks first.
+
+    Returns True if a prompt was there and answered.
+    """
+    # Visible only: the prompt's markup can outlive the question once it has
+    # been answered, and clicking a stale copy would resubmit the map step.
+    keep = page.locator(REGION_KEEP_VISIBLE).first
+    if not keep.count():
+        return False
+    # Not a `run.warn`: this is routine for a multi-city queue, and marking every
+    # such post `degraded` would bury the degradations that mean something. It is
+    # still worth a line, because a ZIP outside the posting region can equally
+    # mean the draft's ZIP is simply wrong.
+    logger.warning(
+        "geoverify asked which region this posting belongs to — keeping the "
+        "region we post from (check the draft's ZIP if this repeats)"
+    )
+    human_click(page, keep)
+    page.wait_for_load_state("domcontentloaded")
+    sleep_jitter(1.0)
+    return True
+
+
+def _assert_left_map(page: Page) -> None:
+    """Raise if the run is still on the map step when it should be uploading.
+
+    The map page has no file input and never will, so standing on it surfaced as
+    `photo_upload: Timeout 30000ms exceeded waiting for input[type='file']` —
+    which reads as a broken uploader and is not one. Worse, `photo_upload` is
+    asset-consuming, so the server parked the draft and retired its images for a
+    run that never showed Craigslist a single photo. Exactly the failure mode
+    `_assert_form_accepted` was written for, one page later.
+
+    Failing here keeps it pre-upload: the draft requeues, the images stay clean,
+    and the error names the page we are actually stuck on.
+
+    Deliberately narrow. A false positive here stops posting altogether, so the
+    generic arm also requires the uploader to be absent — if a file input is
+    reachable, this never fires no matter what else the page is holding.
+    """
+    if page.locator(REGION_PROMPT).count():
+        raise RuntimeError(
+            "still on the map step: Craigslist is asking which region this "
+            "posting should be searchable in, and the question went unanswered"
+        )
+    try:
+        stuck = (
+            page.locator("#leafletForm:visible").count()
+            and not page.locator("input[type='file']").count()
+        )
+    except Exception:  # navigating out from under us — that is the good case
+        return
+    if stuck:
+        raise RuntimeError(
+            f"still on the map step after continuing ({page.url}) — the photo "
+            f"uploader is not reachable from this page"
+        )
 
 
 def _assert_form_accepted(page: Page) -> None:

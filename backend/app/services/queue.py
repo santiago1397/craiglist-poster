@@ -912,6 +912,11 @@ PRE_UPLOAD_STEPS = frozenset({
     # to surface as a photo_upload timeout and cost 24 images per attempt.
     "form_validation",
     "map_confirm",
+    # The same trap as 'form_validation', one page later: an unanswered region
+    # question on the map step leaves the run somewhere with no photo uploader,
+    # which used to surface as a photo_upload timeout — parking the draft and
+    # retiring 24 images for a run that uploaded nothing.
+    "map_validation",
 })
 
 
