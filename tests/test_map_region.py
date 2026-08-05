@@ -149,6 +149,35 @@ check(
     "a map form that still has an uploader is left alone",
     stuck_on({"#leafletForm:visible": 1, "input[type='file']": 1}) is None,
 )
+
+# The far side of the same mistake. Answering the region prompt *is* the map
+# submission, so a second continue clicks through the uploader onto the
+# preview page — which also has no file input, and also died as a 30s
+# photo_upload timeout (craigs3, 09:54 on 2026-08-05). An ad that reached
+# publish from there would have gone out with no photos at all.
+err = stuck_on({"form#publish_top": 1})
+check("overshooting onto the preview page stops the run", err is not None)
+check("and the error says we went too far, not too little", "overshot" in err)
+check(
+    "the preview page is not mistaken for the map",
+    "map step" not in (err or ""),
+)
+check(
+    "a real images page is never called an overshoot",
+    stuck_on({"form#publish_top": 1, "input[type='file']": 1}) is None,
+)
+
+# `_still_on_map` is what decides whether that second continue happens at all.
+check("the map is recognised by its form", poster._still_on_map(FakePage({"#leafletForm:visible": 1})))
+check("and by an open region question", poster._still_on_map(FakePage({poster.REGION_PROMPT: 1})))
+check(
+    "the images step is not mistaken for the map",
+    not poster._still_on_map(FakePage({"input[type='file']": 1})),
+)
+check(
+    "the preview page is not mistaken for the map either",
+    not poster._still_on_map(FakePage({"form#publish_top": 1})),
+)
 check(
     "the image page passes untouched",
     stuck_on({"input[type='file']": 1}, url="https://post.craigslist.org/k/x/y?s=editimage") is None,
