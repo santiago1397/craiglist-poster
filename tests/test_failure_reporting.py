@@ -47,6 +47,7 @@ PRE_UPLOAD_STEPS = {
     "advance_to_type", "type_service_offered", "category_skilled_trade",
     "advance_to_form", "form_title", "form_zip", "form_city", "form_license",
     "form_phone", "form_body", "form_validation", "map_confirm",
+    "map_validation",
 }
 
 
