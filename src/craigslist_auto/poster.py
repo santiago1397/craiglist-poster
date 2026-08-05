@@ -327,11 +327,21 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             _assert_form_accepted(page)
             # The region question is injected once the ZIP has geocoded, which
             # can land either side of the click above — so ask after it, not
-            # before, and continue again once the answer has re-rendered the
-            # page with its real continue button back.
+            # before.
             if _answer_region_prompt(page):
                 _assert_form_accepted(page)
-                _continue(page, optional=True)
+                # Answering *is* the map submission: the pickbutton posts the
+                # form and Craigslist goes straight on to images. Continuing
+                # again unconditionally here clicked through the uploader onto
+                # the preview page, where photo_upload timed out on a page that
+                # has no file input either — the same symptom one step further
+                # along, observed on craigs3 at 09:54 on 2026-08-05.
+                #
+                # So only continue if the map is demonstrably still on screen.
+                # If it is not, the run is already where it needs to be, and
+                # _assert_left_map below is what proves it.
+                if _still_on_map(page):
+                    _continue(page, optional=True)
 
             step = "map_validation"
             logger.debug(f"step: {step}")
@@ -806,6 +816,18 @@ def _answer_region_prompt(page: Page) -> bool:
     return True
 
 
+def _still_on_map(page: Page) -> bool:
+    """Is geoverify still on screen? Structural, so it holds whether the map is
+    waiting on the region question or on a plain continue."""
+    try:
+        return bool(
+            page.locator(REGION_PROMPT).count()
+            or page.locator("#leafletForm:visible").count()
+        )
+    except Exception:  # mid-navigation — treat as gone, the assert re-checks
+        return False
+
+
 def _assert_left_map(page: Page) -> None:
     """Raise if the run is still on the map step when it should be uploading.
 
@@ -829,16 +851,27 @@ def _assert_left_map(page: Page) -> None:
             "posting should be searchable in, and the question went unanswered"
         )
     try:
-        stuck = (
-            page.locator("#leafletForm:visible").count()
-            and not page.locator("input[type='file']").count()
-        )
+        # Present on the images step and nowhere else in this flow, so it is the
+        # one signal that says "we are where photo_upload expects to be".
+        if page.locator("input[type='file']").count():
+            return
+        on_map = page.locator("#leafletForm:visible").count()
+        # The far side of the same mistake: one continue too many walks straight
+        # past the uploader onto the preview/publish page, which has no file
+        # input either — so it also died as a photo_upload timeout, 30s spent on
+        # a page whose problem is that we arrived too late, not too early.
+        overshot = page.locator("form#publish_top").count()
     except Exception:  # navigating out from under us — that is the good case
         return
-    if stuck:
+    if on_map:
         raise RuntimeError(
             f"still on the map step after continuing ({page.url}) — the photo "
             f"uploader is not reachable from this page"
+        )
+    if overshot:
+        raise RuntimeError(
+            f"overshot the images step onto the preview page ({page.url}) — "
+            f"one continue too many; the ad would publish with no photos"
         )
 
 
