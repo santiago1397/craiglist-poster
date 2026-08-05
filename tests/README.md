@@ -15,6 +15,7 @@ uv run python tests/test_browser_lease.py    # two flows can't share one Chrome 
 uv run python tests/test_edit_guards.py      # content hash, edit clamps, posting-slot guard
 uv run python tests/test_failure_reporting.py # every failure reaches the VPS debuggable
 uv run python tests/test_queue_retry.py      # reads retry, claims never do
+uv run python tests/test_map_region.py       # the map step cannot strand a run before the uploader
 PYTHONPATH=backend uv run python tests/test_agent_api.py  # agent auth boundaries + the caveats in every answer
 PYTHONPATH=backend uv run python tests/test_agent_tools.py # the CLI and MCP wrappers in tools/
 ```
@@ -47,6 +48,21 @@ on is classified pre- or post-upload, and a degraded post keeps
 `poster.py` and this test fails until you classify it** in
 `PRE_UPLOAD_STEPS` — which is the point, because an unclassified step parks a
 draft that did not need parking. See [DIAGNOSTICS.md](../DIAGNOSTICS.md).
+
+`test_map_region.py` covers the map step, which cost craigs3 two posting slots
+on 2026-08-05 and reported both as broken photo uploads. Craigslist asks which
+region a posting belongs to when the ZIP geocodes outside the one the account
+posts from, and hides its continue button until that is answered. Three
+properties, each of which alone would have saved a slot: **`_continue` cannot
+click a button the page is hiding** (a `display:none` button still satisfies
+`:not([disabled])`, so it clicked one that submitted nothing); **it cannot
+answer the region question by DOM order** — both pickbuttons carry
+`class="continue"` and the first is `area_change_ok`, which moves the ad to a
+region where the account, the category id and every other queued draft do not
+apply; and **the run cannot enter `photo_upload` from the map page or from one
+page past it**. The last is what keeps the failure above the line in
+[DIAGNOSTICS.md](../DIAGNOSTICS.md): stranded on the map, the draft parked and
+burned 24 images for a run that uploaded none.
 
 `test_queue_retry.py` covers the half of the retry policy that is easy to get
 wrong. Reads retry, because one dropped TCP connection used to end a whole
