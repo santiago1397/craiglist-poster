@@ -55,10 +55,27 @@ most useful fact, because the server routes the draft on it:
 build_ad → launch → warmup → login_check → open_post_form → dismiss_reuse_prompt
    → advance_to_type → type_service_offered → category_skilled_trade
    → advance_to_form → form_title → form_zip → form_city → form_license
-   → form_phone → form_body → map_confirm
+   → form_phone → form_body → form_validation → map_confirm → map_validation
    ─────────────────── nothing consumed above this line ───────────────────
    → photo_upload → preview → publish → billing → confirmation
 ```
+
+The two `*_validation` steps look like padding and are not. Craigslist answers a
+rejected form and an unadvanced map with HTTP 200 and the same page, so a run
+that went nowhere keeps walking and dies at whatever selector it looks for next
+— which is `photo_upload`, the first step *below* the line. Both failures
+therefore used to arrive as `Timeout 30000ms exceeded waiting for
+input[type='file']`: a message naming the uploader, which was never involved,
+while the draft parked and its images burned for a run that showed Craigslist
+nothing. Each check exists to fail early enough to stay above the line.
+
+`map_validation` covers both directions of the map step. Craigslist asks which
+region a posting belongs to when the ZIP geocodes outside the one the account
+posts from (33410 resolves to Treasure Coast; the accounts post South Florida),
+and it hides the continue button until that is answered — so the run stalls on
+the map. Answering it *is* the map submission, so continuing again afterwards
+overshoots onto the preview page instead. Stuck on the map and one page past it
+both mean "no uploader here", and `map_validation` names which.
 
 **Above the line**, no image ever reached Craigslist, so the draft goes straight
 back to the head of the queue. Nothing was lost; the next slot retries it.
@@ -199,7 +216,7 @@ dismiss them would hide something still true.
 | Step tracking, degradations, captures | `src/craigslist_auto/poster.py` — `PostRun` |
 | Event reporting, outbox | `src/craigslist_auto/reporter.py` |
 | Artifact capture and upload | `src/craigslist_auto/artifacts.py` |
-| Regression tests | `tests/test_failure_reporting.py` |
+| Regression tests | `tests/test_failure_reporting.py`, `tests/test_map_region.py` |
 
 Adding a new step to the poster? Add it to `PRE_UPLOAD_STEPS` in `queue.py` if
 it runs before `photo_upload`. `tests/test_failure_reporting.py` fails if you
