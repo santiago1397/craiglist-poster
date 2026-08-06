@@ -284,21 +284,21 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             if ad.phone_number:
                 step = "form_phone"
                 logger.debug(f"step: {step}")
-                # Check 'show_phone_ok' checkbox to enable phone fields
-                show_phone = page.locator("input[name='show_phone_ok']")
-                if show_phone.count() and not show_phone.is_checked():
-                    human_click(page, show_phone)
-                    sleep_jitter(0.4)
-                phone = page.locator("input[name='contact_phone']")
-                if phone.count():
-                    human_type(phone, ad.phone_number)
-                    sleep_jitter(0.3)
+                # Every checkbox first, the number last. Toggling one of these
+                # re-renders the contact block and wipes whatever is in
+                # contact_phone — see _ensure_contact_phone.
+                #
+                # show_phone_ok gates the other two (`data-depends-on`), so it
+                # has to be ticked before they exist to tick.
+                _tick_contact_box(page, "show_phone_ok")
                 # Enable both call and text by default
                 for cb_name in ("contact_phone_ok", "contact_text_ok"):
-                    cb = page.locator(f"input[name='{cb_name}']")
-                    if cb.count() and not cb.is_checked():
-                        human_click(page, cb)
-                        sleep_jitter(0.2)
+                    if not _tick_contact_box(page, cb_name):
+                        run.warn(
+                            f"{cb_name} never appeared on the form; the ad may "
+                            f"not accept calls or texts"
+                        )
+                _ensure_contact_phone(page, ad.phone_number, run=run)
 
             step = "form_body"
             logger.debug(f"step: {step}")
@@ -310,6 +310,24 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             body_el.fill(ad.body)
             # Brief "reading what I just pasted" pause
             sleep_jitter(1.5, 0.4)
+
+            if ad.phone_number:
+                # Last look before the form goes. The body fill and its pause
+                # sit between the number and the submission, and the whole
+                # point of this bug is that the field can empty itself without
+                # anyone touching it. Cheap when the value is already right: one
+                # read, no typing.
+                #
+                # Deliberately still `form_phone` rather than a step of its own:
+                # the server routes a failed draft on this string, and a name
+                # missing from its PRE_UPLOAD_STEPS would park the draft for a
+                # human on a run that uploaded nothing.
+                step = "form_phone"
+                _ensure_contact_phone(page, ad.phone_number, run=run)
+
+            # Back to the step that owns the submission. Same reason as above:
+            # 'form_body' is a name the server already routes as pre-upload.
+            step = "form_body"
             _continue(page)
 
             # Did that submission actually take? Everything below assumes we
@@ -744,6 +762,102 @@ def _click_radio_by_label_exact(page: Page, label_text: str) -> None:
             sleep_jitter(0.4)
             return
     raise RuntimeError(f"no radio label exactly matches {label_text!r}")
+
+
+def _tick_contact_box(page: Page, name: str, *, timeout_ms: int = 5_000) -> bool:
+    """Check one checkbox in the contact block. Returns whether it ended up on.
+
+    Waits for the box instead of sampling `count()` once. `contact_phone_ok` and
+    `contact_text_ok` carry `data-depends-on="show_phone_ok"`, so they can be a
+    beat behind the tick that reveals them. The old ordering got away with a bare
+    `count()` because it typed the phone number in between — seconds of
+    character-by-character typing, which was accidentally the wait. Ticking them
+    back to back removes that, and a `count()` of 0 would skip the box in silence
+    and post an ad nobody can ring.
+
+    `state="attached"` rather than `visible`: that is what the old `count()` test
+    accepted, and Craigslist styles some of these inputs behind their labels.
+    Clicking one that is attached but genuinely unclickable still fails, in
+    `human_click`, the same way it always did.
+    """
+    sel = f"input[name='{name}']"
+    try:
+        page.wait_for_selector(sel, state="attached", timeout=timeout_ms)
+    except Exception:
+        return False
+    cb = page.locator(sel)
+    if not cb.count():
+        return False
+    if not cb.first.is_checked():
+        human_click(page, cb.first)
+        sleep_jitter(0.3)
+    return True
+
+
+def _ensure_contact_phone(
+    page: Page, phone: str, *, run: PostRun | None = None, attempts: int = 3
+) -> None:
+    """Make `contact_phone` actually hold `phone` when the form is submitted.
+
+    Craigslist's json-form re-renders the contact block when a checkbox inside
+    it is toggled, and the re-render restores the block from form state —
+    discarding anything typed into `contact_phone` beforehand. The site then
+    rejects the submission with "If users can contact you by phone, please
+    include a contact phone number". That cost craigs4 a posting slot on
+    2026-08-05 and again on 2026-08-06, both times on draft 71, whose phone
+    number was present and well-formed the whole time.
+
+    Accounts with saved contact preferences never see it: their checkboxes
+    arrive already ticked, so nothing is toggled and nothing re-renders. It only
+    bites a freshly logged-in profile, which is why it survived months of
+    healthy runs and appeared the day after craigs4 was re-logged-in.
+
+    Two things follow, and the second is the one that matters. The caller ticks
+    the checkboxes *before* calling this, so the known re-render happens while
+    the field is still empty. And the value is read back rather than assumed,
+    because ordering only fixes the re-render we have already seen — a form that
+    clears the field for some other reason has to fail here, loudly, rather than
+    at `form_validation` after the whole form has been walked.
+
+    Raises rather than posting a phoneless ad: `form_phone` is a pre-upload step
+    (`PRE_UPLOAD_STEPS` server-side), so the draft returns to the queue with its
+    images untouched.
+    """
+    field = page.locator("input[name='contact_phone']")
+    if not field.count():
+        show_phone = page.locator("input[name='show_phone_ok']")
+        if show_phone.count() and show_phone.first.is_checked():
+            raise RuntimeError(
+                "show_phone_ok is checked but the form has no contact_phone "
+                "field; Craigslist would reject the submission"
+            )
+        # A form variant with no phone option at all. Not fatal — the number is
+        # in the body copy either way — but it changes what the ad looks like,
+        # so it must not pass silently.
+        if run is not None:
+            run.warn("no contact_phone field on the form; posted without a phone")
+        return
+
+    for attempt in range(attempts):
+        if (field.first.input_value() or "").strip() == phone:
+            return
+        if attempt == 0:
+            human_type(field.first, phone)
+        else:
+            # Deterministic retry. `human_type` appends rather than replaces,
+            # and by now the field may hold a partial value from a re-render
+            # that landed mid-type.
+            field.first.fill("")
+            field.first.fill(phone)
+        sleep_jitter(0.3)
+
+    got = (field.first.input_value() or "").strip()
+    if got == phone:
+        return
+    raise RuntimeError(
+        f"contact_phone would not hold {phone!r} after {attempts} attempt(s) "
+        f"(field reads {got!r}); Craigslist would reject the form"
+    )
 
 
 def _continue(page: Page, optional: bool = False) -> None:
