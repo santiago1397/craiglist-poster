@@ -476,7 +476,9 @@ def post_ad(account: Account, ad: Ad, *, headless: bool = False, dry_run: bool =
             page.wait_for_load_state("domcontentloaded", timeout=60_000)
             sleep_jitter(2.0)
 
-            run.url = _extract_post_url(page, run=run, expected_title=ad.title)
+            run.url = _extract_post_url(
+                page, run=run, expected_title=ad.title, account=account.name
+            )
             mark_photos_used(ad.photos)
             mark_content_used(ad)
             logger.success(f"[{account.name}] published: {run.url}")
@@ -1187,6 +1189,32 @@ def _handle_billing(page: Page, account_name: str, max_steps: int = 4) -> None:
         raise RuntimeError("billing flow exceeded max_steps without completing")
 
 
+def _capture_unverified(
+    page: Page, *, account: str | None, label: str, run: PostRun | None
+) -> None:
+    """Photograph a page that claims a post published without proving it.
+
+    Artifacts used to be captured on exceptions only, so the one outcome nobody
+    can explain afterwards — "published, but we could not find the ad" — was the
+    single outcome with no picture attached. Both craigs1 runs that ended this
+    way on 2026-08-05 and 2026-08-06 reported `artifact_ids = []`, and answering
+    "was that ad ever live?" then took a database archaeology session and a
+    `scan-ended` two days later. The answer was no.
+
+    Wrapped in its own try even though `capture_page` is documented not to
+    raise: this runs on the *success* path, and evidence collection must never
+    be the reason a published ad gets reported as a failure.
+    """
+    if account is None or run is None:
+        return
+    try:
+        run.artifact_ids.extend(
+            artifacts.capture_page(page, flow="post", label=label, account=account)
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning(f"could not capture the unverified page: {e}")
+
+
 def _slug_words(text: str) -> list[str]:
     """Words from a title long enough to be distinctive in a URL slug."""
     import re
@@ -1209,7 +1237,23 @@ def _url_matches_title(href: str, title: str) -> bool:
 
 
 def _normalise_title(text: str | None) -> str:
-    return " ".join((text or "").lower().split())
+    """Lowercase alphanumeric words only, for comparing two renderings of a title.
+
+    Emoji and punctuation are dropped rather than preserved. The comparison in
+    `_pick_posting_row` is a prefix one, so a title that differs only in its
+    *first* character fails it completely — and a leading emoji is exactly that
+    case. craigs1 published "🏠 Roofer in Hialeah …" on 2026-08-06, and if
+    Craigslist's postings table had rendered that title without the emoji,
+    neither string would have prefixed the other.
+
+    Dropping punctuation costs nothing here: it is uninformative for identifying
+    a listing, and the generator emits `&`, `%`, `|` and `->` freely, any of
+    which Craigslist is free to escape differently in a table cell than in the
+    form that accepted it.
+    """
+    import re
+
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
 
 
 def _pick_posting_row(
@@ -1320,7 +1364,11 @@ def _resolve_via_my_postings(
 
 
 def _extract_post_url(
-    page: Page, *, run: PostRun | None = None, expected_title: str | None = None
+    page: Page,
+    *,
+    run: PostRun | None = None,
+    expected_title: str | None = None,
+    account: str | None = None,
 ) -> str | None:
     # 1. Best case: the confirmation page links straight to the live post.
     #
@@ -1381,6 +1429,17 @@ def _extract_post_url(
     except Exception as e:
         logger.warning(f"  PostingID extraction failed: {e}")
 
+    # No link to the ad and no receipt id. Every healthy run has one or the
+    # other — a free posting returns on its /d/ link above, a paid one lands on
+    # a receipt carrying a PostingID — so this is the signature of a publish
+    # that did not complete, and the page in front of us is the only record of
+    # why. Photograph it now: resolving by title navigates away, and after that
+    # the evidence is gone for good.
+    if post_id is None and not candidates:
+        _capture_unverified(
+            page, account=account, label="confirmation_unverified", run=run
+        )
+
     # With no id we can still find the posting by title — every row on that
     # page is ours, and the newest matching one is the ad just published.
     href = _resolve_via_my_postings(
@@ -1407,12 +1466,24 @@ def _extract_post_url(
     # 3. Last resort — the receipt URL. It is session-bound and 404s once the
     # session ends, so the post is recorded under a URL that will not resolve
     # later, and carries no id. Worth flagging loudly.
+    #
+    # Photograph the postings page too. This is the moment we searched our own
+    # account for the ad and did not find it, so what that table contained is
+    # the evidence for whether the ad exists at all — and the pair of artifacts
+    # (confirmation page above, this one here) is what turns the next
+    # occurrence into a two-minute answer instead of a two-day one.
+    _capture_unverified(
+        page, account=account, label="postings_page_no_match", run=run
+    )
     if run is not None:
         run.warn(
             "no /d/ link and no PostingID on the confirmation page, and the "
             "posting was not found on the account's postings page — recorded "
             "the raw page URL, which is probably session-bound and will 404. "
-            "This post may be unreachable from the dashboard."
+            "Craigslist may never have published this ad at all: the two runs "
+            "that ended this way on 2026-08-05 and 2026-08-06 left no trace in "
+            "the account's active, inactive or deleted tabs. Check the account "
+            "before assuming this ad is live."
         )
     else:
         logger.warning("  no /d/ link and no PostingID found; falling back to page.url")
